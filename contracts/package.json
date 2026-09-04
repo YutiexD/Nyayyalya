@@ -1,0 +1,26 @@
+{
+  "name": "lexx-contracts",
+  "version": "2.0.0",
+  "private": true,
+  "description": "LEXX 2.0 anchoring contract — Merkle roots only, deployed to Monad Testnet (chain id 10143)",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "clean": "hardhat clean",
+    "deploy:monadTestnet": "hardhat run scripts/deploy.js --network monadTestnet",
+    "verify:monadTestnet": "hardhat verify --network monadTestnet"
+  },
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^5.0.0",
+    "dotenv": "^16.4.7",
+    "hardhat": "^2.22.19"
+  },
+  "dependencies": {
+    "@openzeppelin/contracts": "^5.2.0",
+    "lexx": "file:.."
+  }
+}

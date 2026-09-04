@@ -1,0 +1,20 @@
+{
+  "name": "lexx-frontend",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "description": "LEXX 2.0 web client — vanilla JS, Vite multi-page, no framework and no CDN dependencies.",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test:crypto": "node lib/crypto.test.mjs"
+  },
+  "devDependencies": {
+    "vite": "^5.4.11"
+  },
+  "dependencies": {
+    "lexx": "file:..",
+    "qrcode": "^1.5.4"
+  }
+}
