@@ -83,7 +83,8 @@ Verified end-to-end against a live system, not only in tests: the full 17-stage 
 | Hardhat config + deploy script with chain-id guard | **DONE** |
 | **Monad Testnet** (10143) everywhere | **DONE** — enforced by `npm run verify:no-stale-sepolia` |
 | Backend ↔ contract Merkle agreement | **DONE** — cross-checked on-chain at 9 tree sizes |
-| Deployed contract address | **NOT DEPLOYED** — needs a funded testnet key |
+| Deployed contract address | **DEPLOYED** — `0x835611e0d85D130d313EfC0F80F69DaAFfc5Aaa8` on Monad Testnet, block 59571226. Verified live on chain (bytecode present, deploy tx `status=1`). |
+| Live anchoring | **NOT ACTIVE** — `ANCHOR_ENABLED=false`, so the batcher runs in `DRY_RUN`: roots are computed, stored and locally verifiable, but no transaction is submitted to the deployed contract |
 
 ### 2.5 Frontend (spec §9)
 

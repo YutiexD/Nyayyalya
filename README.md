@@ -199,6 +199,7 @@ The backend's Merkle implementation is cross-checked against the deployed contra
 | [docs/SECURITY_FINDINGS.md](docs/SECURITY_FINDINGS.md) | Every vulnerability found, its fix, and its regression test |
 | [docs/AGENT_DECISIONS.md](docs/AGENT_DECISIONS.md) | 19 ADRs — every deviation from the design spec, with reasoning |
 | [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) | Honest assessment: what is solid, what is MVP, what blocks production |
+| [docs/PRODUCTION_ROADMAP.md](docs/PRODUCTION_ROADMAP.md) | The phased plan to close those gaps for a SIH showcase, incl. the RAG deepfake-triage pipeline |
 | [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) | Feature-by-feature status against the specification |
 | [docs/ENGINEERING_PLAN.md](docs/ENGINEERING_PLAN.md) | The phase plan and its test gates |
 

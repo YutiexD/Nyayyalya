@@ -201,7 +201,8 @@ Integration tests run against **real directory services as child processes** and
 | RPC | `https://testnet-rpc.monad.xyz` |
 | Explorer | `https://testnet.monadexplorer.com` |
 | Contract | `LexxAnchor.sol`, Solidity 0.8.24, OpenZeppelin AccessControl |
-| Deployed address | **None yet** — deploy with `npm run contracts:deploy` and set `ANCHOR_CONTRACT_ADDRESS` |
+| Deployed address | `0x835611e0d85D130d313EfC0F80F69DaAFfc5Aaa8` — deployed to Monad Testnet, block 59571226, verified live on chain |
+| Live anchoring | **Not active.** `ANCHOR_ENABLED=false`, so the batcher runs in `DRY_RUN`: Merkle roots are computed, stored and locally verifiable, but nothing is submitted to the deployed contract. Turning it on requires a funded signer key. |
 
 **On chain:** batch id, Merkle root, `fromSeq`, `toSeq`, timestamp, anchoring address.
 **Never on chain:** evidence, file contents, hashes of PII, names, case identifiers, AI triage.
