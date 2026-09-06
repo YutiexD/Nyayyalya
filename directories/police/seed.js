@@ -187,22 +187,6 @@ const FIRS = [
     isVictimProtected: true,
     sensitivityClass: 'POCSO',
   },
-   {
-    firNumber: '0124/2026',
-    firDate: D('2026-01-20'),
-    stationCode: 'UP-GZB-KVN',
-    districtCode: 'UP-GZB',
-    stateCode: 'UP',
-    // Max punishment 20 years → Sessions. POCSO → SPECIAL with a POCSO designation.
-    // Together these are what the jurisdiction router reads.
-    bnsSections: ['65(2)', '3(5)'],
-    maxPunishmentYears: 20,
-    complainantName: 'Smt. Kamla Devi',
-    accusedNames: ['Ramesh Singh'],
-    ioPisId: 'UP-GZB-4471',
-    isVictimProtected: true,
-    sensitivityClass: 'ROUTINE',
-  },
 ];
 
 /**
