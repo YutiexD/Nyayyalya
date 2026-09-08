@@ -521,6 +521,20 @@ Path param: the full payload `LEXX:v1:<itemCode>:<base64url HMAC>`, ≤512 chars
 
 **Errors:** `INVALID_OR_FORGED_TAG` 400 (`details.reason` ∈ `MALFORMED_PAYLOAD`, `NOT_A_LEXX_TAG`, `UNSUPPORTED_TAG_VERSION`, `INVALID_OR_FORGED_TAG`; also writes a DENY audit row) · `RESOURCE_NOT_FOUND` 404 · `CUSTODIAN_SCOPE` / other denials 403.
 
+### `GET /api/custody/items`
+
+**Guard:** `authorizeCollection(CUSTODY_ITEM)` — the resolver's scope filter, intersected with the query, never replaced.
+
+The custody register. Every other custody route addresses one item, by id or by scanning its label, so before this there was no way to answer "what am I holding?" — `/gaps` was the only listing and it returns only the chains with findings.
+
+Query: `caseId?` (24-hex), `status?` (a `CUSTODY_STATUS`), `limit?` (default 100, max 200).
+
+**200** `{ "items": [ …itemView… ], "total": 2 }`
+
+**Scope, per role:** malkhana custodian and SHO see their station; District SP their district; the IO sees items on **their own cases** (not merely their station — see the note below); counsel and FSL examiners hold no custody scope and receive an empty list.
+
+> An earlier `scopeFilterFor(IO, CUSTODY_ITEM)` returned `{ ioUserId, stationCode }`. `custody_items` has no `ioUserId` path — only a case does — and because `shared/mongo.js` sets `strictQuery: true`, Mongoose **silently dropped** the unknown condition rather than erroring. The remaining filter was `{ stationCode }`, so an investigating officer saw every custody item at their station, including items booked on another officer's investigation. The IO now resolves through `__caseScope`, which `materialiseScopeFilter` turns into the case ids they are actually on.
+
 ### `GET /api/custody/gaps`
 
 **Guard:** `authorizeCollection(CUSTODY_ITEM)` — any active session; the scope filter (for `CUSTODY_ITEM`) decides the result.

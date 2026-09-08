@@ -350,7 +350,7 @@ function renderCustody(root) {
                         el('li', [
                           el('code', f.code ?? f.type ?? 'FINDING'),
                           f.detail || f.message ? ` — ${f.detail ?? f.message}` : '',
-                          f.seq !== undefined && f.seq !== null ? ` (ledger seq ${f.seq})` : '',
+                          f.ledgerSeq !== undefined && f.ledgerSeq !== null ? ` (ledger seq ${f.ledgerSeq})` : '',
                         ])
                       )
                     )
@@ -406,7 +406,7 @@ function renderCustody(root) {
             (analysis.findings ?? []).map((f) =>
               notice(
                 `${f.code ?? f.type ?? 'FINDING'}${f.detail || f.message ? ` — ${f.detail ?? f.message}` : ''}${
-                  f.seq !== undefined && f.seq !== null ? ` (ledger seq ${f.seq})` : ''
+                  f.ledgerSeq !== undefined && f.ledgerSeq !== null ? ` (ledger seq ${f.ledgerSeq})` : ''
                 }`,
                 'bad'
               )
@@ -463,10 +463,10 @@ function renderCustody(root) {
                 ['Permitted next states', (result.nextStates ?? []).map(humanise).join(', ') || 'none'],
                 ['Actions open to you', (result.allowedActions ?? []).join(', ') || 'none'],
               ]),
-              result.item?._id
+              result.item?.id
                 ? el(
                     'button.btn.btn--secondary.btn--small',
-                    { type: 'button', onClick: () => loadChain(result.item._id) },
+                    { type: 'button', onClick: () => loadChain(result.item.id) },
                     'Show the chain'
                   )
                 : null,

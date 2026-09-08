@@ -38,7 +38,19 @@ if (env.NODE_ENV === 'production') {
 }
 
 console.log('[reset] This will DELETE:');
-console.log(`[reset]   database : ${env.MONGO_DB_CORE} at ${env.MONGO_URI}`);
+// Never print the connection string with its password in it — this runs on a
+// projector during rehearsals. Show the host, which is what the operator needs
+// to confirm they are about to drop the right database.
+const safeUri = (uri) => {
+  try {
+    const u = new URL(uri);
+    if (u.password) u.password = '****';
+    return u.toString();
+  } catch {
+    return String(uri).replace(/\/\/[^/@]*@/, '//****@');
+  }
+};
+console.log(`[reset]   database : ${env.MONGO_DB_CORE} at ${safeUri(env.MONGO_URI)}`);
 console.log(`[reset]   vault    : ${env.STORAGE_DIR}`);
 if (resetDirectories) console.log('[reset]   directories: dir_police, dir_court, dir_legal (reseeded)');
 
@@ -59,6 +71,35 @@ await mongoose.connect(env.MONGO_URI, {
 });
 await mongoose.connection.dropDatabase();
 console.log(`[reset] dropped database ${env.MONGO_DB_CORE}`);
+
+// Rebuild every declared index before disconnecting.
+//
+// dropDatabase() takes the indexes with it, and the API server — which is the only
+// thing that ever called syncIndexes(), at its own boot — is STILL RUNNING. Nothing
+// would recreate them until someone restarted it, and the documented procedure
+// (docs/DEMO_SCRIPT.md) never says to. Every rehearsal therefore left the system with
+// nothing but `_id_` on all 16 collections.
+//
+// That is not merely a performance problem. These indexes are load-bearing:
+//   - the unique index on `ledger.seq` is the database-level backstop for the
+//     append-only guarantee, and `anchor_batches` uniqueness is what stops a range
+//     being anchored twice;
+//   - the text indexes on cases and evidence are what `GET /api/search` runs on —
+//     without them every search returns SEARCH_UNAVAILABLE;
+//   - the TTL indexes on otp_challenges, refresh_tokens and stream_tokens are what
+//     expire credentials, so without them nothing is ever reaped.
+//
+// backend/server.js says it plainly: "A process that accepts requests before its
+// indexes exist would silently lose the unique constraints that the ledger's
+// integrity depends on." Reset was putting the running process into exactly that state.
+const { allModels } = await import('../backend/models/index.js');
+let built = 0;
+for (const model of allModels) {
+  await model.createIndexes();
+  built += 1;
+}
+console.log(`[reset] rebuilt indexes on ${built} collections`);
+
 await mongoose.disconnect();
 
 // ---- vault --------------------------------------------------------------------

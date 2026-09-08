@@ -264,3 +264,99 @@ describe('ledger immutability guards (defence in depth)', () => {
     expect((await verifyChain()).intact).toBe(true);
   });
 });
+
+// ================================ the counter running ahead of the chain ==
+
+/**
+ * REGRESSION — one failed insert wedged the ledger permanently.
+ *
+ * `Counter.next()` advances before `Ledger.create()` runs. If that create threw for
+ * any reason OTHER than a duplicate key — a validation error, a connection dropped
+ * mid-insert — the sequence number was consumed and never written, leaving a hole.
+ *
+ * From then on every append allocated the next number, looked for its predecessor,
+ * did not find it, and retried; and because the allocation is INSIDE the retry loop,
+ * each of the five attempts burned another number, widening the hole it was failing
+ * on. Every append after the first failure raised LEDGER_APPEND_FAILED, forever.
+ *
+ * Every write path in the system appends to the ledger, so that is not a degraded
+ * ledger — it is a system that has stopped accepting evidence, custody transfers,
+ * FSL reports and disclosure, from one transient database error.
+ *
+ * The fix reconciles against the real tail: the chain, not the counter, is the
+ * authority on what has actually been written.
+ */
+describe('the ledger heals when the counter runs ahead of the chain', () => {
+  /** Consume sequence numbers without writing them — exactly what a failed insert does. */
+  const burn = async (n) => {
+    for (let i = 0; i < n; i += 1) await Counter.next('ledger.seq');
+  };
+
+  it('appends successfully after a sequence number was burned', async () => {
+    await append(1);
+    await append(2);
+
+    await burn(1); // seq 3 allocated, never written
+
+    const doc = await append(3);
+    expect(doc.seq).toBe(3);
+    expect((await verifyChain()).intact).toBe(true);
+  });
+
+  it('survives a whole run of burned numbers', async () => {
+    await append(1);
+    await burn(7);
+
+    const doc = await append(2);
+    expect(doc.seq).toBe(2);
+    expect(await Ledger.countDocuments()).toBe(2);
+    expect((await verifyChain()).intact).toBe(true);
+  });
+
+  it('keeps the chain contiguous and verifiable after healing', async () => {
+    for (let i = 1; i <= 3; i += 1) await append(i);
+    await burn(4);
+    for (let i = 4; i <= 8; i += 1) await append(i);
+
+    const seqs = (await Ledger.find({}, { seq: 1 }).sort({ seq: 1 }).lean()).map((e) => e.seq);
+    expect(seqs).toEqual([1, 2, 3, 4, 5, 6, 7, 8]);
+
+    const result = await verifyChain();
+    expect(result.intact).toBe(true);
+    expect(result.checked).toBe(8);
+  });
+
+  it('leaves the counter consistent with the chain afterwards', async () => {
+    await append(1);
+    await burn(5);
+    await append(2);
+    expect(await Counter.peek('ledger.seq')).toBe(2);
+  });
+
+  it('burns nothing on the happy path — the healing branch stays out of the way', async () => {
+    for (let i = 1; i <= 5; i += 1) await append(i);
+    expect(await Counter.peek('ledger.seq')).toBe(5);
+    expect(await Ledger.countDocuments()).toBe(5);
+  });
+});
+
+describe('Counter.reset only ever winds a counter DOWN', () => {
+  it('lowers a counter to an observed value', async () => {
+    await Counter.next('probe');
+    await Counter.next('probe');
+    await Counter.next('probe');
+    expect(await Counter.reset('probe', 1)).toBe(1);
+    expect(await Counter.peek('probe')).toBe(1);
+  });
+
+  it('REFUSES to raise a counter — that would re-issue numbers already in use', async () => {
+    await Counter.next('probe');
+    expect(await Counter.reset('probe', 99)).toBeNull();
+    expect(await Counter.peek('probe')).toBe(1);
+  });
+
+  it('rejects a negative or non-integer value', async () => {
+    await expect(Counter.reset('probe', -1)).rejects.toThrow(TypeError);
+    await expect(Counter.reset('probe', 1.5)).rejects.toThrow(TypeError);
+  });
+});

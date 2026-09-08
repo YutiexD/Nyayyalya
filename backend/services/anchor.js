@@ -332,15 +332,27 @@ let timer = null;
 /** Start the periodic batcher. Idempotent — calling twice does not double-schedule. */
 export function startAnchorScheduler() {
   if (timer) return timer;
-  if (!env.ANCHOR_ENABLED) {
-    log.info('anchor scheduler disabled (ANCHOR_ENABLED=false)');
+  // ANCHOR_BATCHING_ENABLED, not ANCHOR_ENABLED. Batching computes and stores the
+  // Merkle root; ANCHOR_ENABLED only decides whether it is also SUBMITTED. Gating the
+  // scheduler on the submission flag meant that with no funded key — the default, and
+  // the shipped configuration — nothing was ever batched at all, so the entire
+  // anchoring feature was inert while the documentation described it running.
+  if (!env.ANCHOR_BATCHING_ENABLED) {
+    log.info('anchor scheduler disabled (ANCHOR_BATCHING_ENABLED=false)');
     return null;
   }
 
   log.info(
     { intervalMs: env.ANCHOR_INTERVAL_MS, network: ANCHOR_NETWORK, canSubmit: anchorCanSubmit },
-    'anchor scheduler started'
+    anchorCanSubmit
+      ? 'anchor scheduler started — roots will be submitted on chain'
+      : 'anchor scheduler started in DRY_RUN — roots computed and stored, nothing submitted'
   );
+
+  // Run one cycle immediately rather than making the first root wait a full interval.
+  // Five minutes of "No batch has been anchored yet" is the whole anchoring story
+  // missing from the first five minutes of any demo or any fresh boot.
+  runAnchorCycle().catch((err) => log.error({ err: err.message }, 'initial anchor cycle failed'));
 
   timer = setInterval(() => {
     runAnchorCycle().catch((err) => log.error({ err: err.message }, 'anchor cycle failed'));

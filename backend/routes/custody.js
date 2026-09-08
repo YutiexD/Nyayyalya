@@ -31,6 +31,15 @@ router.get(
   custody.scanItem
 );
 
+/**
+ * The custody register. Same collection guard as /gaps: the resolver hands down a
+ * scope filter and the controller intersects it.
+ *
+ * Declared BEFORE '/items/:id/...' is irrelevant here (different depth), but it must
+ * come after '/scan/:qrToken' for readability only — Express matches on the full path.
+ */
+router.get('/items', authorizeCollection(RESOURCE_TYPE.CUSTODY_ITEM), custody.listItems);
+
 // Gap detection is a supervisory read, so it is scoped by the collection filter
 // (SHO: their station; District SP: their district) rather than by a role list here.
 router.get('/gaps', authorizeCollection(RESOURCE_TYPE.CUSTODY_ITEM), custody.listGaps);

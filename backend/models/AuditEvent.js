@@ -45,6 +45,10 @@ const AuditEventSchema = new Schema(
 AuditEventSchema.index({ caseId: 1, decision: 1, at: -1 });
 AuditEventSchema.index({ decision: 1, at: -1 });
 AuditEventSchema.index({ userId: 1, at: -1 });
+// The security feed is `find({ action: 'LOGIN' }).sort({ at: -1 })`, and the audit
+// list filters on `action` too. Neither had an index, so both scanned the
+// highest-write collection in the system — the one that grows on every request.
+AuditEventSchema.index({ action: 1, at: -1 });
 
 /** Audit rows are evidence about the system itself: never editable, never deletable. */
 const refuse = function refuseMutation(next) {

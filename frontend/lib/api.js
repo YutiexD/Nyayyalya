@@ -306,6 +306,15 @@ export const api = {
     login: (payload) => request('/api/auth/login', { method: 'POST', json: payload, auth: false }),
     me: () => get('/api/auth/me'),
     logout: () => post('/api/auth/logout', {}),
+    /**
+     * Register THIS browser's signing key against the account.
+     *
+     * Needed whenever the key held here is not the one the server has on record —
+     * a new machine, a cleared browser, or a demo account activated elsewhere.
+     * Until it is called, every upload from this browser is refused with
+     * SIGNATURE_INVALID, because the server verifies against the registered key.
+     */
+    rotateKey: (payload) => post('/api/auth/rotate-key', payload),
   },
 
   cases: {

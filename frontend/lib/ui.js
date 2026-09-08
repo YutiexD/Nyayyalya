@@ -122,8 +122,38 @@ export const hash = (value, label) =>
 export const shortHash = (value, keep = 12) =>
   !value ? '—' : `${value.slice(0, keep)}…${value.slice(-6)}`;
 
+/**
+ * Acronyms that must survive humanise() intact.
+ *
+ * The naive "lowercase everything, capitalise the first letter" produced `Pocso`,
+ * `At fsl`, `Referred to fsl`, `District sp` and `Io` — on the case table, the ledger
+ * timeline, the custody status and the referral discipline, which is to say on almost
+ * every screen. POCSO and FSL are not words; an Indian audience reads `Pocso` as a
+ * typo, and on a projector it is the first thing the eye lands on.
+ */
+const ACRONYMS = new Set([
+  'AI', 'BNS', 'BNSS', 'CCTV', 'CCTNS', 'CNR', 'DNA', 'FIR', 'FSL', 'GPS', 'HDD',
+  'ID', 'IMEI', 'IO', 'IP', 'IT', 'MMS', 'OTP', 'PDF', 'PII', 'PIS', 'POCSO', 'QR',
+  'SHO', 'SIM', 'SP', 'SSD', 'UID', 'USB', 'UPI', 'URL',
+]);
+
+/**
+ * Turn an enum value into something a human reads: SEIZED -> "Seized",
+ * REFERRED_TO_FSL -> "Referred to FSL", POCSO -> "POCSO".
+ */
 export const humanise = (code) =>
-  !code ? '' : String(code).replace(/_/g, ' ').toLowerCase().replace(/^./, (c) => c.toUpperCase());
+  !code
+    ? ''
+    : String(code)
+        .split('_')
+        .filter(Boolean)
+        .map((word, i) => {
+          const upper = word.toUpperCase();
+          if (ACRONYMS.has(upper)) return upper;
+          const lower = word.toLowerCase();
+          return i === 0 ? lower.charAt(0).toUpperCase() + lower.slice(1) : lower;
+        })
+        .join(' ');
 
 // ---------------------------------------------------------------- chrome ----
 
@@ -153,7 +183,10 @@ export function appHeader({ title, subtitle, session, onSignOut, actions }) {
         ? el('div.identity', [
             el('div.identity__name', session.name ?? session.authorityId ?? ''),
             el('div.identity__meta', [
-              el('span.role-chip', session.role ?? ''),
+              // humanise, like every other enum on every other screen. This chip is
+              // on the header of every signed-in page, so MALKHANA_CUSTODIAN and
+              // DEFENCE_COUNSEL were the most-seen raw enums in the product.
+              el('span.role-chip', humanise(session.role) || ''),
               el('span', session.authorityId ?? ''),
             ]),
             scopeBits.length ? el('div.identity__scope', scopeBits.join(' · ')) : null,

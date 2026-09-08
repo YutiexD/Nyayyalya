@@ -190,6 +190,15 @@ async function evaluate({ user, action, resourceType, resource, caseDoc }) {
 
     if (user.role === ROLE.SHO) {
       if (caseDoc.stationCode !== scope.stationCode) return deny(DENY_REASON.OUT_OF_JURISDICTION);
+      // The same stage lock the IO branch carries. Its absence here meant a case never
+      // actually closed to investigative writes: once the chargesheet was filed the
+      // assigned IO was correctly refused, but the station SHO — who supervises that
+      // IO and holds station-wide scope — could still upload exhibits, open custody
+      // items and mutate the case. "The record is fixed at the chargesheet" was true
+      // of one role and false of the role above it.
+      if (action === ACTION.WRITE && !WRITABLE_CASE_STAGES.includes(caseDoc.stage)) {
+        return deny(DENY_REASON.CASE_STAGE_CLOSED_TO_WRITES);
+      }
       if (COURT_ONLY_ACTIONS.has(action)) return deny(DENY_REASON.READ_ONLY_ROLE);
       return allow();
     }
@@ -476,17 +485,25 @@ export function scopeFilterFor(user, resourceType = RESOURCE_TYPE.CASE) {
   const scope = user.scope ?? {};
 
   if (user.authority === AUTHORITY.POLICE) {
+    // A custody item carries caseId, stationCode and districtCode — but NOT ioUserId,
+    // which only a case has. Filtering custody items by `ioUserId` therefore produced
+    // a query that could never match a document, so an investigating officer's own
+    // custody listing and gap view were permanently, silently empty. Route the IO
+    // through __caseScope, which materialiseScopeFilter turns into the case ids they
+    // are actually on. Every other police role filters on a field the item really has.
+    const custodyScoped = resourceType === RESOURCE_TYPE.CUSTODY_ITEM;
+
     switch (user.role) {
       case ROLE.IO:
-        return { ioUserId: user.userId, stationCode: scope.stationCode };
+        return custodyScoped
+          ? { __caseScope: { ioUserId: user.userId, stationCode: scope.stationCode } }
+          : { ioUserId: user.userId, stationCode: scope.stationCode };
       case ROLE.SHO:
         return { stationCode: scope.stationCode };
       case ROLE.DISTRICT_SP:
         return { districtCode: scope.districtCode };
       case ROLE.MALKHANA_CUSTODIAN:
-        return resourceType === RESOURCE_TYPE.CUSTODY_ITEM
-          ? { stationCode: scope.stationCode }
-          : null;
+        return custodyScoped ? { stationCode: scope.stationCode } : null;
       default:
         return null;
     }
@@ -516,12 +533,24 @@ export async function materialiseScopeFilter(user, resourceType = RESOURCE_TYPE.
   const filter = scopeFilterFor(user, resourceType);
   if (!filter) return null;
 
+  // Which field on THIS resource points at a case. Every sentinel below resolves to a
+  // set of case ids, and the caller's collection decides how that set is expressed:
+  // the cases collection matches on `_id`, everything hanging off a case on `caseId`.
+  // Hard-coding `_id` here was wrong for any non-CASE listing.
+  const caseKey = resourceType === RESOURCE_TYPE.CASE ? '_id' : 'caseId';
+  const byCaseIds = (ids) => (ids.length ? { [caseKey]: { $in: ids } } : null);
+
+  if (filter.__caseScope) {
+    const caseIds = await Case.distinct('_id', filter.__caseScope);
+    return byCaseIds(caseIds);
+  }
+
   if (filter.__fslLab) {
     const caseIds = await Referral.distinct('caseId', {
       labId: filter.__fslLab,
       status: { $in: [REFERRAL_STATUS.OPEN, REFERRAL_STATUS.ACCEPTED] },
     });
-    return caseIds.length ? { _id: { $in: caseIds } } : null;
+    return byCaseIds(caseIds);
   }
 
   if (filter.__legalGrants) {
@@ -537,7 +566,7 @@ export async function materialiseScopeFilter(user, resourceType = RESOURCE_TYPE.
       .select('caseId')
       .lean();
     const caseIds = grants.map((g) => g.caseId);
-    return caseIds.length ? { _id: { $in: caseIds } } : null;
+    return byCaseIds(caseIds);
   }
 
   return filter;

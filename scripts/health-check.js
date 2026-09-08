@@ -38,7 +38,28 @@ async function checkHttp(name, url, expectJson = true) {
   }
 }
 
+/**
+ * A connection string with the password taken out.
+ *
+ * This tool is run on a projector — docs/DEMO_SCRIPT.md says to run it immediately
+ * before presenting — and `mongodb+srv://user:password@cluster...` was being printed
+ * in full. A live database credential on a hall screen is not recoverable by editing
+ * a slide afterwards, so the redaction happens here rather than in the caller.
+ */
+function safeUri(uri) {
+  try {
+    const u = new URL(uri);
+    if (u.password) u.password = '****';
+    return u.toString();
+  } catch {
+    // Not URL-parseable (some Mongo URIs are not). Fall back to a blunt regex that
+    // strips anything between '//' and the '@' host separator.
+    return String(uri).replace(/\/\/[^/@]*@/, '//****@');
+  }
+}
+
 async function checkMongo() {
+  const shown = safeUri(env.MONGO_URI);
   try {
     // Use the app's own configured timeout, not a separate hardcoded one. A local
     // mongod answers in milliseconds, but a fresh mongodb+srv Atlas connection does a
@@ -52,10 +73,10 @@ async function checkMongo() {
     });
     const admin = mongoose.connection.db.admin();
     const info = await admin.serverStatus().catch(() => null);
-    record('MongoDB', true, `${env.MONGO_URI} · ${info?.version ? `v${info.version}` : 'connected'}`);
+    record('MongoDB', true, `${shown} · ${info?.version ? `v${info.version}` : 'connected'}`);
     await mongoose.disconnect();
   } catch (err) {
-    record('MongoDB', false, `${env.MONGO_URI} — ${err.message.split('\n')[0]}`);
+    record('MongoDB', false, `${shown} — ${err.message.split('\n')[0]}`);
   }
 }
 

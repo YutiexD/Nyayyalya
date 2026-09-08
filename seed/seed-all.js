@@ -565,12 +565,53 @@ stage('Recording the denial that the audit demo shows');
 
 stage('Anchoring the ledger to Monad Testnet');
 {
-  const latest = await api('GET', '/api/anchors/latest');
-  if (latest.body.anchored) {
-    say(`   root ${latest.body.merkleRoot.slice(0, 18)}… · ${latest.body.network} · status ${latest.body.status}`);
+  // Run a cycle here rather than reporting on one that has not happened.
+  //
+  // The scheduler batches on an interval, and the seed has just written ~20 ledger
+  // entries in the seconds since the last tick — so a demo starting immediately after
+  // the seed used to find "No batch has been anchored yet" and beat 11, the whole
+  // blockchain beat, had nothing to show. Anchoring what we just created is both
+  // faster and more honest than telling the operator to wait five minutes.
+  const { runAnchorCycle, latestAnchor } = await import('../backend/services/anchor.js');
+  const result = await runAnchorCycle();
+
+  if (result.batched) {
+    const b = result.batch;
+    say(`   root ${b.merkleRoot.slice(0, 18)}… · seq ${b.fromSeq}–${b.toSeq} · ${b.leafCount} entries · status ${b.status}`);
+    if (b.status === 'DRY_RUN') {
+      say('   DRY RUN — the root was computed and stored, NOT submitted to any chain.');
+      say('   To anchor for real: deploy the contract, then set ANCHOR_ENABLED=true,');
+      say('   ANCHOR_CONTRACT_ADDRESS and a funded ANCHOR_PRIVATE_KEY in .env.');
+    }
   } else {
-    say('   no batch anchored yet — the batcher runs every 5 minutes when ANCHOR_ENABLED=true');
-    say('   (set ANCHOR_ENABLED=true and ANCHOR_CONTRACT_ADDRESS in .env to anchor for real)');
+    const latest = await latestAnchor();
+    if (latest) {
+      say(`   already anchored · root ${latest.merkleRoot.slice(0, 18)}… · status ${latest.status}`);
+    } else {
+      say(`   nothing to anchor (${result.reason ?? 'no new ledger entries'})`);
+    }
+  }
+}
+
+// ------------------------------------------------- a case left open for beat 3
+
+stage('Opening a second case, left under investigation');
+let openCase = null;
+{
+  // The main case finishes at CHARGESHEET_FILED, which correctly closes it to
+  // investigative writes — so after seeding there was nowhere the officer could
+  // legitimately upload, and beat 3 (browser hash + signature, the core of the
+  // demo) could not be performed at all on seeded data. This one stays open.
+  const res = await api('POST', '/api/cases/from-fir', {
+    token: io.token,
+    body: { firNumber: '0124/2026' },
+  });
+  if (res.status === 201) {
+    openCase = res.body.case;
+    say(`   FIR ${openCase.firNumber} · ${openCase.stationCode} · stage ${openCase.stage}`);
+    say('   no exhibits — this is the case to upload into during beat 3');
+  } else {
+    say(`   could not open the second case (HTTP ${res.status}) — beat 3 will have no writable case`);
   }
 }
 
@@ -607,6 +648,9 @@ console.log('\n' + '='.repeat(70));
 console.log('Demo state ready.\n');
 console.log(`  Case          FIR ${demoCase.firNumber} · ${demoCase.stationCode}`);
 console.log(`  Exhibits      ${ex1.evidence.exhibitCode}  ${ex2.evidence.exhibitCode}  ${ex3.evidence.exhibitCode}  ${ex4.evidence.exhibitCode}`);
+if (openCase) {
+  console.log(`  Upload into   FIR ${openCase.firNumber} — still under investigation (beat 3)`);
+}
 console.log(`  Tamper target ${ex4.evidence.exhibitCode}  storage key:`);
 console.log(`                ${ex4.evidence.storageKey}`);
 console.log(`  Custody       ${goodItem.item.itemCode} (complete)   ${brokenItem.item.itemCode} (gap)`);

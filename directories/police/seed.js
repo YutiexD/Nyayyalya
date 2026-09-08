@@ -187,6 +187,31 @@ const FIRS = [
     isVictimProtected: true,
     sensitivityClass: 'POCSO',
   },
+  {
+    // A second, deliberately ORDINARY case, kept open through the whole demo.
+    //
+    // Two jobs. First, the main case ends the seed at CHARGESHEET_FILED — correctly
+    // closed to investigative writes — which left the officer with nowhere to upload
+    // and made beat 3, the live hash-and-sign upload, impossible to perform on seeded
+    // data. This case stays UNDER_INVESTIGATION so that beat works.
+    //
+    // Second, it is the contrast for beat 2: 3 years' maximum punishment and no
+    // protected victim routes it to a MAGISTRATE, where the POCSO case routes to a
+    // designated Sessions court. Running the jurisdiction router on both shows it
+    // deciding, rather than echoing one hard-coded answer.
+    firNumber: '0124/2026',
+    firDate: D('2026-01-22'),
+    stationCode: 'UP-GZB-KVN',
+    districtCode: 'UP-GZB',
+    stateCode: 'UP',
+    bnsSections: ['303(2)'],
+    maxPunishmentYears: 3,
+    complainantName: 'Shri Anil Verma',
+    accusedNames: ['Unknown'],
+    ioPisId: 'UP-GZB-4471',
+    isVictimProtected: false,
+    sensitivityClass: 'ORDINARY',
+  },
 ];
 
 /**

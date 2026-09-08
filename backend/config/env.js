@@ -47,6 +47,20 @@ const schema = z.object({
   // ---- Core API ----
   PORT: z.coerce.number().int().min(1).max(65535).default(5000),
   PUBLIC_BASE_URL: z.string().url().default('http://localhost:5000'),
+  /**
+   * Origin of the WEB CLIENT, which is not necessarily the API's origin.
+   *
+   * The QR printed on a s.63 certificate is meant to be scanned off the page by
+   * anyone — a judge, defence counsel, a journalist — so it has to lead somewhere a
+   * person can read. It was pointing at `${PUBLIC_BASE_URL}/public/verify/:token`,
+   * the raw JSON endpoint, which answers a scanner with a wall of JSON instead of the
+   * verifier page built for exactly this purpose.
+   *
+   * Note that a `localhost` value here is unscannable from any other device. For a
+   * demo where people scan the certificate with their own phones, set this to the
+   * machine's LAN address or a tunnel URL.
+   */
+  PUBLIC_WEB_URL: z.string().url().default('http://localhost:5173'),
   WEB_ORIGIN: z.string().default('http://localhost:5173'),
 
   // ---- Database ----
@@ -92,7 +106,28 @@ const schema = z.object({
     .default(256 * 1024 * 1024),
 
   // ---- Blockchain: MONAD TESTNET ----
+  /**
+   * Whether to SUBMIT anchor transactions to the chain. Off by default because
+   * submitting needs a funded key. This does NOT control whether roots are computed
+   * — see ANCHOR_BATCHING_ENABLED.
+   */
   ANCHOR_ENABLED: bool('false'),
+  /**
+   * Whether the periodic batcher runs at all.
+   *
+   * Split out from ANCHOR_ENABLED because the two were conflated, and the conflation
+   * silently disabled the entire anchoring pipeline in the shipped configuration:
+   * with ANCHOR_ENABLED=false the scheduler never started, so no batch was ever
+   * created, no Merkle root was ever computed, and `GET /api/anchors/latest` answered
+   * "No batch has been anchored yet" forever — while README.md and docs/DEMO_SCRIPT.md
+   * both described a batcher running every five minutes in DRY_RUN.
+   *
+   * Batching is the part that has value without a chain: it computes the root and
+   * proves the ledger has not been edited since. Submitting is what needs the key.
+   * So batching defaults ON and submission defaults OFF, and `status` on the batch
+   * (DRY_RUN vs CONFIRMED) says truthfully which of the two happened.
+   */
+  ANCHOR_BATCHING_ENABLED: bool('true'),
   ANCHOR_NETWORK: z.literal('monad-testnet').default('monad-testnet'),
   ANCHOR_CHAIN_ID: z.coerce.number().int().default(10143),
   ANCHOR_RPC_URL: z.string().url().default('https://testnet-rpc.monad.xyz'),

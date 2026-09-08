@@ -14,7 +14,7 @@
  * chosen: there is no role selector on this page and there never will be.
  */
 import { api, ApiError, setSession, clearSession, HOME_FOR_ROLE } from '../lib/api.js';
-import { getOrCreateKeyPair, exportPublicJwk } from '../lib/crypto.js';
+import { getOrCreateKeyPair, exportPublicJwk, publicKeyFingerprint } from '../lib/crypto.js';
 import { el, mount, clear, append, denial, field, input, humanise } from '../lib/ui.js';
 
 const root = document.getElementById('app');
@@ -28,6 +28,20 @@ const state = {
 };
 
 const MIN_PASSWORD = 12;
+
+/**
+ * Move to another step, replacing whatever step-scoped state came with the old one.
+ *
+ * A plain synchronous function on purpose: every caller is inside an async submit
+ * handler, and assigning `state.*` directly after an await trips require-atomic-updates
+ * even though a browser event handler cannot actually interleave. Going through one
+ * function also means a transition is a single readable call instead of five
+ * assignments a reader has to collect.
+ */
+function goToStep(step, patch = {}) {
+  Object.assign(state, { step }, patch);
+  render();
+}
 
 // A signed-in tab that lands here has signed out or expired; do not keep a half state.
 clearSession();
@@ -194,6 +208,10 @@ function renderOtp() {
   );
 
   return [
+    // Shown here because registering a device drops you back to THIS step, not the
+    // password step — rotating a signing key revokes every session, including the one
+    // that just did the rotating.
+    registeredNotice(),
     heading(
       'Verify the number on record',
       'The code goes to the phone number your authority directory holds — not to a number entered here.'
@@ -226,6 +244,15 @@ function renderOtp() {
 }
 
 // ----------------------------------------------------------- step three ----
+
+/** Confirms the re-key after step 4, so the second sign-in is not unexplained. */
+function registeredNotice() {
+  if (!state.justRegistered) return null;
+  return el('div.notice.notice--ok', [
+    el('strong', 'This device is registered. '),
+    'Its signing key is now the one on record for your account. Sign in again to continue — rotating a signing key ends every existing session, including the one you just used.',
+  ]);
+}
 
 function otpNotice() {
   if (!state.otpSent) return null;
@@ -318,9 +345,28 @@ function renderFinal() {
             });
           } else {
             session = await api.auth.login({ authorityId: state.authorityId, password, otp });
-            // A returning officer on a fresh machine still needs a device key before
-            // they can sign an upload; make one now rather than at the upload form.
-            await getOrCreateKeyPair();
+
+            // A returning officer on a fresh machine gets a device key here — but a
+            // key this browser generated is NOT the key the server has on record, and
+            // the server verifies uploads against the registered one.
+            //
+            // Previously this called getOrCreateKeyPair() and moved on, which meant a
+            // silently unusable session: sign-in succeeded, the dashboard loaded, and
+            // then every single upload was refused with SIGNATURE_INVALID and no
+            // explanation of why. On any machine that did not perform the activation
+            // — a fresh browser, a cleared profile, an account created by the seed —
+            // that was the whole evidence-upload workflow, dead, with the failure
+            // surfacing three screens away from its cause.
+            const keyPair = await getOrCreateKeyPair();
+            const localFingerprint = await publicKeyFingerprint(keyPair.publicKey);
+
+            if (localFingerprint !== session.user?.publicKeyFingerprint) {
+              // Hold the session so rotate-key can authenticate, then make the user
+              // deal with it now, on this screen, where the cause is obvious.
+              setSession(session);
+              goToStep(4, { deviceKey: { session, keyPair, localFingerprint } });
+              return;
+            }
           }
 
           setSession(session);
@@ -345,6 +391,7 @@ function renderFinal() {
   );
 
   return [
+    registeredNotice(),
     heading(
       activating ? 'Activate your account' : 'Sign in',
       activating
@@ -359,10 +406,105 @@ function renderFinal() {
   ];
 }
 
+
+// ------------------------------------------------- 4. register this device ----
+
+/**
+ * Shown only when sign-in succeeded but this browser holds a signing key the server
+ * has never seen.
+ *
+ * The account is fine and the password was right; what is missing is the link between
+ * THIS device and the account. Uploads are signed in the browser and verified against
+ * the registered public key, so until that link exists the officer can read everything
+ * and upload nothing. Saying so here — rather than letting them discover it as an
+ * unexplained SIGNATURE_INVALID at the upload form — is the whole point of this step.
+ *
+ * Registering is a re-key, so it costs a fresh one-time code: proving the password was
+ * not enough to move an account's signing identity to a new machine.
+ */
+function renderDeviceKey() {
+  const otpInput = input({
+    id: 'device-otp',
+    inputmode: 'numeric',
+    autocomplete: 'one-time-code',
+    placeholder: '000000',
+    maxlength: '8',
+    required: true,
+    value: state.deviceOtpSent?.demoOtp ?? '',
+  });
+
+  const go = el('button.btn', { type: 'submit' }, 'Register this device');
+  const sendBtn = el('button.btn.btn--ghost', { type: 'button' }, 'Send a code');
+  const status = el('p.field__hint', '');
+
+  sendBtn.addEventListener('click', (ev) =>
+    submit(ev.currentTarget, 'Sending…', async () => {
+      const sent = await api.auth.requestOtp(state.authorityId, 'LOGIN');
+      goToStep(4, { deviceOtpSent: sent });
+    })
+  );
+
+  const form = el(
+    'form',
+    {
+      onSubmit: (e) => {
+        e.preventDefault();
+        const otp = otpInput.value.trim();
+        if (!otp) {
+          showError(new ApiError(0, 'OTP_REQUIRED', 'Enter the one-time code first.'));
+          return;
+        }
+        submit(go, 'Registering…', async () => {
+          const publicKeyJwk = await exportPublicJwk(state.deviceKey.keyPair.publicKey);
+          await api.auth.rotateKey({ otp, publicKeyJwk });
+
+          // Rotating revokes every session, including this one, by design: a key
+          // change must not leave older sessions alive. So sign in again, cleanly.
+          clearSession();
+          goToStep(2, {
+            otpSent: null,
+            deviceKey: null,
+            deviceOtpSent: null,
+            justRegistered: true,
+          });
+        });
+      },
+    },
+    [
+      field('One-time code', otpInput, 'Sent to the number your authority directory holds.'),
+      el('div.row', [sendBtn, go]),
+      status,
+    ]
+  );
+
+  return [
+    heading(
+      'Register this device',
+      'You are signed in, but the signing key in this browser is not the one on record for your account.'
+    ),
+    stepper(),
+    identityCard(),
+    el('div.notice.notice--warn', [
+      el('strong', 'Uploads from this browser would be refused. '),
+      'Every exhibit is signed here, in this browser, and the server verifies that signature against the public key registered to your account. ',
+      'This browser holds a different key — because it generated a fresh one, which is what happens on a new machine, a cleared browser profile, or an account that was activated somewhere else. ',
+      'Registering replaces the key on record with this one and signs you out of every other session.',
+    ]),
+    el('div.kv', [
+      el('div.kv__k', 'Key on record'),
+      el('div.kv__v', el('code', (state.deviceKey?.session?.user?.publicKeyFingerprint ?? '—').slice(0, 32))),
+      el('div.kv__k', 'Key in this browser'),
+      el('div.kv__v', el('code', (state.deviceKey?.localFingerprint ?? '—').slice(0, 32))),
+    ]),
+    form,
+    errorBox(),
+  ];
+}
+
 // ---------------------------------------------------------------- render ----
 
 function render() {
-  const views = { 1: renderIdentity, 2: renderOtp, 3: renderFinal };
+  const views = { 1: renderIdentity, 2: renderOtp, 3: renderFinal, 4: renderDeviceKey };
   clear(root);
   append(root, views[state.step]());
   const first = root.querySelector('input:not([type=hidden])');

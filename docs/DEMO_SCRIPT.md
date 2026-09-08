@@ -17,14 +17,14 @@ npm run mongo:dev      # 1
 npm run dev            # 2
 ```
 ```bash
-npm run reset --yes && npm run seed    # 3
+npm run reset -- --yes && npm run seed    # 3
 ```
 
 Then `npm run health` — six green lines before you present anything.
 
 The seed prints the shared password and the **storage key of the tamper target**. Copy that key; beat 5 needs it.
 
-**Rehearse the reset.** `npm run reset --yes && npm run seed` takes about 20 seconds and restores everything, including un-tampering the file you break in beat 5. You will need it between run-throughs.
+**Rehearse the reset.** `npm run reset -- --yes && npm run seed` takes about 20 seconds and restores everything, including un-tampering the file you break in beat 5. You will need it between run-throughs.
 
 ---
 
@@ -270,4 +270,4 @@ The key is non-extractable in the browser, so it cannot be exported — but a st
 A hash of a photograph of an identifiable victim is still linked to that victim, permanently and publicly. Roots only.
 
 **"Is this production-ready?"**
-No, and `docs/PRODUCTION_READINESS.md` says exactly what is missing. The master key is in an environment variable and belongs in an HSM; the directories are mocks; there is no HA story. What *is* solid is the security model, and it has 423 tests behind it.
+No, and `docs/PRODUCTION_READINESS.md` says exactly what is missing. The master key is in an environment variable and belongs in an HSM; the directories are mocks; there is no HA story. What *is* solid is the security model, and it has 448 tests behind it.

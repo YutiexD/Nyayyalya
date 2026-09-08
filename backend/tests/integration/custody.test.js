@@ -660,3 +660,141 @@ describe('input validation and jurisdiction', () => {
     expect(res.status).toBe(403);
   });
 });
+
+// ==================================================== GET /api/custody/items ==
+
+/**
+ * REGRESSION — there was no custody register, and the IO could not have seen it anyway.
+ *
+ * Two defects, one screen. Every other custody route addresses ONE item, by id or by
+ * scanning its label, so nobody could answer "what am I holding?" — `/gaps` was the
+ * only listing and it returns just the chains with findings, which is the exception
+ * report, not the register.
+ *
+ * And underneath it, `scopeFilterFor(IO, CUSTODY_ITEM)` returned `{ ioUserId, ... }`.
+ * `custody_items` has no `ioUserId` field — only a case does — so the query could
+ * never match a single document. An investigating officer's custody view was
+ * permanently empty, and silently so: a valid 200 with nothing in it.
+ */
+describe('GET /api/custody/items — the custody register', () => {
+  it('lists the items an IO seized on their own case', async () => {
+    const { io, caseId } = await openCase();
+    await seizeItem(io, caseId);
+    await seizeItem(io, caseId, { sealNumber: 'SEAL-GZB-88232', description: 'USB drive' });
+
+    const res = await auth(request(server).get('/api/custody/items'), io);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.total).toBe(2);
+    expect(res.body.items[0].itemCode).toMatch(/^IT-/);
+  });
+
+  it('lets the malkhana custodian see the items at their own station', async () => {
+    const { io, caseId } = await openCase();
+    await seizeItem(io, caseId);
+
+    const custodian = await activateUser(server, MALKHANA);
+    const res = await auth(request(server).get('/api/custody/items'), custodian);
+    expect(res.status).toBe(200);
+    expect(res.body.total).toBe(1);
+  });
+
+  it('lets the SHO see their station and the District SP their district', async () => {
+    const { io, caseId } = await openCase();
+    await seizeItem(io, caseId);
+
+    for (const who of [SHO, DISTRICT_SP]) {
+      const session = await activateUser(server, who);
+      const res = await auth(request(server).get('/api/custody/items'), session);
+      expect(res.status, `${who} should see the item`).toBe(200);
+      expect(res.body.total, `${who} should see the item`).toBe(1);
+    }
+  });
+
+  it('shows an advocate and an examiner nothing at all', async () => {
+    const { io, caseId } = await openCase();
+    await seizeItem(io, caseId);
+
+    for (const who of [ADVOCATE_NOT_ON_RECORD, EXAMINER]) {
+      const session = await activateUser(server, who);
+      const res = await auth(request(server).get('/api/custody/items'), session);
+      expect(res.status).toBe(200);
+      expect(res.body.items, `${who} holds no custody scope`).toEqual([]);
+    }
+  });
+
+  it('narrows by caseId and by status, and never widens', async () => {
+    const { io, caseId } = await openCase();
+    await seizeItem(io, caseId);
+
+    const scoped = await auth(request(server).get(`/api/custody/items?caseId=${caseId}`), io);
+    expect(scoped.status).toBe(200);
+    expect(scoped.body.total).toBe(1);
+
+    // A case the officer is not on cannot be reached by asking for it by id.
+    const other = new mongoose.Types.ObjectId();
+    const foreign = await auth(request(server).get(`/api/custody/items?caseId=${other}`), io);
+    expect(foreign.status).toBe(200);
+    expect(foreign.body.items).toEqual([]);
+  });
+
+  it('rejects a malformed caseId rather than ignoring it', async () => {
+    const { io } = await openCase();
+    const res = await auth(request(server).get('/api/custody/items?caseId=not-an-id'), io);
+    expect(res.status).toBe(400);
+  });
+
+  it('refuses an unauthenticated caller', async () => {
+    const res = await request(server).get('/api/custody/items');
+    expect(res.status).toBe(401);
+  });
+
+  /**
+   * The one that matters. `scopeFilterFor(IO, CUSTODY_ITEM)` returned
+   * `{ ioUserId, stationCode }`, and `custody_items` has no `ioUserId` path —
+   * only a case does. Because `shared/mongo.js` sets `strictQuery: true`, Mongoose
+   * does not error on that: it SILENTLY DROPS the unknown condition, leaving
+   * `{ stationCode }`.
+   *
+   * So the term that restricts an officer to their own cases vanished, and an IO
+   * listing custody items got every item at their station — including items booked
+   * on another officer's investigation. Not an empty list, which someone would have
+   * noticed: a plausible, over-broad one.
+   */
+  it('does NOT show an IO custody items from another officer’s case at the same station', async () => {
+    const { io, caseId } = await openCase();
+    await seizeItem(io, caseId);
+
+    // A second case at the SAME station, run by somebody else.
+    const otherCase = await Case.create({
+      firNumber: '0777/2026',
+      firDate: new Date(),
+      title: 'Another officer, same station',
+      stationCode: 'UP-GZB-KVN',
+      districtCode: 'UP-GZB',
+      stateCode: 'UP',
+      maxPunishmentYears: 3,
+      ioUserId: new mongoose.Types.ObjectId(),
+      ioAuthorityId: 'UP-GZB-0000',
+      createdBy: new mongoose.Types.ObjectId(),
+    });
+    await CustodyItem.create({
+      itemCode: 'IT-07772026-001',
+      caseId: otherCase._id,
+      description: 'Not this officer’s item',
+      sealNumber: 'SEAL-GZB-70001',
+      sealIntact: true,
+      stationCode: 'UP-GZB-KVN',
+      districtCode: 'UP-GZB',
+      status: CUSTODY_STATUS.SEIZED,
+      currentLocation: CUSTODY_LOCATION.FIELD,
+      currentHolderUserId: new mongoose.Types.ObjectId(),
+      qrPayload: 'demo-qr-payload-not-used-by-this-test',
+      createdBy: new mongoose.Types.ObjectId(),
+    });
+
+    const res = await auth(request(server).get('/api/custody/items'), io);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.total, 'the IO must see only their own case’s items').toBe(1);
+    expect(res.body.items.map((i) => i.itemCode)).not.toContain('IT-07772026-001');
+  });
+});

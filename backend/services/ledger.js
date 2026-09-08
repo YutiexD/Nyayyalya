@@ -153,7 +153,34 @@ export async function appendEvent(e) {
 
         const prev = await Ledger.findOne({ seq: seq - 1 }, { entryHash: 1 }).lean();
         if (seq > 1 && !prev) {
-          // The predecessor is not visible yet; the chain would dangle. Back off.
+          // The predecessor is missing. Two very different causes, and treating them
+          // the same permanently wedged the ledger:
+          //
+          //   (a) a concurrent writer has allocated seq-1 and not yet committed it —
+          //       transient, and backing off is right;
+          //   (b) seq-1 was ALLOCATED AND NEVER WRITTEN, because a previous append
+          //       threw a non-duplicate error (a validation failure, a dropped
+          //       connection mid-insert) after Counter.next() had already advanced.
+          //
+          // In case (b) the gap never heals. Every later append allocates seq+1,
+          // finds no predecessor, retries five times — burning five MORE counter
+          // values each time — and fails with LEDGER_APPEND_FAILED. Since every write
+          // path in the system appends to the ledger, the whole system stops
+          // accepting writes, permanently, from one transient insert error.
+          //
+          // So: reconcile against the real tail instead of trusting the counter. The
+          // ledger itself is the authority on what has been written.
+          const tail = await Ledger.findOne({}, { seq: 1 }).sort({ seq: -1 }).lean();
+          const trueNext = (tail?.seq ?? 0) + 1;
+          if (trueNext < seq) {
+            log.warn(
+              { allocated: seq, trueNext },
+              'ledger counter ran ahead of the chain; reconciling to the real tail'
+            );
+            await Counter.reset(LEDGER_SEQ_COUNTER, tail?.seq ?? 0);
+            lastErr = new Error(`counter ahead of tail (allocated ${seq}, tail ${tail?.seq ?? 0})`);
+            continue;
+          }
           lastErr = new Error(`predecessor seq=${seq - 1} not found`);
           await sleep(10);
           continue;

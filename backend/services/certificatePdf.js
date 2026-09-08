@@ -46,7 +46,7 @@ export const certificatePdfKey = (certificateId) =>
 
 /** The URL the QR on the certificate points at. */
 export const verificationUrlFor = (verificationToken) =>
-  `${env.PUBLIC_BASE_URL}/public/verify/${verificationToken}`;
+  `${env.PUBLIC_WEB_URL}/verify.html?token=${encodeURIComponent(verificationToken)}`;
 
 // ---------------------------------------------------------------- rendering ----
 

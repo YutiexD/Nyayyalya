@@ -36,6 +36,32 @@ CounterSchema.statics.next = async function next(name, session) {
   return doc.value;
 };
 
+/**
+ * Wind a counter back to a known-good value.
+ *
+ * Only one caller has any business doing this: the ledger's append loop, when it finds
+ * the counter has run AHEAD of the chain because a value was allocated and then never
+ * written (a non-duplicate insert error after Counter.next() had already advanced).
+ * Left alone, that gap makes every subsequent append fail its predecessor check
+ * forever — see services/ledger.js.
+ *
+ * Guarded so it can only ever move a counter DOWN, and only to a value the caller has
+ * actually observed in the collection. A reset that could raise a counter would be a
+ * way to re-issue sequence numbers that are already in use, which is the opposite of
+ * what this exists for.
+ */
+CounterSchema.statics.reset = async function reset(name, value) {
+  if (!Number.isInteger(value) || value < 0) {
+    throw new TypeError('Counter.reset: value must be a non-negative integer');
+  }
+  const doc = await this.findOneAndUpdate(
+    { _id: name, value: { $gt: value } },
+    { $set: { value } },
+    { new: true }
+  ).lean();
+  return doc?.value ?? null;
+};
+
 /** Current value without consuming one. For diagnostics only. */
 CounterSchema.statics.peek = async function peek(name) {
   const doc = await this.findById(name).lean();

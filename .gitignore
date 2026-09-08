@@ -41,3 +41,7 @@ contracts/deployments/*.local.json
 .DS_Store
 Thumbs.db
 *.swp
+
+# Stray local server logs from ad-hoc runs
+.api.log
+.api.err

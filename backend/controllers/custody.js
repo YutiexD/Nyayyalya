@@ -45,6 +45,7 @@ import {
   values,
 } from '../models/enums.js';
 import { appendEvent, getSubjectTimeline } from '../services/ledger.js';
+import { materialiseScopeFilter } from '../services/accessResolver.js';
 import { buildQrPayload, verifyQrPayload } from '../services/qr.js';
 import { sha256Hex, randomBase64Url, timingSafeEqualStr } from '../config/crypto.js';
 import { writeAudit } from '../middleware/audit.js';
@@ -819,14 +820,57 @@ function summarise(item, findings, ledgerState) {
  * never replaced — a caseId the caller cannot see yields nothing rather than an
  * unfiltered scan.
  */
+/**
+ * GET /api/custody/items[?caseId=&status=&limit=]
+ *
+ * The custody register: what this user's scope actually contains.
+ *
+ * Added because there was no way to SEE a custody item. Every other custody route
+ * addresses one item — by id, or by scanning its QR label — so a malkhana custodian
+ * could accept a transfer for an item someone handed them, and could not answer
+ * "what am I holding?" at all. `/gaps` was the only listing, and it returns only the
+ * chains with findings, which is the exceptions, not the register.
+ *
+ * The scope filter comes from the resolver and is intersected, never replaced, so a
+ * custodian sees their station, an SHO their station, a District SP their district —
+ * and counsel and examiners, who hold no custody scope, see nothing.
+ */
+export async function listItems(req, res, next) {
+  try {
+    // Materialise: the raw filter can carry a sentinel that only the resolver knows
+    // how to turn into a real query, and for a custody item that resolution is what
+    // maps case-shaped scope onto `caseId`. `null` means "sees nothing", which is an
+    // empty result — never an unfiltered query.
+    const filter = await materialiseScopeFilter(req.user, RESOURCE_TYPE.CUSTODY_ITEM);
+    if (!filter) return res.json({ items: [], total: 0 });
+
+    const query = { ...filter };
+    if (req.query.caseId !== undefined) {
+      const caseId = parse(objectId, req.query.caseId);
+      query.caseId = new mongoose.Types.ObjectId(caseId);
+    }
+    if (req.query.status !== undefined) {
+      query.status = parse(z.enum(Object.values(CUSTODY_STATUS)), req.query.status);
+    }
+
+    const items = await CustodyItem.find(query)
+      .sort({ createdAt: -1 })
+      .limit(Math.min(Number(req.query.limit) || 100, 200))
+      .lean();
+
+    return res.json({ items: items.map(itemView), total: items.length });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 export async function listGaps(req, res, next) {
   try {
-    const filter = req.scopeFilter;
     // A null filter means "this user sees nothing", which renders as an empty result
-    // rather than an unfiltered query. The two sentinel filters belong to the
-    // authorities whose scope is a set of case ids — an examiner and an advocate hold
-    // no custody scope at all, so they are the same "nothing".
-    if (!filter || filter.__fslLab || filter.__legalGrants) {
+    // rather than an unfiltered query. An examiner and an advocate hold no custody
+    // scope at all, so the resolver returns null for them and they land here.
+    const filter = await materialiseScopeFilter(req.user, RESOURCE_TYPE.CUSTODY_ITEM);
+    if (!filter) {
       return res.json({ items: [], total: 0, withFindings: 0, broken: [] });
     }
 
@@ -841,10 +885,23 @@ export async function listGaps(req, res, next) {
       .limit(Math.min(Number(req.query.limit) || 100, 200))
       .lean();
 
-    const reports = [];
-    for (const item of items) {
-      reports.push(analyseChain(item, await getSubjectTimeline(item._id)));
+    // One grouped read, not one per item. This was `for (const item of items)
+    // { ... await getSubjectTimeline(item._id) }`, which serialised up to 200 round
+    // trips — each hitting the same {subjectId, seq} index that a single $in covers.
+    const entries = await Ledger.find({ subjectId: { $in: items.map((i) => i._id) } })
+      .sort({ seq: 1 })
+      .lean();
+
+    const bySubject = new Map();
+    for (const entry of entries) {
+      const key = String(entry.subjectId);
+      const bucket = bySubject.get(key);
+      if (bucket) bucket.push(entry);
+      else bySubject.set(key, [entry]);
     }
+
+    // analyseChain is synchronous, so nothing else here needs to await.
+    const reports = items.map((item) => analyseChain(item, bySubject.get(String(item._id)) ?? []));
 
     const withFindings = reports.filter((r) => !r.intact);
     return res.json({

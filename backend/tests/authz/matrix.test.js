@@ -754,3 +754,74 @@ describe('APPROVE and ACKNOWLEDGE are distinct from WRITE and ORDER', () => {
     }
   });
 });
+
+// ================================= the case stage lock applies to EVERY role ==
+
+/**
+ * REGRESSION — the case never actually closed to writes.
+ *
+ * The IO branch of the resolver carried `if (action === WRITE && !WRITABLE_CASE_STAGES
+ * .includes(caseDoc.stage)) deny(CASE_STAGE_CLOSED_TO_WRITES)`. The SHO branch did
+ * not. So once the chargesheet was filed the assigned investigating officer was
+ * correctly refused — and the station SHO, who supervises that officer and holds
+ * station-wide scope over the same case, could still write to it.
+ *
+ * "The record is fixed at the chargesheet" is one of the strongest claims this system
+ * makes to a court. It was true of one role and false of the role above it, and no
+ * test anywhere exercised the SHO against a closed case.
+ */
+describe('a case closed to writes is closed to writes for everyone', () => {
+  const resolveAs = async (who, action, resourceType, resourceId) => {
+    const { resolve } = await import('../../services/accessResolver.js');
+    const u = await User.findOne({ authorityId: ID[who] }).lean();
+    return resolve({
+      user: { ...u, userId: u._id, scope: u.scope ?? {} },
+      action,
+      resourceType,
+      resourceId,
+    });
+  };
+
+  for (const stage of [CASE_STAGE.CHARGESHEET_FILED, CASE_STAGE.COMMITTED, CASE_STAGE.TRIAL]) {
+    it(`DENIES an SHO a WRITE on a case at ${stage}`, async () => {
+      const c = await makeCase({ stage, courtId: 'UP-GZB-SESS-02' });
+      const d = await resolveAs('SHO', ACTION.WRITE, 'CASE', c._id);
+      expect(d.allow, `SHO must not write a case at ${stage}`).toBe(false);
+      expect(d.reason).toBe(DENY_REASON.CASE_STAGE_CLOSED_TO_WRITES);
+    });
+
+    it(`DENIES the assigned IO a WRITE on a case at ${stage}`, async () => {
+      const c = await makeCase({ stage, courtId: 'UP-GZB-SESS-02' });
+      const d = await resolveAs('IO', ACTION.WRITE, 'CASE', c._id);
+      expect(d.allow).toBe(false);
+      expect(d.reason).toBe(DENY_REASON.CASE_STAGE_CLOSED_TO_WRITES);
+    });
+  }
+
+  it('still lets an SHO READ a closed case — supervision does not stop at filing', async () => {
+    const c = await makeCase({ stage: CASE_STAGE.CHARGESHEET_FILED, courtId: 'UP-GZB-SESS-02' });
+    const d = await resolveAs('SHO', ACTION.READ, 'CASE', c._id);
+    expect(d.allow).toBe(true);
+  });
+
+  it('still lets an SHO WRITE while the case is open to investigation', async () => {
+    const c = await makeCase({ stage: CASE_STAGE.UNDER_INVESTIGATION });
+    const d = await resolveAs('SHO', ACTION.WRITE, 'CASE', c._id);
+    expect(d.allow).toBe(true);
+  });
+
+  it('closes the case to an SHO UPLOAD over HTTP, not merely in the resolver', async () => {
+    const c = await makeCase({ stage: CASE_STAGE.CHARGESHEET_FILED, courtId: 'UP-GZB-SESS-02' });
+    const res = await auth(
+      request(server).post('/api/custody/items'),
+      'SHO'
+    ).send({
+      caseId: String(c._id),
+      description: 'Item booked after the chargesheet',
+      sealNumber: 'SEAL-GZB-99999',
+      stationCode: 'UP-GZB-KVN',
+    });
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe(DENY_REASON.CASE_STAGE_CLOSED_TO_WRITES);
+  });
+});

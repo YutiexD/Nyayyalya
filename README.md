@@ -17,7 +17,7 @@ Only the forensic laboratory decides authenticity. The AI decides what gets look
 | **Stack** | Node 20+ · Express · MongoDB · Vite (vanilla JS) · Solidity |
 | **Anchoring** | **Monad Testnet**, chain ID **10143** — Merkle roots only |
 | **Identity** | Three external authority directories; no self-registration |
-| **Tests** | 423 backend + 36 contract, all passing |
+| **Tests** | 448 backend + 36 contract, all passing |
 | **Dependencies** | `npm audit`: 0 vulnerabilities |
 
 ---
@@ -147,7 +147,7 @@ lexx/
 | `npm run seed` | Build the full demo state **through the real API** |
 | `npm run reset` | Drop `lexx_core` and clear the vault (`--directories` to reseed those too) |
 | `npm run health` | Check MongoDB, all three directories, the API and the RPC |
-| `npm test` | The whole backend suite (423 tests) |
+| `npm test` | The whole backend suite (448 tests) |
 | `npm run test:authz` | Just the authorization matrix |
 | `npm run test:redteam` | Just the adversarial suite |
 | `npm run lint` | ESLint across backend, directories, frontend, scripts |
@@ -162,7 +162,7 @@ lexx/
 
 ## Blockchain — Monad Testnet
 
-Anchoring is **off by default**. The batcher still computes and stores Merkle roots (status `DRY_RUN`), so the pipeline is exercised and locally verifiable without a funded key.
+Submitting to the chain is **off by default** (`ANCHOR_ENABLED=false`) because it needs a funded key. The batcher itself runs (`ANCHOR_BATCHING_ENABLED=true`), computing and storing Merkle roots with status `DRY_RUN`, so the pipeline is exercised and locally verifiable without one. A `DRY_RUN` root is not evidence of anything on chain, and the verifier says so in those words.
 
 To anchor for real:
 

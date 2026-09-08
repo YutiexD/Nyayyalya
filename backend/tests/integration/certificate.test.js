@@ -802,12 +802,30 @@ describe('the public verifier: validity, never contents', () => {
     expect(a.body.certificate.verificationToken).not.toBe(b.body.certificate.verificationToken);
   });
 
-  it('puts the verification URL on the certificate, pointing outside /api', async () => {
+  /**
+   * REGRESSION — the QR led to raw JSON.
+   *
+   * This URL is printed as a QR code on the face of the certificate, to be scanned by
+   * whoever is holding the paper: a judge, defence counsel, anyone. It pointed at
+   * `${PUBLIC_BASE_URL}/public/verify/:token` — the JSON API endpoint — so a scan
+   * answered with a wall of JSON rather than the verifier page that exists for
+   * precisely this purpose. It also pointed at the API's origin, which in a deployment
+   * where the web client is served separately is not where a person can read anything.
+   */
+  it('puts a HUMAN-READABLE verification URL on the certificate', async () => {
     const { evidence } = await fixture();
     const gen = await generateFor(io, evidence._id);
-    expect(gen.body.certificate.verificationUrl).toMatch(
-      new RegExp(`/public/verify/${gen.body.certificate.verificationToken}$`)
-    );
-    expect(gen.body.certificate.verificationUrl).not.toContain('/api/');
+    const url = gen.body.certificate.verificationUrl;
+
+    // The verifier PAGE, which reads ?token= on load — not the JSON endpoint.
+    expect(url).toContain('/verify.html');
+    expect(url).toContain(`token=${gen.body.certificate.verificationToken}`);
+
+    // Still outside /api, and still not the raw JSON route.
+    expect(url).not.toContain('/api/');
+    expect(url).not.toMatch(/\/public\/verify\//);
+
+    // It must be an absolute URL: a relative one is not scannable from a phone.
+    expect(() => new URL(url)).not.toThrow();
   });
 });

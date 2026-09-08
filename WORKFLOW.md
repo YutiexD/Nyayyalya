@@ -33,10 +33,10 @@
 | Dimension | Status |
 |---|---|
 | Maturity | **Working prototype**, feature-complete against its design specification |
-| Backend tests | **423 passing**, 15 suites, 0 skipped, 0 failing |
+| Backend tests | **448 passing**, 15 suites, 0 skipped, 0 failing |
 | Contract tests | **36 passing** |
 | Lint | 0 errors (10 documented false-positive warnings) |
-| API surface | **55 routes**, all documented in `docs/API.md` |
+| API surface | **56 routes**, all documented in `docs/API.md` |
 | Architecture decisions | **29 ADRs** recorded in `docs/AGENT_DECISIONS.md` |
 | Security findings | **6 found, 6 fixed**, each with a regression test (`docs/SECURITY_FINDINGS.md`) |
 | Smart contract | **Deployed and live** on Monad Testnet — see §8 |
@@ -134,7 +134,7 @@ Roles are **derived from external directories**, never assigned inside LEXX.
   - **OpenZeppelin Contracts v5** — `AccessControl`, `MerkleProof`
   - **Monad Testnet** — chain ID **10143**
 - **Testing**
-  - **Vitest 5** — 423 backend tests across unit / integration / authz / redteam
+  - **Vitest 5** — 448 backend tests across unit / integration / authz / redteam
   - **supertest** — HTTP-level integration testing
   - **mongodb-memory-server** — real `mongod` binary per test suite (not a mock)
   - **Hardhat/Mocha/Chai** — 36 contract tests
@@ -314,8 +314,8 @@ Verify before asserting. Key files:
 | All architectural decisions (21) | `docs/AGENT_DECISIONS.md` |
 | Security findings (6) | `docs/SECURITY_FINDINGS.md` |
 | Honest limitations | `docs/PRODUCTION_READINESS.md` |
-| Full API reference (55 routes) | `docs/API.md` |
+| Full API reference (56 routes) | `docs/API.md` |
 | Demo script | `docs/DEMO_SCRIPT.md` |
 | Production plan | `docs/PRODUCTION_ROADMAP.md` |
 
-- **Commands to confirm status:** `npm test` (423 tests) · `npm run contracts:test` (36) · `npm run routes` (55) · `npm run health` (6 checks)
+- **Commands to confirm status:** `npm test` (448 tests) · `npm run contracts:test` (36) · `npm run routes` (56) · `npm run health` (6 checks)

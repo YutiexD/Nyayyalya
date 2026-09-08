@@ -6,6 +6,24 @@
  */
 import mongoose from 'mongoose';
 
+/**
+ * strictQuery drops query conditions on paths a schema does not declare.
+ *
+ * DANGER, and it has bitten this codebase once already: the drop is SILENT. A filter
+ * of `{ ioUserId, stationCode }` against `custody_items` — which has no `ioUserId` —
+ * does not error and does not return nothing. It quietly becomes `{ stationCode }`,
+ * so a scope filter meant to restrict an investigating officer to their own cases
+ * returned every item at their station instead. An authorization term vanished and
+ * the query still looked like it worked.
+ *
+ * The protection this setting DOES buy is real and is why it stays on: a
+ * `?foo[$ne]=bar` style injection cannot introduce an operator on an undeclared path.
+ *
+ * So the rule for anyone writing a scope filter in services/accessResolver.js: every
+ * field you filter on must exist on the schema of the resource you are filtering, and
+ * a resource that hangs off a case is NOT a case. When they differ, resolve the case
+ * ids and filter on `caseId` — see `__caseScope` in materialiseScopeFilter.
+ */
 mongoose.set('strictQuery', true);
 // Index creation is explicit per-service at boot, not implicit per-model, so that a
 // production deployment can build indexes deliberately rather than on first write.

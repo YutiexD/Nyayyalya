@@ -89,6 +89,9 @@ const CustodyItemSchema = new Schema(
 
 CustodyItemSchema.index({ caseId: 1, status: 1 });
 CustodyItemSchema.index({ stationCode: 1, status: 1 });
+// A District SP's scope filter is `{ districtCode }`, and it had no index behind it —
+// so the supervisory custody view was a collection scan on every request.
+CustodyItemSchema.index({ districtCode: 1, status: 1 });
 CustodyItemSchema.index({ 'pendingTransfer.expiresAt': 1 }, { sparse: true });
 
 export const CustodyItem = mongoose.model('CustodyItem', CustodyItemSchema);
