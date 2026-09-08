@@ -21,14 +21,13 @@
  */
 import { useState } from 'react';
 import { toast } from 'sonner';
-import { FileCheck2, FolderLock, Scale } from 'lucide-react';
+import { CalendarClock, FileCheck2, FolderLock, FolderOpen, Scale } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
-import { Card, CardContent } from '@/components/ui/card';
 import {
   Select,
   SelectContent,
@@ -46,6 +45,7 @@ import {
 } from '@/components/ui/table';
 
 import { Section, KeyValue, Hash, PageHeader, TableSkeleton, EmptyState } from '@/components/common/Primitives';
+import { Eyebrow, StatCard } from '@/components/common/Premium';
 import { ForensicOpinion, Denial, Note } from '@/components/common/Verdicts';
 import { useCases, useMyPack, useAcknowledgePack } from '@/hooks/queries';
 import { useReveal } from '@/hooks/useGsap';
@@ -56,6 +56,9 @@ const DAY_MS = 86_400_000;
 /** A stable identity for "no cases yet", so effects do not re-run on every render. */
 const NO_CASES = Object.freeze([]);
 
+/** Column headings read as labels over the data, not as a first row of it. */
+const HEADINGS = '[&_th]:text-xs [&_th]:uppercase [&_th]:tracking-wider hover:bg-transparent';
+
 /** Whole days from now until `iso`, negative once it has passed. */
 function daysUntil(iso) {
   if (!iso) return null;
@@ -63,6 +66,93 @@ function daysUntil(iso) {
   if (Number.isNaN(due.getTime())) return null;
   return Math.ceil((due.getTime() - Date.now()) / DAY_MS);
 }
+
+const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
+
+// ------------------------------------------------------------------ figures ----
+
+/**
+ * The s.230 clock as one figure. It reads from the served pack and from nothing else,
+ * so with no pack served it is a dash: a number of days on a clock that has not
+ * started would be an invention.
+ */
+function clockFigure(pack) {
+  if (!pack) return { value: '—', caption: 'Starts when a pack is served on you.' };
+  if (pack.acknowledgedAt) {
+    return {
+      value: '—',
+      tone: 'ok',
+      caption: `Stopped — receipt acknowledged ${fmtDate(pack.acknowledgedAt)}.`,
+    };
+  }
+  const remaining = daysUntil(pack.dueOn);
+  if (remaining === null) {
+    return { value: '—', tone: 'warn', caption: 'No due date is recorded on this pack.' };
+  }
+  if (remaining < 0) {
+    return {
+      value: 0,
+      suffix: 'days',
+      tone: 'bad',
+      caption: `Ran out ${plural(Math.abs(remaining), 'day')} ago; receipt is still not acknowledged.`,
+    };
+  }
+  return {
+    value: remaining,
+    suffix: remaining === 1 ? 'day' : 'days',
+    tone: 'warn',
+    caption: `Until ${fmtDate(pack.dueOn)}. Stops when you acknowledge receipt.`,
+  };
+}
+
+function CounselFigures({ cases, list, pack }) {
+  const served = pack.isSuccess ? pack.data : null;
+  const exhibits = served ? (served.exhibitCount ?? (served.exhibits ?? []).length) : null;
+  const withheld = served ? (served.withheld ?? []).length : null;
+  const clock = clockFigure(served);
+
+  return (
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <StatCard
+        className="will-reveal"
+        label="Cases on record"
+        value={cases.isSuccess ? list.length : '—'}
+        icon={Scale}
+        tone="accent"
+        caption="From the court directory. Lexx reads that record and cannot add to it."
+      />
+      <StatCard
+        className="will-reveal"
+        label="Exhibits served"
+        value={exhibits ?? '—'}
+        icon={FolderOpen}
+        caption="The only exhibits open to you in this case. Anything else is refused and logged."
+        delay={0.1}
+      />
+      <StatCard
+        className="will-reveal"
+        label="Withheld"
+        value={withheld ?? '—'}
+        icon={FolderLock}
+        tone={withheld > 0 ? 'warn' : undefined}
+        caption="Reported as a count and a ground, never as items."
+        delay={0.2}
+      />
+      <StatCard
+        className="will-reveal"
+        label="BNSS s.230 clock"
+        value={clock.value}
+        suffix={clock.suffix}
+        icon={CalendarClock}
+        tone={clock.tone}
+        caption={clock.caption}
+        delay={0.3}
+      />
+    </div>
+  );
+}
+
+// ----------------------------------------------------------------- the pack ----
 
 /**
  * The watermark, shown as prominently as it is printed.
@@ -74,65 +164,74 @@ function daysUntil(iso) {
  */
 function WatermarkPanel({ watermark, pack }) {
   return (
-    <Card className="border-warn/40 bg-warn-muted will-reveal">
-      <CardContent className="space-y-1 pt-6">
-        <p className="text-xs uppercase tracking-wide text-muted-foreground">
-          Served copy — watermarked to you
-        </p>
-        <p className="text-base font-semibold">{watermark?.label ?? '—'}</p>
-        <p className="hash">token {watermark?.token ?? '—'}</p>
-        <p className="pt-1 text-xs leading-relaxed text-muted-foreground">
-          Redaction variant {pack?.redactionVariant ?? '—'}
-          {pack?.maskVictimIdentity ? ' · victim identity masked by order' : ''}. Every document
-          rendered from this pack carries this identity and this token.
-        </p>
-      </CardContent>
-    </Card>
+    <div className="surface will-reveal border-warn/40 bg-warn-muted p-6">
+      <div className="flex items-start gap-4">
+        <span className="grid size-10 shrink-0 place-items-center rounded-lg bg-warn/15 text-warn">
+          <FolderLock className="size-5" />
+        </span>
+        <div className="min-w-0 space-y-1">
+          <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
+            Served copy — watermarked to you
+          </p>
+          <p className="text-base font-semibold">{watermark?.label ?? '—'}</p>
+          <p className="hash">token {watermark?.token ?? '—'}</p>
+          <p className="pt-1 text-xs leading-relaxed text-muted-foreground">
+            Redaction variant {pack?.redactionVariant ?? '—'}
+            {pack?.maskVictimIdentity ? ' · victim identity masked by order' : ''}. Every document
+            rendered from this pack carries this identity and this token.
+          </p>
+        </div>
+      </div>
+    </div>
   );
 }
 
 /** One served exhibit. The laboratory opinion is the only verdict shown here. */
 function ExhibitCard({ exhibit }) {
   return (
-    <Card className="will-reveal">
-      <CardContent className="space-y-3 pt-6">
-        <div className="space-y-1.5">
-          <p className="font-medium">
-            <span className="font-mono">{exhibit.exhibitCode}</span>
-            {exhibit.title ? ` — ${exhibit.title}` : ''}
-          </p>
-          <div className="flex flex-wrap gap-1.5">
-            <Badge variant="secondary">{humanise(exhibit.kind)}</Badge>
-            <Badge variant="outline">{exhibit.mimeType ?? '—'}</Badge>
-            <Badge variant="outline">{fmtBytes(exhibit.sizeBytes)}</Badge>
-            <Badge variant="outline">{humanise(exhibit.courtStatus)}</Badge>
-          </div>
+    <div className="surface surface-lift will-reveal space-y-3 p-6">
+      <div className="space-y-1.5">
+        <p className="font-medium">
+          <span className="font-mono">{exhibit.exhibitCode}</span>
+          {exhibit.title ? ` — ${exhibit.title}` : ''}
+        </p>
+        <div className="flex flex-wrap gap-1.5">
+          <Badge variant="secondary" className="rounded-full">
+            {humanise(exhibit.kind)}
+          </Badge>
+          <Badge variant="outline" className="rounded-full">
+            {exhibit.mimeType ?? '—'}
+          </Badge>
+          <Badge variant="outline" className="rounded-full">
+            {fmtBytes(exhibit.sizeBytes)}
+          </Badge>
+          <Badge variant="outline" className="rounded-full">
+            {humanise(exhibit.courtStatus)}
+          </Badge>
         </div>
+      </div>
 
-        {exhibit.description && (
-          <p className="text-sm leading-relaxed text-muted-foreground">{exhibit.description}</p>
-        )}
+      {exhibit.description && (
+        <p className="text-sm leading-relaxed text-muted-foreground">{exhibit.description}</p>
+      )}
 
-        <KeyValue
-          rows={[
-            ['Recorded digest', <Hash key="kv" value={exhibit.sha256 ?? exhibit.sha256Server} />],
-            ['Hash algorithm', exhibit.hashAlgorithm ?? 'SHA-256'],
-            ['Captured at', fmtDate(exhibit.capturedAt)],
-          ]}
-        />
+      <KeyValue
+        rows={[
+          ['Recorded digest', <Hash key="kv" value={exhibit.sha256 ?? exhibit.sha256Server} />],
+          ['Hash algorithm', exhibit.hashAlgorithm ?? 'SHA-256'],
+          ['Captured at', fmtDate(exhibit.capturedAt)],
+        ]}
+      />
 
-        {/*
-          Only the laboratory's opinion appears in a served pack. Machine review
-          priority is investigative triage, not disclosable material, and its absence
-          here is the point rather than an omission.
-        */}
-        <ForensicOpinion forensic={exhibit.forensic} />
-      </CardContent>
-    </Card>
+      {/*
+        Only the laboratory's opinion appears in a served pack. Machine review
+        priority is investigative triage, not disclosable material, and its absence
+        here is the point rather than an omission.
+      */}
+      <ForensicOpinion forensic={exhibit.forensic} />
+    </div>
   );
 }
-
-// -------------------------------------------------------------- the pack ----
 
 function PackView({ pack }) {
   const acknowledge = useAcknowledgePack();
@@ -153,7 +252,9 @@ function PackView({ pack }) {
     <div className="space-y-6">
       <WatermarkPanel watermark={pack.watermark} pack={pack} />
 
+      {/* The pack is the thing that was served — the one panel here with a beam. */}
       <Section
+        accent
         title="Pack"
         description="What was served, when, and the clock it started. BNSS s.230 requires the accused to have the material within fourteen days of production; acknowledging receipt is what records that it arrived."
       >
@@ -163,7 +264,7 @@ function PackView({ pack }) {
             ['FIR', <span key="kv" className="font-mono">{pack.firNumber ?? '—'}</span>],
             [
               'Status',
-              <Badge key="kv" variant="outline" className="border-ok/40 bg-ok-muted text-ok">
+              <Badge key="kv" variant="outline" className="rounded-full border-ok/40 bg-ok-muted text-ok">
                 {humanise(pack.status)}
               </Badge>,
             ],
@@ -221,7 +322,7 @@ function PackView({ pack }) {
             this is a record you are entitled to have explained.
           </EmptyState>
         ) : (
-          <div className="space-y-4">
+          <div className="grid gap-4 xl:grid-cols-2">
             {pack.exhibits.map((exhibit) => (
               <ExhibitCard key={exhibit.evidenceId} exhibit={exhibit} />
             ))}
@@ -240,7 +341,7 @@ function PackView({ pack }) {
         ) : (
           <Table>
             <TableHeader>
-              <TableRow>
+              <TableRow className={HEADINGS}>
                 <TableHead>Ground for withholding</TableHead>
               </TableRow>
             </TableHeader>
@@ -278,16 +379,7 @@ export default function CounselPage() {
 
   const pack = useMyPack(caseId);
 
-  /**
-   * The pack, exhibit and withheld panels only exist once a pack comes back, so the
-   * entrance timeline has to run again whenever the page's shape changes — otherwise a
-   * panel that mounted after it would stay at its pre-animation opacity. `packId` is in
-   * the list because a served pack stays cached while a different case loads, so the
-   * query status alone does not change when the exhibits underneath it do.
-   */
-  const scope = useReveal('.will-reveal', {
-    deps: [caseId, pack.status, pack.data?.packId ?? null],
-  });
+  const scope = useReveal();
 
   // NO_DISCLOSURE_PACK_SERVED is not a failure. It means the registrar has not served
   // yet, which is a normal state of a live case, and rendering it as a red refusal
@@ -295,11 +387,18 @@ export default function CounselPage() {
   const notServedYet = pack.isError && pack.error?.code === 'NO_DISCLOSURE_PACK_SERVED';
 
   return (
-    <div ref={scope} className="container space-y-6 py-8">
-      <PageHeader
-        title="Disclosure served on you"
-        lede="Access here follows the court directory. A vakalatnama accepted by the registrar, or a legal aid order, is what puts an advocate on record; Lexx mirrors that record into this register and can neither create nor extend it. What you can open is the set served on you, exhibit by exhibit — not the case file."
-      />
+    <div ref={scope} className="container space-y-8 py-10">
+      <div className="space-y-4">
+        <div className="will-reveal">
+          <Eyebrow>Advocate on record · BNSS s.230 disclosure</Eyebrow>
+        </div>
+        <PageHeader
+          title="Disclosure served on you"
+          lede="Access here follows the court directory. A vakalatnama accepted by the registrar, or a legal aid order, is what puts an advocate on record; Lexx mirrors that record into this register and can neither create nor extend it. What you can open is the set served on you, exhibit by exhibit — not the case file."
+        />
+      </div>
+
+      <CounselFigures cases={cases} list={list} pack={pack} />
 
       <Section
         title="Your cases"

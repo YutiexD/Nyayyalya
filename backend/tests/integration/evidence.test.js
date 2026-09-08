@@ -618,3 +618,75 @@ describe('signing-key rotation does not invalidate history', () => {
     expect(res.body.error.code).toBe('SIGNATURE_INVALID');
   });
 });
+
+// ========================== jurisdiction scope on the evidence LIST paths ==
+
+/**
+ * REGRESSION — a police scope is a filter over CASES, and it was being applied to
+ * EXHIBITS.
+ *
+ * `scopeFilterFor` gives an SHO `{ stationCode }` and an IO `{ ioUserId, stationCode }`.
+ * Those are fields of a case; an exhibit carries only `caseId`. Handing that raw
+ * filter to the evidence collection went wrong in two opposite ways depending on the
+ * query path:
+ *
+ *   - the triage queue's aggregation `$match` found no document with a `stationCode`
+ *     field, so an SHO's review queue was silently EMPTY;
+ *   - `Evidence.find()` runs under `strictQuery: true`, which DROPS keys the schema
+ *     does not declare, so an officer listing exhibits without a caseId saw every
+ *     exhibit in the system, from every station.
+ *
+ * Both are covered here: one asserts what must be present, the other what must not.
+ */
+describe('police scope on the evidence list paths resolves through cases', () => {
+  it("lists the station's exhibits in the SHO's triage queue", async () => {
+    const up = await upload(jpegBytes('for-the-queue'));
+    const sho = await activateUser(server, 'UP-GZB-4402');
+
+    const res = await request(server)
+      .get('/api/evidence/queue/triage')
+      .set('Authorization', `Bearer ${sho.accessToken}`);
+
+    expect(res.status).toBe(200);
+    const codes = (res.body.queue ?? []).map((e) => e.exhibitCode);
+    expect(codes, 'the SHO must see exhibits triaged at their station').toContain(
+      up.body.evidence.exhibitCode
+    );
+  });
+
+  it('does NOT list an exhibit from another station to an IO who omits caseId', async () => {
+    const mine = await upload(jpegBytes('mine'));
+
+    // A case at ANOTHER station, with an exhibit inserted beneath it. Raw insert: the
+    // point is a document the list query must exclude, not a valid upload.
+    const foreign = await Case.create({
+      firNumber: '0888/2026',
+      firDate: new Date(),
+      title: 'Another station entirely',
+      stationCode: 'UP-GZB-OTHER',
+      districtCode: 'UP-GZB',
+      stateCode: 'UP',
+      maxPunishmentYears: 3,
+      ioUserId: new mongoose.Types.ObjectId(),
+      ioAuthorityId: 'UP-GZB-0000',
+      createdBy: new mongoose.Types.ObjectId(),
+    });
+    await mongoose.connection.collection('evidence').insertOne({
+      caseId: foreign._id,
+      exhibitCode: 'EX-08882026-001',
+      title: 'Not this officer’s exhibit',
+      mimeType: 'image/jpeg',
+      createdAt: new Date(),
+      triage: { priority: 'HIGH' },
+    });
+
+    const res = await request(server)
+      .get('/api/evidence')
+      .set('Authorization', `Bearer ${io.accessToken}`);
+
+    expect(res.status).toBe(200);
+    const codes = res.body.evidence.map((e) => e.exhibitCode);
+    expect(codes).toContain(mine.body.evidence.exhibitCode);
+    expect(codes, 'a foreign station’s exhibit must not appear').not.toContain('EX-08882026-001');
+  });
+});

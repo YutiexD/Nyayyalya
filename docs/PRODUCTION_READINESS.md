@@ -11,7 +11,7 @@ This document is deliberately unflattering where that is accurate. A readiness r
 
 | | |
 |---|---|
-| Backend tests | **453 passing**, 15 suites, 0 skipped |
+| Backend tests | **455 passing**, 15 suites, 0 skipped |
 | Contract tests | **36 passing** |
 | `npm audit` | **0 vulnerabilities** (production and dev) |
 | ESLint | 0 errors |
@@ -35,7 +35,7 @@ This document is deliberately unflattering where that is accurate. A readiness r
 | Court directory | 6002 | `dir_court` | Stands in for eCourts. Courts, judges, roster, vakalatnamas |
 | Legal/FSL directory | 6003 | `dir_legal` | Stands in for BCI + FSL LIMS. Advocates, labs, examiners |
 | Core API | 5000 | `lexx_core` | Everything else |
-| Frontend | 5173 | — | Vite SPA — React 18, Redux Toolkit, TanStack Query, Tailwind, shadcn/ui |
+| Frontend | 5173 | — | Vite SPA — React 18, Redux Toolkit, TanStack Query, Tailwind, shadcn/ui, Magic UI, GSAP |
 | Anchor service | in-process | — | Merkle batcher → Monad Testnet |
 
 ### 2.2 Trust boundaries
@@ -168,7 +168,7 @@ Six findings were discovered and fixed during the build; see `docs/SECURITY_FIND
 | `unit/services` | 46 | Jurisdiction, QR, Merkle, envelope encryption, triage, ECDSA |
 | `unit/health` | 11 | Scheduler state, audit-failure counting, recovery, reason truncation |
 | `integration/auth` | 34 | Directory → auth → session, against the **real** directory services |
-| `integration/evidence` | 34 | Upload, ingest refusals, tamper detection, anchor honesty (`ANCHOR_LOCAL_ONLY`), streaming, key rotation |
+| `integration/evidence` | 36 | Upload, ingest refusals, tamper detection, anchor honesty (`ANCHOR_LOCAL_ONLY`), streaming, key rotation |
 | `integration/custody` | 28 | Two-scan transfer, forged QR, seal break, gap detection, the custody register and its scoping |
 | `integration/fsl` | 14 | Lab scoping, report signing, opinion vocabulary |
 | `integration/disclosure` | 52 | Serving, scoping, exclusions, certificate scoping, court pack listing, denial logging |
@@ -178,7 +178,7 @@ Six findings were discovered and fixed during the build; see `docs/SECURITY_FIND
 | `integration/directory-simulator` | 6 | The one directory write endpoint is labelled simulated and gated |
 | `authz/matrix` | 67 | The full cross-scope authorization matrix |
 | `redteam/attacks` | 39 | Direct API attacks assuming a hostile frontend |
-| **Total** | **453** | |
+| **Total** | **455** | |
 | `contracts/` | 36 | Anti-replay, access control, Merkle proofs, second-preimage resistance |
 
 Integration tests run against **real directory services as child processes** and a **real MongoDB**, not mocks — the unique indexes and append-only guards are security controls, and a mock would let a test pass while the real constraint was broken.

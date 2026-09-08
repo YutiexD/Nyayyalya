@@ -21,7 +21,15 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useMutation } from '@tanstack/react-query';
 import QRCode from 'qrcode';
-import { AlertTriangle, ExternalLink, Search, ShieldQuestion } from 'lucide-react';
+import {
+  AlertTriangle,
+  ExternalLink,
+  FileCheck2,
+  Search,
+  ShieldQuestion,
+} from 'lucide-react';
+
+import { Backdrop, Eyebrow, LightTile } from '@/components/common/Premium';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -31,7 +39,7 @@ import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 
-import { Section, KeyValue, Hash, PageHeader, EmptyState } from '@/components/common/Primitives';
+import { Section, KeyValue, Hash, EmptyState } from '@/components/common/Primitives';
 import { Denial, Note } from '@/components/common/Verdicts';
 import { useLatestAnchor } from '@/hooks/queries';
 import { api } from '@/lib/api';
@@ -105,13 +113,28 @@ function CertificateResult({ result, reVerifyUrl }) {
 
   return (
     <div className="space-y-4">
-      <Alert className="border-ok/40 bg-ok-muted">
-        <ShieldQuestion className="size-4" />
-        <AlertTitle>This certificate is on the register and its token resolves</AlertTitle>
-        <AlertDescription>
-          That is a statement about the certificate, not about the evidence it describes.
-        </AlertDescription>
-      </Alert>
+      {/* Two tiles, two distinct facts. The register answered — that is one claim; the
+          stored document still hashes to its published digest — that is a second. A
+          single green banner would blur them, and the second can fail while the first
+          holds. Neither says anything about the evidence itself, and the caption says so. */}
+      <div className="grid gap-3 sm:grid-cols-2">
+        <LightTile
+          index={1}
+          title="Certificate on the register"
+          state="Token resolves"
+          tone="ok"
+          icon={ShieldQuestion}
+          explanation="A statement about the certificate, not about the evidence it describes."
+        />
+        <LightTile
+          index={2}
+          title="Stored document"
+          state={humanise(c.pdfIntegrity) || 'Unknown'}
+          tone={c.pdfIntegrity === 'PDF_INTACT' ? 'ok' : c.pdfIntegrity === 'PDF_MODIFIED' ? 'bad' : 'warn'}
+          icon={FileCheck2}
+          explanation={pdfWhy}
+        />
+      </div>
 
       <KeyValue
         rows={[
@@ -135,8 +158,6 @@ function CertificateResult({ result, reVerifyUrl }) {
           ['Part B complete', c.partBComplete ? 'Yes' : 'No'],
         ]}
       />
-
-      <Note tone={c.pdfIntegrity === 'PDF_INTACT' ? 'info' : 'warn'}>{pdfWhy}</Note>
 
       {(c.signatures ?? []).length > 0 && (
         <>
@@ -256,6 +277,7 @@ function CertificateSection() {
 
   return (
     <Section
+      accent
       title="Verify a section 63 certificate"
       description="Public. No account required — which is what makes this an independent check rather than our own word for it. The answer reports whether the certificate is genuine and whether the stored document still matches its published digest. It discloses no evidence, no case narrative and no personal data."
     >
@@ -447,12 +469,28 @@ export default function VerifyPage() {
   const scope = useReveal();
 
   return (
-    <div ref={scope} className="container space-y-6 py-8">
-      <PageHeader
-        title="Independent verification"
-        lede="Two checks that need nothing from us but a token: whether a section 63 certificate is genuine and still matches its published digest, and what was actually anchored from the ledger. No account, no session, no request for your identity."
-      />
+    <div ref={scope}>
+      {/* The one page a stranger lands on from a printed QR. It gets the same field the
+          front page has, so it reads as the same product — and the headline says what
+          the page is for before a single form appears. */}
+      <section className="relative overflow-hidden">
+        <Backdrop />
+        <div className="container relative flex flex-col items-center py-14 text-center sm:py-16">
+          <div className="will-reveal">
+            <Eyebrow>Public · no account, no session, no request for your identity</Eyebrow>
+          </div>
+          <h1 className="mt-5 max-w-3xl text-balance text-display-sm will-reveal">
+            Independent <span className="text-gradient">verification</span>
+          </h1>
+          <p className="mt-4 max-w-2xl text-balance text-base leading-relaxed text-muted-foreground will-reveal">
+            Two checks that need nothing from us but a token: whether a section 63 certificate
+            is genuine and still matches its published digest, and what was actually anchored
+            from the ledger.
+          </p>
+        </div>
+      </section>
 
+      <div className="container space-y-8 pb-12">
       <div className="grid gap-6 lg:grid-cols-2">
         <CertificateSection />
         <div className="space-y-6">
@@ -490,6 +528,7 @@ export default function VerifyPage() {
             </div>
           </Section>
         </div>
+      </div>
       </div>
     </div>
   );

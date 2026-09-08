@@ -59,6 +59,9 @@ export default {
         },
         // The three verdicts. Named for what they mean, not what colour they are, so
         // a component never has to decide what "green" implies.
+        // The accent gradient's two ends, usable as plain colours too (icons, rings).
+        'accent-from': 'hsl(var(--accent-from))',
+        'accent-to': 'hsl(var(--accent-to))',
         ok: { DEFAULT: 'hsl(var(--ok))', foreground: 'hsl(var(--ok-foreground))', muted: 'hsl(var(--ok-muted))' },
         warn: { DEFAULT: 'hsl(var(--warn))', foreground: 'hsl(var(--warn-foreground))', muted: 'hsl(var(--warn-muted))' },
         bad: { DEFAULT: 'hsl(var(--bad))', foreground: 'hsl(var(--bad-foreground))', muted: 'hsl(var(--bad-muted))' },
@@ -76,8 +79,54 @@ export default {
         // A hash is read character by character off a projector; it gets its own size
         // and never inherits body leading.
         hash: ['0.8125rem', { lineHeight: '1.5', letterSpacing: '0.01em' }],
+        // Display sizes for the landing hero. Tight leading and tracking so a two-line
+        // headline reads as one shape rather than two rows of text.
+        'display-sm': ['2.75rem', { lineHeight: '1.05', letterSpacing: '-0.03em', fontWeight: '600' }],
+        display: ['3.75rem', { lineHeight: '1.02', letterSpacing: '-0.035em', fontWeight: '600' }],
+        'display-lg': ['4.75rem', { lineHeight: '1', letterSpacing: '-0.04em', fontWeight: '600' }],
+      },
+      boxShadow: {
+        'elev-1': 'var(--shadow-1)',
+        'elev-2': 'var(--shadow-2)',
+        'elev-3': 'var(--shadow-3)',
+        glow: 'var(--glow)',
+      },
+      backgroundImage: {
+        'accent-gradient': 'linear-gradient(100deg, hsl(var(--accent-from)), hsl(var(--accent-to)))',
+        'accent-gradient-soft':
+          'linear-gradient(100deg, hsl(var(--accent-from) / 0.12), hsl(var(--accent-to) / 0.12))',
+      },
+      transitionTimingFunction: {
+        // One easing for every hover and reveal, so nothing feels "off" beside its neighbour.
+        out: 'cubic-bezier(0.16, 1, 0.3, 1)',
       },
       keyframes: {
+        // Magic UI. The CLI emits these as Tailwind v4 `@theme` blocks, which v3
+        // ignores; declaring them here is what makes `animate-shimmer-slide` etc. exist.
+        'shimmer-slide': { to: { transform: 'translate(calc(100cqw - 100%), 0)' } },
+        'spin-around': {
+          '0%': { transform: 'translateZ(0) rotate(0)' },
+          '15%, 35%': { transform: 'translateZ(0) rotate(90deg)' },
+          '65%, 85%': { transform: 'translateZ(0) rotate(270deg)' },
+          '100%': { transform: 'translateZ(0) rotate(360deg)' },
+        },
+        gradient: { to: { backgroundPosition: 'var(--bg-size, 300%) 0' } },
+        shine: {
+          '0%': { backgroundPosition: '0% 0%' },
+          '50%': { backgroundPosition: '100% 100%' },
+          to: { backgroundPosition: '0% 0%' },
+        },
+        'shiny-text': {
+          '0%, 90%, 100%': { backgroundPosition: 'calc(-100% - var(--shiny-width)) 0' },
+          '30%, 60%': { backgroundPosition: 'calc(100% + var(--shiny-width)) 0' },
+        },
+        aurora: {
+          '0%': { backgroundPosition: '0% 50%', transform: 'rotate(-5deg) scale(0.9)' },
+          '25%': { backgroundPosition: '50% 100%', transform: 'rotate(5deg) scale(1.1)' },
+          '50%': { backgroundPosition: '100% 50%', transform: 'rotate(-3deg) scale(0.95)' },
+          '75%': { backgroundPosition: '50% 0%', transform: 'rotate(3deg) scale(1.05)' },
+          '100%': { backgroundPosition: '0% 50%', transform: 'rotate(-5deg) scale(0.9)' },
+        },
         'accordion-down': {
           from: { height: '0' },
           to: { height: 'var(--radix-accordion-content-height)' },
@@ -88,6 +137,12 @@ export default {
         },
       },
       animation: {
+        'shimmer-slide': 'shimmer-slide var(--speed) ease-in-out infinite alternate',
+        'spin-around': 'spin-around calc(var(--speed) * 2) infinite linear',
+        gradient: 'gradient 8s linear infinite',
+        shine: 'shine var(--duration) infinite linear',
+        'shiny-text': 'shiny-text 8s infinite',
+        aurora: 'aurora 8s ease-in-out infinite alternate',
         'accordion-down': 'accordion-down 0.2s ease-out',
         'accordion-up': 'accordion-up 0.2s ease-out',
       },

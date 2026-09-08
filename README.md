@@ -17,7 +17,7 @@ Only the forensic laboratory decides authenticity. The AI decides what gets look
 | **Stack** | Node 20+ · Express · MongoDB · Vite (React) · Solidity |
 | **Anchoring** | **Monad Testnet**, chain ID **10143** — Merkle roots only |
 | **Identity** | Three external authority directories; no self-registration |
-| **Tests** | 453 backend + 36 contract, all passing |
+| **Tests** | 455 backend + 36 contract, all passing |
 | **Dependencies** | `npm audit`: 0 vulnerabilities |
 
 ---
@@ -55,9 +55,7 @@ npm run health
 
 ### Already have MongoDB?
 
-Skip `npm run mongo:dev` entirely and point `MONGO_URI` at your server. Nothing else changes — no service knows how the database got there.
-
-> **Note on the current `.env`:** it contains a MongoDB Atlas connection string whose password is still the placeholder `<Xmind@401>`. Services will not start against it (`querySrv EBADNAME`). Either fill in the real password **percent-encoded** (`<`, `>`, `@`, `:`, `/` must all be escaped in a Mongo URI), or set `MONGO_URI=mongodb://127.0.0.1:27017` to use the local server.
+Skip `npm run mongo:dev` entirely and point `MONGO_URI` at your server. Nothing else changes — no service knows how the database got there. If the URI carries a password, remember that `@`, `:`, `/`, `<` and `>` must be percent-encoded inside a Mongo URI.
 
 ---
 
@@ -65,10 +63,11 @@ Skip `npm run mongo:dev` entirely and point `MONGO_URI` at your server. Nothing 
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
-│                     CLIENT (Vite, :5173)                            │
-│   login · officer · sho · fsl · court · lawyer · verify (public)    │
-│   lib/crypto.js  SHA-256 + ECDSA P-256 (Web Crypto)                 │
-│                  private key non-extractable, in IndexedDB          │
+│                 CLIENT (React SPA on Vite, :5173)                   │
+│   /login · /officer · /station · /court · /lab · /counsel           │
+│   /verify (public, no session)                                      │
+│   src/lib/crypto.js  SHA-256 + ECDSA P-256 (Web Crypto)             │
+│                      private key non-extractable, in IndexedDB      │
 └────────────────────────────┬────────────────────────────────────────┘
                              │ JWT (15 min) + rotating refresh
 ┌────────────────────────────┴────────────────────────────────────────┐
@@ -128,7 +127,7 @@ lexx/
 │   ├── controllers/ routes/
 │   └── tests/            unit · integration · authz · redteam
 │
-├── frontend/             Vite MPA, React, no framework
+├── frontend/             Vite SPA — React 18, Redux Toolkit, TanStack Query, Tailwind, shadcn/ui, Magic UI, GSAP
 ├── contracts/            LexxAnchor.sol + Hardhat (its own package)
 ├── seed/                 seed-all.js · reset.js
 ├── scripts/              bootstrap-env · mongo-dev-server · health-check
@@ -147,7 +146,7 @@ lexx/
 | `npm run seed` | Build the full demo state **through the real API** |
 | `npm run reset` | Drop `lexx_core` and clear the vault (`--directories` to reseed those too) |
 | `npm run health` | Check MongoDB, all three directories, the API and the RPC |
-| `npm test` | The whole backend suite (453 tests) |
+| `npm test` | The whole backend suite (455 tests) |
 | `npm run test:authz` | Just the authorization matrix |
 | `npm run test:redteam` | Just the adversarial suite |
 | `npm run lint` | ESLint across backend, directories, frontend, scripts |

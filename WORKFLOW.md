@@ -33,7 +33,7 @@
 | Dimension | Status |
 |---|---|
 | Maturity | **Working prototype**, feature-complete against its design specification |
-| Backend tests | **453 passing**, 15 suites, 0 skipped, 0 failing |
+| Backend tests | **455 passing**, 15 suites, 0 skipped, 0 failing |
 | Contract tests | **36 passing** |
 | Lint | 0 errors (10 documented false-positive warnings) |
 | API surface | **56 routes**, all documented in `docs/API.md` |
@@ -134,7 +134,7 @@ Roles are **derived from external directories**, never assigned inside LEXX.
   - **OpenZeppelin Contracts v5** — `AccessControl`, `MerkleProof`
   - **Monad Testnet** — chain ID **10143**
 - **Testing**
-  - **Vitest 5** — 453 backend tests across unit / integration / authz / redteam
+  - **Vitest 5** — 455 backend tests across unit / integration / authz / redteam
   - **supertest** — HTTP-level integration testing
   - **mongodb-memory-server** — real `mongod` binary per test suite (not a mock)
   - **Hardhat/Mocha/Chai** — 36 contract tests
@@ -318,4 +318,4 @@ Verify before asserting. Key files:
 | Demo script | `docs/DEMO_SCRIPT.md` |
 | Production plan | `docs/PRODUCTION_ROADMAP.md` |
 
-- **Commands to confirm status:** `npm test` (453 tests) · `npm run contracts:test` (36) · `npm run routes` (56) · `npm run health` (6 checks)
+- **Commands to confirm status:** `npm test` (455 tests) · `npm run contracts:test` (36) · `npm run routes` (56) · `npm run health` (6 checks)

@@ -18,7 +18,7 @@
 import { useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { toast } from 'sonner';
-import { Gavel, Link2, Scale, ShieldCheck, FileStack } from 'lucide-react';
+import { Gavel, Hourglass, Link2, ListTree, Scale, Send, ShieldCheck, FileStack } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -46,6 +46,7 @@ import {
   TableSkeleton,
   EmptyState,
 } from '@/components/common/Primitives';
+import { Eyebrow, StatCard } from '@/components/common/Premium';
 import { Denial, Note } from '@/components/common/Verdicts';
 import {
   useCases,
@@ -59,7 +60,17 @@ import {
 import { explain } from '@/lib/api';
 import { workingCaseSet, selectWorkingCaseId } from '@/features/ui/uiSlice';
 import { useReveal } from '@/hooks/useGsap';
-import { humanise, fmtDate } from '@/lib/utils';
+import { cn, humanise, fmtDate } from '@/lib/utils';
+
+/** Column headings read as labels over the data, not as a first row of it. */
+const HEADINGS = '[&_th]:text-xs [&_th]:uppercase [&_th]:tracking-wider hover:bg-transparent';
+
+/**
+ * The working case, marked by the accent on its leading edge. It is the one active
+ * state on the cause list, and the accent is reserved for exactly that kind of thing.
+ */
+const SELECTABLE_ROW =
+  'cursor-pointer data-[state=selected]:[box-shadow:inset_3px_0_0_0_hsl(var(--accent-from))]';
 
 /** A verdict pill. Colour comes from the semantic tokens so dark mode follows. */
 function Verdict({ tone = 'neutral', children }) {
@@ -70,7 +81,7 @@ function Verdict({ tone = 'neutral', children }) {
     neutral: 'border-border bg-muted text-muted-foreground',
   };
   return (
-    <Badge variant="outline" className={styles[tone] ?? styles.neutral}>
+    <Badge variant="outline" className={cn('rounded-full', styles[tone] ?? styles.neutral)}>
       {children}
     </Badge>
   );
@@ -100,6 +111,69 @@ const splitIds = (value) =>
     .split(',')
     .map((s) => s.trim())
     .filter(Boolean);
+
+// =============================================================== FIGURES ====
+
+/**
+ * The figures above the tabs. Each is a count the page already fetches for a tab, so
+ * nothing here is a second source of truth — and until a query has answered the card
+ * shows a dash, because a 0 that means "not loaded yet" is indistinguishable from a
+ * 0 that means "none", and the second is a finding.
+ */
+function CourtFigures({ caseId, workingCase, cases }) {
+  const ledger = useLedger(caseId);
+  const packs = usePacksForCase(caseId);
+
+  const listed = cases.data?.cases ?? [];
+  const entries = ledger.data?.entries ?? [];
+  const packList = packs.data?.packs ?? [];
+  const awaiting = packList.filter((p) => p.unruledExclusionCount > 0).length;
+  const served = packList.filter((p) => p.status === 'SERVED').length;
+
+  const onCase = Boolean(caseId);
+  const caseCaption = workingCase
+    ? `On FIR ${workingCase.firNumber}.`
+    : 'Open a case from the cause list.';
+
+  return (
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <StatCard
+        className="will-reveal"
+        label="Cases listed"
+        value={cases.isSuccess ? listed.length : '—'}
+        icon={Scale}
+        tone="accent"
+        caption="In the court your roster entry puts you in today."
+      />
+      <StatCard
+        className="will-reveal"
+        label="Ledger entries"
+        value={onCase && ledger.isSuccess ? entries.length : '—'}
+        icon={ListTree}
+        caption={caseCaption}
+        delay={0.1}
+      />
+      <StatCard
+        className="will-reveal"
+        label="Awaiting a ruling"
+        value={onCase && packs.isSuccess ? awaiting : '—'}
+        icon={Hourglass}
+        tone={awaiting > 0 ? 'warn' : undefined}
+        caption="Packs with an exclusion the registry has not decided. A pending exclusion blocks service."
+        delay={0.2}
+      />
+      <StatCard
+        className="will-reveal"
+        label="Packs served"
+        value={onCase && packs.isSuccess ? served : '—'}
+        icon={Send}
+        tone="ok"
+        caption="One watermark per recipient, each recorded in the ledger at the moment of service."
+        delay={0.3}
+      />
+    </div>
+  );
+}
 
 // ========================================================== 1. CAUSE LIST ====
 
@@ -134,7 +208,7 @@ function CauseListTab() {
       {!query.isPending && !query.isError && cases.length > 0 && (
         <Table>
           <TableHeader>
-            <TableRow>
+            <TableRow className={HEADINGS}>
               <TableHead>FIR</TableHead>
               <TableHead>Title</TableHead>
               <TableHead>Station</TableHead>
@@ -151,13 +225,13 @@ function CauseListTab() {
                 <TableRow
                   key={id}
                   data-state={id === String(selectedId) ? 'selected' : undefined}
-                  className="cursor-pointer"
+                  className={SELECTABLE_ROW}
                   onClick={() => dispatch(workingCaseSet(id))}
                 >
                   <TableCell>
                     <code className="font-mono text-xs">{c.firNumber}</code>
                   </TableCell>
-                  <TableCell className="max-w-[18rem]">{c.title ?? '—'}</TableCell>
+                  <TableCell className="max-w-[18rem] font-medium">{c.title ?? '—'}</TableCell>
                   <TableCell>
                     <code className="font-mono text-xs">{c.stationCode ?? '—'}</code>
                   </TableCell>
@@ -259,13 +333,81 @@ function ChainVerification() {
   );
 }
 
+/**
+ * The ledger as a timeline: one rail, one dot per entry, the most recent lit. "Most
+ * recent" is the highest sequence number rather than the last item, so the marker is
+ * right whichever order the server chose to list them in.
+ */
+function LedgerTimeline({ entries }) {
+  const latestSeq = Math.max(...entries.map((e) => e.seq));
+
+  return (
+    <ol className="border-l-2 border-border pl-6">
+      {entries.map((entry) => {
+        const latest = entry.seq === latestSeq;
+        const broken = entry.eventType === 'INTEGRITY_EXCEPTION';
+        return (
+          <li key={entry.seq} className="relative pb-6 last:pb-0">
+            <span
+              aria-hidden
+              className={cn(
+                'absolute top-1.5 size-2.5 rounded-full ring-4 ring-card left-[calc(-1.5rem_-_6px)]',
+                latest ? 'bg-accent-from' : 'bg-border',
+                // An integrity exception keeps its warning colour whatever its position
+                // on the rail. It is the one entry a judge must not scroll past.
+                broken && 'bg-bad'
+              )}
+            />
+            <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
+              <p className={cn('text-sm font-medium', broken && 'text-bad')}>
+                {humanise(entry.eventType)}
+              </p>
+              {latest && (
+                <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                  Most recent
+                </span>
+              )}
+            </div>
+            <p className="mt-0.5 text-xs text-muted-foreground">
+              <span className="font-mono tabular">seq {entry.seq}</span> ·{' '}
+              {fmtDate(entry.occurredAt)} · {humanise(entry.actorRole) || '—'}
+            </p>
+            {entry.payload?.exhibitCode && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                Exhibit <span className="font-mono">{entry.payload.exhibitCode}</span>
+              </p>
+            )}
+            {entry.payload?.orderType && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                Order: {entry.payload.orderType}
+              </p>
+            )}
+            <div className="mt-1.5">
+              <Hash value={entry.entryHash} label="Entry hash" />
+            </div>
+            {/* "In anchor batch", never "anchored in batch". The entry carries the
+                id of the batch it was gathered into — it does not carry whether that
+                batch was ever submitted to a chain, and only the anchoring record can
+                say that. */}
+            <p className="mt-1 text-xs text-muted-foreground">
+              {entry.anchorBatchId
+                ? `In anchor batch ${entry.anchorBatchId}`
+                : 'Not yet batched'}
+            </p>
+          </li>
+        );
+      })}
+    </ol>
+  );
+}
+
 function LedgerTab() {
   const { caseId, workingCase } = useWorkingCase();
   const query = useLedger(caseId);
   const entries = query.data?.entries ?? [];
 
   return (
-    <div className="grid gap-6 xl:grid-cols-[1.6fr_1fr]">
+    <div className="grid items-start gap-6 xl:grid-cols-[1.6fr_1fr]">
       <Section
         title={workingCase ? `Ledger — FIR ${workingCase.firNumber}` : 'Ledger'}
         description="Every entry carries the hash of the one before it. There is no update and no delete code path against this collection, so what you are reading is the whole history rather than a state somebody arrived at."
@@ -282,46 +424,7 @@ function LedgerTab() {
           </EmptyState>
         )}
 
-        {caseId && entries.length > 0 && (
-          <ol className="space-y-5 border-l border-border pl-5">
-            {entries.map((entry) => (
-              <li key={entry.seq} className="relative space-y-1">
-                <span
-                  className={
-                    entry.eventType === 'INTEGRITY_EXCEPTION'
-                      ? 'absolute -left-[1.4rem] top-1.5 size-2 rounded-full bg-bad'
-                      : 'absolute -left-[1.4rem] top-1.5 size-2 rounded-full bg-border'
-                  }
-                />
-                <p className="text-sm font-medium">{humanise(entry.eventType)}</p>
-                <p className="text-xs text-muted-foreground">
-                  {fmtDate(entry.occurredAt)} · {humanise(entry.actorRole) || '—'} · sequence{' '}
-                  {entry.seq}
-                </p>
-                {entry.payload?.exhibitCode && (
-                  <p className="text-xs text-muted-foreground">
-                    Exhibit {entry.payload.exhibitCode}
-                  </p>
-                )}
-                {entry.payload?.orderType && (
-                  <p className="text-xs text-muted-foreground">
-                    Order: {entry.payload.orderType}
-                  </p>
-                )}
-                <Hash value={entry.entryHash} label="Entry hash" />
-                {/* "In anchor batch", never "anchored in batch". The entry carries the
-                    id of the batch it was gathered into — it does not carry whether that
-                    batch was ever submitted to a chain, and only the anchoring record can
-                    say that. */}
-                <p className="text-xs text-muted-foreground">
-                  {entry.anchorBatchId
-                    ? `In anchor batch ${entry.anchorBatchId}`
-                    : 'Not yet batched'}
-                </p>
-              </li>
-            ))}
-          </ol>
-        )}
+        {caseId && entries.length > 0 && <LedgerTimeline entries={entries} />}
       </Section>
 
       <Section
@@ -372,7 +475,7 @@ function OrdersTab() {
   };
 
   return (
-    <div className="grid gap-6 xl:grid-cols-[1.4fr_1fr]">
+    <div className="grid items-start gap-6 xl:grid-cols-[1.4fr_1fr]">
       <Section
         title={workingCase ? `Judicial order — FIR ${workingCase.firNumber}` : 'Judicial order'}
         description="The order is appended to the case ledger under the authority identifier of whoever entered it, and it can never be edited or withdrawn — only followed by another order."
@@ -452,6 +555,9 @@ function OrdersTab() {
         title="Why there is no delete button"
         description="Standing note. It applies to this form and to every other write path in the system."
       >
+        <span className="grid size-10 place-items-center rounded-lg bg-accent-gradient-soft text-accent-from">
+          <Gavel className="size-5" />
+        </span>
         <Note>
           There is no delete endpoint anywhere in this system — not for a case, an exhibit, a
           custody item, a disclosure pack or a ledger entry. Where another design would remove
@@ -495,7 +601,7 @@ function PackDiscovery({ caseId, onUsePack }) {
   return (
     <Table>
       <TableHeader>
-        <TableRow>
+        <TableRow className={HEADINGS}>
           <TableHead>Pack</TableHead>
           <TableHead>Status</TableHead>
           <TableHead>Exhibits</TableHead>
@@ -530,7 +636,7 @@ function PackDiscovery({ caseId, onUsePack }) {
             <TableCell className="whitespace-nowrap text-muted-foreground">
               {fmtDate(p.servedOn)}
             </TableCell>
-            <TableCell>
+            <TableCell className="text-right">
               <Button variant="ghost" size="sm" onClick={() => onUsePack(p.packId)}>
                 Use this pack
               </Button>
@@ -651,7 +757,7 @@ function ApprovePanel({ packId }) {
 
           {result.pendingExclusions?.length > 0 && (
             <div className="space-y-1">
-              <p className="text-xs uppercase tracking-wide text-muted-foreground">
+              <p className="text-xs uppercase tracking-wider text-muted-foreground">
                 Pending exclusions
               </p>
               <ul className="space-y-1">
@@ -666,7 +772,7 @@ function ApprovePanel({ packId }) {
 
           {result.pack?.excludedItems?.length > 0 && (
             <div className="space-y-1">
-              <p className="text-xs uppercase tracking-wide text-muted-foreground">
+              <p className="text-xs uppercase tracking-wider text-muted-foreground">
                 Exclusions on record
               </p>
               <ul className="space-y-2">
@@ -728,6 +834,7 @@ function ServePanel({ packId }) {
       </div>
 
       <Button onClick={onServe} disabled={!packId || serve.isPending}>
+        <Send className="size-4" />
         {serve.isPending ? 'Serving…' : 'Serve the pack'}
       </Button>
 
@@ -748,7 +855,7 @@ function ServePanel({ packId }) {
           ) : (
             <Table>
               <TableHeader>
-                <TableRow>
+                <TableRow className={HEADINGS}>
                   <TableHead>Recipient</TableHead>
                   <TableHead>Watermark identity</TableHead>
                   <TableHead>Token</TableHead>
@@ -831,7 +938,7 @@ function DisclosureTab() {
         </p>
       </Section>
 
-      <div className="grid gap-6 xl:grid-cols-2">
+      <div className="grid items-start gap-6 xl:grid-cols-2">
         <Section
           title="Approve"
           description="Rule on each requested exclusion and fix the redaction variant. A pack with an undecided exclusion cannot be served, which is what stops material being withheld by silence."
@@ -839,7 +946,10 @@ function DisclosureTab() {
           <ApprovePanel packId={packId.trim()} />
         </Section>
 
+        {/* Serving is the act the whole tab leads to, so it is the panel that carries
+            the beam. */}
         <Section
+          accent
           title="Serve"
           description="Mints one watermark per recipient and records each one in the ledger. This is the act that starts the disclosure obligation running against the court's own record."
         >
@@ -854,37 +964,50 @@ function DisclosureTab() {
 
 export default function CourtPage() {
   const [tab, setTab] = useState('cause-list');
-  // Each tab's panels mount when it is opened, so the reveal has to run again then —
-  // `.will-reveal` starts at opacity 0 and nothing else clears it.
-  const scope = useReveal('.will-reveal', { deps: [tab] });
+  const scope = useReveal();
 
   const { caseId, workingCase, cases } = useWorkingCase();
 
   return (
-    <div ref={scope} className="container space-y-6 py-8">
-      <PageHeader
-        title="Court"
-        lede="The cause list your roster puts you in, the ledger behind each case, the orders that are the only way anything in this system changes, and the disclosure the registry rules on before defence counsel sees a single exhibit."
-        actions={
-          caseId && workingCase ? (
-            <Badge variant="secondary" className="font-normal">
-              FIR {workingCase.firNumber}
-              {workingCase.cnrNumber ? ` · ${workingCase.cnrNumber}` : ''}
-            </Badge>
-          ) : null
-        }
-      />
+    <div ref={scope} className="container space-y-8 py-10">
+      <div className="space-y-4">
+        <div className="will-reveal">
+          <Eyebrow>Court · cause list, ledger, orders, disclosure</Eyebrow>
+        </div>
+        <PageHeader
+          title="Court"
+          lede="The cause list your roster puts you in, the ledger behind each case, the orders that are the only way anything in this system changes, and the disclosure the registry rules on before defence counsel sees a single exhibit."
+          actions={
+            caseId && workingCase ? (
+              <Badge variant="secondary" className="rounded-full px-3 py-1 font-normal">
+                FIR {workingCase.firNumber}
+                {workingCase.cnrNumber ? ` · ${workingCase.cnrNumber}` : ''}
+              </Badge>
+            ) : null
+          }
+        />
+      </div>
 
       {/* A refusal on the cause list is the one error that would otherwise be invisible
           on the tabs that depend on it. */}
       {cases.isError && <Denial error={cases.error} heading="Cause list not readable" />}
 
+      <CourtFigures caseId={caseId} workingCase={workingCase} cases={cases} />
+
       <Tabs value={tab} onValueChange={setTab} className="space-y-6">
-        <TabsList>
-          <TabsTrigger value="cause-list">Cause list</TabsTrigger>
-          <TabsTrigger value="ledger">Ledger</TabsTrigger>
-          <TabsTrigger value="orders">Orders</TabsTrigger>
-          <TabsTrigger value="disclosure">Disclosure</TabsTrigger>
+        <TabsList className="h-auto rounded-full p-1 will-reveal">
+          <TabsTrigger value="cause-list" className="rounded-full px-4 py-1.5">
+            Cause list
+          </TabsTrigger>
+          <TabsTrigger value="ledger" className="rounded-full px-4 py-1.5">
+            Ledger
+          </TabsTrigger>
+          <TabsTrigger value="orders" className="rounded-full px-4 py-1.5">
+            Orders
+          </TabsTrigger>
+          <TabsTrigger value="disclosure" className="rounded-full px-4 py-1.5">
+            Disclosure
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="cause-list" className="mt-0">

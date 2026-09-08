@@ -540,6 +540,22 @@ export async function materialiseScopeFilter(user, resourceType = RESOURCE_TYPE.
   const caseKey = resourceType === RESOURCE_TYPE.CASE ? '_id' : 'caseId';
   const byCaseIds = (ids) => (ids.length ? { [caseKey]: { $in: ids } } : null);
 
+  // A police or court scope is JURISDICTION-shaped — ioUserId, stationCode,
+  // districtCode, courtId — and those are fields of a case. An exhibit carries none
+  // of them, only `caseId`. Applying the raw filter to `evidence` therefore did two
+  // different wrong things depending on the query path: an aggregation matched
+  // nothing (an SHO's review queue silently emptied), and a find() under strictQuery
+  // dropped the unknown keys and matched everything (an officer listing without a
+  // caseId saw every exhibit in the system). Resolve to case ids first, always.
+  const JURISDICTION_KEYS = ['ioUserId', 'stationCode', 'districtCode', 'courtId'];
+  if (
+    resourceType === RESOURCE_TYPE.EVIDENCE &&
+    JURISDICTION_KEYS.some((k) => k in filter)
+  ) {
+    const caseIds = await Case.distinct('_id', filter);
+    return byCaseIds(caseIds);
+  }
+
   if (filter.__caseScope) {
     const caseIds = await Case.distinct('_id', filter.__caseScope);
     return byCaseIds(caseIds);

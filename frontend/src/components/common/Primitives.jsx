@@ -9,12 +9,23 @@
  */
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
+import { BorderBeam } from '@/components/ui/border-beam';
+import { ACCENT_HEX } from '@/components/common/Premium';
 import { cn } from '@/lib/utils';
 
-/** A titled panel. `description` is the one-line "why this exists" under the title. */
-export function Section({ title, description, actions, children, className }) {
+/**
+ * A titled panel. `description` is the one-line "why this exists" under the title.
+ *
+ * `accent` adds a travelling border beam. It marks the one panel on a screen that the
+ * viewer should look at first — the upload pipeline, the pack being served — and it
+ * loses all meaning if two panels carry it, so a page gets one.
+ */
+export function Section({ title, description, actions, children, accent, className }) {
   return (
-    <Card className={cn('will-reveal', className)}>
+    <Card className={cn('surface surface-lift relative overflow-hidden will-reveal', className)}>
+      {accent && (
+        <BorderBeam size={140} duration={10} colorFrom={ACCENT_HEX.from} colorTo={ACCENT_HEX.to} />
+      )}
       {(title || actions) && (
         <CardHeader className="flex flex-row items-start justify-between gap-4 space-y-0">
           <div className="space-y-1">

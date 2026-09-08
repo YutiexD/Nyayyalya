@@ -270,4 +270,4 @@ The key is non-extractable in the browser, so it cannot be exported — but a st
 A hash of a photograph of an identifiable victim is still linked to that victim, permanently and publicly. Roots only.
 
 **"Is this production-ready?"**
-No, and `docs/PRODUCTION_READINESS.md` says exactly what is missing. The master key is in an environment variable and belongs in an HSM; the directories are mocks; there is no HA story. What *is* solid is the security model, and it has 453 tests behind it.
+No, and `docs/PRODUCTION_READINESS.md` says exactly what is missing. The master key is in an environment variable and belongs in an HSM; the directories are mocks; there is no HA story. What *is* solid is the security model, and it has 455 tests behind it.

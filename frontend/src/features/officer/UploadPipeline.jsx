@@ -12,7 +12,7 @@
  * how an evidence register becomes untrustworthy.
  */
 import { useState } from 'react';
-import { Check, X, Loader2, Upload, FileDigit, PenLine, ServerCog } from 'lucide-react';
+import { Check, X, Loader2, Upload, FileDigit, PenLine, ServerCog, ShieldCheck } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -33,7 +33,7 @@ import { Denial, Note } from '@/components/common/Verdicts';
 import { hashFile, signHashHex, getOrCreateKeyPair } from '@/lib/crypto';
 import { useUploadEvidence } from '@/hooks/queries';
 import { ApiError } from '@/lib/api';
-import { fmtBytes, cn } from '@/lib/utils';
+import { fmtBytes, cn, humanise } from '@/lib/utils';
 
 const SOURCE_TYPES = ['MOBILE', 'COMPUTER', 'DVR', 'CD_DVD', 'FLASH_DRIVE', 'SERVER', 'CLOUD', 'OTHER'];
 
@@ -47,16 +47,27 @@ const STEP_META = [
 /** idle | running | done | failed, per step, with whatever the step produced. */
 const initialSteps = () => STEP_META.map(() => ({ state: 'idle', detail: null }));
 
+/** A digest or a signature. Long hex is data and gets a block of its own, not a sentence. */
+const isHex = (s) => typeof s === 'string' && /^[0-9a-f]{40,}$/i.test(s);
+
 function StepRow({ index, meta, step }) {
   const Icon = meta.icon;
+  const running = step.state === 'running';
   return (
-    <li className="flex items-start gap-3 py-2.5">
+    <li
+      aria-current={running ? 'step' : undefined}
+      className={cn(
+        'surface relative flex items-start gap-3 p-3',
+        running && 'glow border-accent-from/40',
+        step.state === 'failed' && 'border-bad/40'
+      )}
+    >
       <span
         className={cn(
-          'mt-0.5 grid size-6 shrink-0 place-items-center rounded-full border text-[11px] font-medium',
+          'mt-0.5 grid size-7 shrink-0 place-items-center rounded-full border text-[11px] font-semibold tabular-nums',
           step.state === 'done' && 'border-ok/40 bg-ok-muted text-ok',
           step.state === 'failed' && 'border-bad/40 bg-bad-muted text-bad',
-          step.state === 'running' && 'border-border bg-muted',
+          running && 'border-accent-from/40 bg-accent-gradient-soft text-accent-from',
           step.state === 'idle' && 'border-border text-muted-foreground'
         )}
       >
@@ -64,36 +75,43 @@ function StepRow({ index, meta, step }) {
           <Check className="size-3.5" />
         ) : step.state === 'failed' ? (
           <X className="size-3.5" />
-        ) : step.state === 'running' ? (
+        ) : running ? (
           <Loader2 className="size-3.5 animate-spin" />
         ) : (
           index + 1
         )}
       </span>
-      <div className="min-w-0 flex-1">
-        <div className="flex items-center gap-2">
-          <Icon className="size-3.5 text-muted-foreground" />
+      <div className="min-w-0 flex-1 space-y-1.5">
+        <div className="flex flex-wrap items-center gap-2">
+          <Icon className={cn('size-3.5', running ? 'text-accent-from' : 'text-muted-foreground')} />
           <span className="text-sm font-medium">{meta.label}</span>
+          {running && (
+            <Badge
+              variant="outline"
+              className="rounded-full border-accent-from/40 bg-accent-gradient-soft text-[10px] text-accent-from"
+            >
+              WORKING
+            </Badge>
+          )}
           {step.state === 'done' && (
-            <Badge variant="outline" className="border-ok/40 bg-ok-muted text-[10px] text-ok">
+            <Badge variant="outline" className="rounded-full border-ok/40 bg-ok-muted text-[10px] text-ok">
               DONE
             </Badge>
           )}
           {step.state === 'failed' && (
-            <Badge variant="outline" className="border-bad/40 bg-bad-muted text-[10px] text-bad">
+            <Badge variant="outline" className="rounded-full border-bad/40 bg-bad-muted text-[10px] text-bad">
               FAILED
             </Badge>
           )}
         </div>
-        {step.detail && (
-          <div className="mt-1 min-w-0">
-            {/^[0-9a-f]{40,}$/i.test(step.detail) ? (
+        {step.detail &&
+          (isHex(step.detail) ? (
+            <div className="rounded-md bg-muted/60 p-2">
               <Hash value={step.detail} />
-            ) : (
-              <p className="text-xs text-muted-foreground">{step.detail}</p>
-            )}
-          </div>
-        )}
+            </div>
+          ) : (
+            <p className="text-xs text-muted-foreground">{step.detail}</p>
+          ))}
       </div>
     </li>
   );
@@ -193,13 +211,19 @@ export function UploadPipeline({ caseId, disabled, disabledReason }) {
 
   return (
     <Section
+      accent
       title="Upload an exhibit"
       description="Four steps, all of them visible. The file is hashed and signed on this machine before it is sent; the server recomputes both and refuses anything that does not agree — and records the refusal."
+      actions={
+        <span className="grid size-9 place-items-center rounded-lg bg-accent-gradient-soft text-accent-from">
+          <Upload className="size-4" />
+        </span>
+      }
     >
       {disabled ? (
         <Note tone="warn">{disabledReason}</Note>
       ) : (
-        <form onSubmit={onSubmit} className="space-y-4">
+        <form onSubmit={onSubmit} className="space-y-5">
           <div className="space-y-2">
             <Label htmlFor="file">File</Label>
             <Input
@@ -207,7 +231,15 @@ export function UploadPipeline({ caseId, disabled, disabledReason }) {
               type="file"
               onChange={(e) => setFile(e.target.files?.[0] ?? null)}
               required
+              className="cursor-pointer"
             />
+            {file && (
+              <p className="flex min-w-0 items-center gap-2 text-xs">
+                <FileDigit className="size-3.5 shrink-0 text-accent-from" />
+                <span className="truncate font-medium">{file.name}</span>
+                <span className="shrink-0 text-muted-foreground">{fmtBytes(file.size)}</span>
+              </p>
+            )}
             <p className="text-xs text-muted-foreground">
               Hashed in this browser before it is sent. Nothing is uploaded first and checked later.
             </p>
@@ -230,7 +262,7 @@ export function UploadPipeline({ caseId, disabled, disabledReason }) {
                 <SelectContent>
                   {SOURCE_TYPES.map((t) => (
                     <SelectItem key={t} value={t}>
-                      {t}
+                      {humanise(t)}
                     </SelectItem>
                   ))}
                 </SelectContent>
@@ -243,10 +275,12 @@ export function UploadPipeline({ caseId, disabled, disabledReason }) {
             <Textarea id="description" rows={2} value={fields.description} onChange={set('description')} />
           </div>
 
-          <Separator />
-          <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
-            BSA s.63 Schedule, Part A — the device this came from
-          </p>
+          <div className="flex items-center gap-3 pt-1">
+            <p className="shrink-0 text-xs font-medium uppercase tracking-wider text-muted-foreground">
+              BSA s.63 Schedule, Part A — the device this came from
+            </p>
+            <Separator className="flex-1" />
+          </div>
 
           <div className="grid gap-4 sm:grid-cols-3">
             {[
@@ -272,34 +306,61 @@ export function UploadPipeline({ caseId, disabled, disabledReason }) {
             </div>
           </div>
 
-          <Button type="submit" disabled={running || !file || !caseId || !fields.title.trim()}>
-            {running ? <Loader2 className="size-4 animate-spin" /> : <Upload className="size-4" />}
-            {running ? 'Working…' : 'Hash, sign and upload'}
-          </Button>
+          <div className="flex flex-wrap items-center gap-3 pt-1">
+            <Button type="submit" disabled={running || !file || !caseId || !fields.title.trim()}>
+              {running ? <Loader2 className="size-4 animate-spin" /> : <Upload className="size-4" />}
+              {running ? 'Working…' : 'Hash, sign and upload'}
+            </Button>
+            <p className="text-xs text-muted-foreground">
+              Nothing leaves this machine until the digest and the signature both exist.
+            </p>
+          </div>
         </form>
       )}
 
       {steps.some((s) => s.state !== 'idle') && (
-        <>
-          <Separator />
-          <ol className="divide-y">
-            {STEP_META.map((meta, i) => (
-              <StepRow key={meta.label} index={i} meta={meta} step={steps[i]} />
-            ))}
-          </ol>
-        </>
+        <ol className="grid gap-2 rounded-xl bg-muted/40 p-2">
+          {STEP_META.map((meta, i) => (
+            <StepRow key={meta.label} index={i} meta={meta} step={steps[i]} />
+          ))}
+        </ol>
       )}
 
       {error && <Denial error={error} heading="Upload refused" />}
 
       {result?.evidence && (
-        <div className="space-y-3 rounded-md border border-ok/40 bg-ok-muted p-4">
-          <p className="text-sm font-semibold text-ok">Server verification</p>
+        <div className="border-gradient space-y-4 rounded-xl p-5 shadow-elev-1">
+          <div className="flex items-start gap-3">
+            <span className="grid size-9 shrink-0 place-items-center rounded-lg bg-ok-muted text-ok">
+              <ShieldCheck className="size-4" />
+            </span>
+            <div className="space-y-0.5">
+              <p className="text-sm font-semibold">Server verification</p>
+              <p className="text-xs text-muted-foreground">
+                Digest recomputed from the bytes the server received; signature checked against
+                the key on record for this account.
+              </p>
+            </div>
+          </div>
+
+          <div className="grid gap-3 lg:grid-cols-2">
+            <div className="min-w-0 rounded-md bg-muted/60 p-3">
+              <p className="mb-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                Hash (client, in browser)
+              </p>
+              <Hash value={result.evidence.sha256Client} />
+            </div>
+            <div className="min-w-0 rounded-md bg-muted/60 p-3">
+              <p className="mb-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                Hash (server, recomputed)
+              </p>
+              <Hash value={result.evidence.sha256Server} />
+            </div>
+          </div>
+
           <KeyValue
             rows={[
-              ['Exhibit code', <span key="c" className="font-mono">{result.evidence.exhibitCode}</span>],
-              ['Hash (client, in browser)', <Hash key="h1" value={result.evidence.sha256Client} />],
-              ['Hash (server, recomputed)', <Hash key="h2" value={result.evidence.sha256Server} />],
+              ['Exhibit code', <code key="c" className="font-mono text-xs">{result.evidence.exhibitCode}</code>],
               ['Size', fmtBytes(result.evidence.sizeBytes)],
               // From the receipt: it is the officer's own independent copy of what was
               // submitted, and it carries the chain facts the ledger recorded.

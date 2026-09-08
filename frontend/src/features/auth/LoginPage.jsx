@@ -25,12 +25,14 @@ import { useDispatch } from 'react-redux';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { KeyRound, ShieldCheck, Smartphone, CheckCircle2 } from 'lucide-react';
 
+import { BorderBeam } from '@/components/ui/border-beam';
+import { Backdrop, Eyebrow, ACCENT_HEX } from '@/components/common/Premium';
+
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
 
 import { api, ApiError, setSession, clearSession, HOME_FOR_ROLE } from '@/lib/api';
@@ -209,18 +211,22 @@ export default function LoginPage() {
   };
 
   return (
-    <div className="container grid min-h-[calc(100vh-10rem)] items-center gap-10 py-12 lg:grid-cols-[1.05fr_1fr] lg:gap-16">
+    <section className="relative overflow-hidden">
+    <Backdrop />
+    {/* The reveal scope is the whole grid, not the copy column: the sign-in card is a
+        reveal target too, and a target outside the scope is never revealed. */}
+    <div ref={scope} className="container relative grid min-h-[calc(100vh-10rem)] items-center gap-10 py-12 lg:grid-cols-[1.05fr_1fr] lg:gap-16">
       {/* The standing explanation. It is the same on every step, because it is the
           architectural claim the whole product rests on. */}
-      <div ref={scope} className="space-y-6">
-        <div className="space-y-3">
-          <Badge variant="secondary" className="will-reveal">
-            Digital evidence register
-          </Badge>
-          <h1 className="text-balance text-4xl font-semibold tracking-tight will-reveal sm:text-5xl">
+      <div className="space-y-6">
+        <div className="space-y-4">
+          <div className="will-reveal">
+            <Eyebrow>Digital evidence register</Eyebrow>
+          </div>
+          <h1 className="text-balance text-display-sm will-reveal sm:text-display">
             Evidence that can be checked,
             <br />
-            not merely trusted.
+            <span className="text-gradient">not merely trusted.</span>
           </h1>
         </div>
         <div className="space-y-4 border-l-2 border-border pl-5 text-sm leading-relaxed text-muted-foreground">
@@ -241,7 +247,10 @@ export default function LoginPage() {
         </div>
       </div>
 
-      <Card className="w-full">
+      <div className="will-reveal w-full">
+      <Card className="surface relative w-full overflow-hidden shadow-elev-3">
+        {/* One beam, on the one card that is the task. */}
+        <BorderBeam size={160} duration={10} colorFrom={ACCENT_HEX.from} colorTo={ACCENT_HEX.to} />
         <CardHeader className="space-y-3">
           <Stepper step={Math.min(step, 3)} />
           <div>
@@ -487,6 +496,8 @@ export default function LoginPage() {
           {error && <Denial error={error} heading="Sign-in refused" />}
         </CardContent>
       </Card>
+      </div>
     </div>
+    </section>
   );
 }

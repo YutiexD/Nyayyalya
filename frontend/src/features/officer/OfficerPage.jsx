@@ -10,13 +10,14 @@ import { useEffect, useMemo, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { toast } from 'sonner';
 import {
-  FileText, Scale, Gavel, PackageSearch, Boxes, ShieldCheck, Loader2, Search,
+  FileText, Scale, Gavel, PackageSearch, Boxes, ShieldCheck, Loader2, Search, FlaskConical,
 } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Textarea } from '@/components/ui/textarea';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
@@ -30,6 +31,7 @@ import { Separator } from '@/components/ui/separator';
 import {
   PageHeader, Section, KeyValue, Hash, TableSkeleton, EmptyState,
 } from '@/components/common/Primitives';
+import { Eyebrow, StatCard } from '@/components/common/Premium';
 import { Denial, Note, ReviewPriority, ForensicOpinion } from '@/components/common/Verdicts';
 import { UploadPipeline } from '@/features/officer/UploadPipeline';
 import {
@@ -39,19 +41,42 @@ import {
 } from '@/hooks/queries';
 import { selectWorkingCaseId, workingCaseSet } from '@/features/ui/uiSlice';
 import { useReveal } from '@/hooks/useGsap';
-import { humanise, fmtDate, fmtBytes } from '@/lib/utils';
+import { humanise, fmtDate, fmtBytes, cn } from '@/lib/utils';
 
 const CUSTODY_LOCATIONS = ['FIELD', 'MALKHANA', 'FSL', 'COURT'];
 
 /** Investigative writes stop at the chargesheet. Every tab needs to know. */
 const WRITABLE_STAGES = ['UNDER_INVESTIGATION', 'FURTHER_INVESTIGATION'];
 
+/**
+ * The wording that must appear beside every triage priority.
+ *
+ * A fallback, not a substitute: the API sends its own text and that is what renders.
+ * This exists so a response that somehow arrives without it still cannot put a
+ * machine priority on screen unqualified.
+ */
+const TRIAGE_FALLBACK =
+  'Automated triage only. Not expert opinion under BSA s.39 / IT Act s.79A.';
+
+/** Column headings, set once so every table on the page reads the same. */
+const TABLE_HEAD = '[&_th]:text-xs [&_th]:uppercase [&_th]:tracking-wider';
+
+/** A digest gets a block of its own: long hex read off a projector is data, not prose. */
+const DIGEST = 'block rounded-md bg-muted/60 p-2';
+
+/**
+ * A count for a StatCard, or a dash until the query has something to count. A zero
+ * that means "not loaded yet" looks exactly like a zero that means "none", and only
+ * the second is a fact about the case.
+ */
+const figure = (query, n) => (query.isSuccess && !query.isPlaceholderData ? n : '—');
+
 function CasePicker({ cases, value, onChange }) {
   return (
-    <div className="space-y-2">
+    <div className="min-w-[18rem] flex-1 space-y-2 sm:max-w-xl">
       <Label htmlFor="working-case">Working case</Label>
       <Select value={value ?? ''} onValueChange={onChange}>
-        <SelectTrigger id="working-case" className="max-w-xl">
+        <SelectTrigger id="working-case">
           <SelectValue placeholder="Select a case" />
         </SelectTrigger>
         <SelectContent>
@@ -62,6 +87,33 @@ function CasePicker({ cases, value, onChange }) {
           ))}
         </SelectContent>
       </Select>
+    </div>
+  );
+}
+
+/** Where the working case stands, beside the picker, so no tab has to repeat it. */
+function CaseStanding({ caseDoc }) {
+  const writable = WRITABLE_STAGES.includes(caseDoc.stage);
+  return (
+    <div className="flex flex-wrap items-center gap-2 pb-1">
+      <Badge variant="secondary" className="rounded-full">
+        {humanise(caseDoc.stage)}
+      </Badge>
+      <Badge variant="outline" className="rounded-full">
+        {humanise(caseDoc.sensitivityClass)}
+      </Badge>
+      <Badge
+        variant="outline"
+        className={cn(
+          'rounded-full',
+          writable ? 'border-ok/40 bg-ok-muted text-ok' : 'border-warn/40 bg-warn-muted text-warn'
+        )}
+      >
+        {writable ? 'Open to investigative writes' : 'Closed at the chargesheet'}
+      </Badge>
+      {caseDoc.cnrNumber && (
+        <span className="font-mono text-xs text-muted-foreground">CNR {caseDoc.cnrNumber}</span>
+      )}
     </div>
   );
 }
@@ -97,7 +149,7 @@ function CasesTab({ cases, isPending, error }) {
             <Input id="fir" value={fir} onChange={(e) => setFir(e.target.value)} placeholder="0124/2026" required />
           </div>
           <Button type="submit" disabled={create.isPending || !fir.trim()}>
-            {create.isPending && <Loader2 className="size-4 animate-spin" />}
+            {create.isPending ? <Loader2 className="size-4 animate-spin" /> : <FileText className="size-4" />}
             Create case from FIR
           </Button>
         </form>
@@ -122,59 +174,65 @@ function CasesTab({ cases, isPending, error }) {
             behind it.
           </EmptyState>
         ) : (
-          <div className="overflow-x-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>FIR</TableHead>
-                  <TableHead>Title</TableHead>
-                  <TableHead>Station</TableHead>
-                  <TableHead>Stage</TableHead>
-                  <TableHead>Sensitivity</TableHead>
-                  <TableHead>Max punishment</TableHead>
-                  <TableHead>CNR</TableHead>
-                  <TableHead />
+          <Table>
+            <TableHeader className={TABLE_HEAD}>
+              <TableRow>
+                <TableHead>FIR</TableHead>
+                <TableHead>Title</TableHead>
+                <TableHead>Station</TableHead>
+                <TableHead>Stage</TableHead>
+                <TableHead>Sensitivity</TableHead>
+                <TableHead>Max punishment</TableHead>
+                <TableHead>CNR</TableHead>
+                <TableHead />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {cases.map((c) => (
+                <TableRow key={c._id} className="hover:bg-muted/50">
+                  <TableCell className="font-medium">{c.firNumber}</TableCell>
+                  <TableCell className="max-w-64 truncate">{c.title}</TableCell>
+                  <TableCell>
+                    <code className="font-mono text-xs">{c.stationCode}</code>
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="secondary" className="rounded-full">
+                      {humanise(c.stage)}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>
+                    <Badge variant="outline" className="rounded-full">
+                      {humanise(c.sensitivityClass)}
+                    </Badge>
+                  </TableCell>
+                  <TableCell className="tabular-nums">{c.maxPunishmentYears} yrs</TableCell>
+                  <TableCell>
+                    <code className="font-mono text-xs">{c.cnrNumber ?? '—'}</code>
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={jurisdiction.isPending}
+                      onClick={() =>
+                        jurisdiction.mutate(c._id, {
+                          onSuccess: (d) => setRouted({ caseId: c._id, ...d }),
+                          onError: (err) => toast.error(err.message ?? 'Could not compute'),
+                        })
+                      }
+                    >
+                      <Scale className="size-3.5" />
+                      Compute jurisdiction
+                    </Button>
+                  </TableCell>
                 </TableRow>
-              </TableHeader>
-              <TableBody>
-                {cases.map((c) => (
-                  <TableRow key={c._id}>
-                    <TableCell className="font-medium">{c.firNumber}</TableCell>
-                    <TableCell className="max-w-64 truncate">{c.title}</TableCell>
-                    <TableCell className="font-mono text-xs">{c.stationCode}</TableCell>
-                    <TableCell>
-                      <Badge variant="secondary">{humanise(c.stage)}</Badge>
-                    </TableCell>
-                    <TableCell>
-                      <Badge variant="outline">{humanise(c.sensitivityClass)}</Badge>
-                    </TableCell>
-                    <TableCell className="tabular-nums">{c.maxPunishmentYears} yrs</TableCell>
-                    <TableCell className="font-mono text-xs">{c.cnrNumber ?? '—'}</TableCell>
-                    <TableCell>
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        disabled={jurisdiction.isPending}
-                        onClick={() =>
-                          jurisdiction.mutate(c._id, {
-                            onSuccess: (d) => setRouted({ caseId: c._id, ...d }),
-                            onError: (err) => toast.error(err.message ?? 'Could not compute'),
-                          })
-                        }
-                      >
-                        <Scale className="size-3.5" />
-                        Compute jurisdiction
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
+              ))}
+            </TableBody>
+          </Table>
         )}
 
         {routed && (
-          <div className="rounded-md border bg-muted/40 p-4">
+          <div className="rounded-lg border bg-muted/30 p-4">
             <p className="mb-2 text-sm font-semibold">Jurisdiction</p>
             <KeyValue
               rows={[
@@ -212,24 +270,27 @@ function ExhibitDetail({ id }) {
     <div className="space-y-4">
       <KeyValue
         rows={[
-          ['Exhibit code', <span key="c" className="font-mono">{e.exhibitCode}</span>],
+          ['Exhibit code', <code key="c" className="font-mono text-xs">{e.exhibitCode}</code>],
           ['Title', e.title],
           ['Type', `${e.kind ? humanise(e.kind) : ''} ${e.mimeType ?? ''}`.trim()],
           ['Size', fmtBytes(e.sizeBytes)],
           [
             'Source device',
-            [e.sourceDevice?.sourceType, e.sourceDevice?.make, e.sourceDevice?.model]
+            [humanise(e.sourceDevice?.sourceType), e.sourceDevice?.make, e.sourceDevice?.model]
               .filter(Boolean)
               .join(' · ') || '—',
           ],
           ['Serial / IMEI', e.sourceDevice?.serialNumber ?? e.sourceDevice?.imeiOrUid ?? '—'],
-          ['Digest (server)', <Hash key="h" value={e.sha256Server} />],
+          ['Digest (server)', <Hash key="h" value={e.sha256Server} className={DIGEST} />],
           ['Uploaded', fmtDate(e.createdAt)],
         ]}
       />
 
       {e.triage?.priority && (
-        <ReviewPriority priority={e.triage.priority} disclaimer={e.triage.disclaimer} />
+        <ReviewPriority
+          priority={e.triage.priority}
+          disclaimer={e.triage.disclaimer ?? TRIAGE_FALLBACK}
+        />
       )}
       {e.forensic?.opinion && <ForensicOpinion forensic={e.forensic} />}
 
@@ -249,15 +310,16 @@ function ExhibitDetail({ id }) {
       </Button>
 
       {report && (
-        <div className="space-y-3 rounded-md border p-4">
+        <div className="space-y-3 rounded-lg border bg-muted/30 p-4">
+          <p className="text-sm font-semibold">Verification report</p>
           <KeyValue
             rows={[
               ['Stored file', humanise(report.fileIntegrity)],
               ['Signature', report.signatureValid ? 'Verified' : 'Not verified'],
               ['Ledger chain', humanise(report.chainIntegrity)],
               ['Anchored root', humanise(report.anchorIntegrity)],
-              ['Expected digest', <Hash key="a" value={report.expectedSha256} />],
-              ['Recomputed digest', <Hash key="b" value={report.recomputedSha256} />],
+              ['Expected digest', <Hash key="a" value={report.expectedSha256} className={DIGEST} />],
+              ['Recomputed digest', <Hash key="b" value={report.recomputedSha256} className={DIGEST} />],
             ]}
           />
           {/* The narrower claim, stated rather than implied: light 3 walks the
@@ -309,28 +371,46 @@ function EvidenceTab({ caseDoc, caseId }) {
             Upload one on the left. It will be hashed and signed here before it is sent.
           </EmptyState>
         ) : (
-          <div className="space-y-1">
-            {exhibits.map((e) => (
-              <button
-                key={e._id}
-                type="button"
-                onClick={() => setSelected(e._id)}
-                className={`flex w-full items-center justify-between gap-3 rounded-md border px-3 py-2.5 text-left transition-colors hover:bg-muted ${
-                  selected === e._id ? 'border-primary/50 bg-muted' : 'border-border'
-                }`}
-              >
-                <span className="min-w-0">
-                  <span className="block truncate text-sm font-medium">{e.title}</span>
-                  <span className="font-mono text-xs text-muted-foreground">{e.exhibitCode}</span>
-                </span>
-                {e.triage?.priority && (
-                  <Badge variant="outline" className="shrink-0 text-[10px]">
-                    {e.triage.priority}
-                  </Badge>
-                )}
-              </button>
-            ))}
-          </div>
+          <Table>
+            <TableHeader className={TABLE_HEAD}>
+              <TableRow>
+                <TableHead>Exhibit</TableHead>
+                <TableHead>Title</TableHead>
+                <TableHead>Review Priority</TableHead>
+                <TableHead />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {exhibits.map((e) => (
+                <TableRow
+                  key={e._id}
+                  data-state={selected === e._id ? 'selected' : undefined}
+                  className="cursor-pointer align-top hover:bg-muted/50"
+                  onClick={() => setSelected(e._id)}
+                >
+                  <TableCell>
+                    <code className="font-mono text-xs">{e.exhibitCode}</code>
+                  </TableCell>
+                  <TableCell className="max-w-[14rem] font-medium">{e.title}</TableCell>
+                  <TableCell className="max-w-[18rem]">
+                    {e.triage?.priority ? (
+                      <ReviewPriority
+                        priority={e.triage.priority}
+                        disclaimer={e.triage.disclaimer ?? TRIAGE_FALLBACK}
+                      />
+                    ) : (
+                      <span className="text-muted-foreground">—</span>
+                    )}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <Button variant="ghost" size="sm" onClick={() => setSelected(e._id)}>
+                      Open
+                    </Button>
+                  </TableCell>
+                </TableRow>
+              ))}
+            </TableBody>
+          </Table>
         )}
 
         {selected && (
@@ -390,18 +470,19 @@ function DisclosureTab({ caseId, caseDoc }) {
           <EmptyState title="No exhibits to disclose" icon={PackageSearch} />
         ) : (
           <div className="space-y-2">
+            {/* A ticked row is an exhibit being withheld, which is the exceptional act
+                here, so the tick reads as a caution rather than a confirmation. */}
             {exhibits.map((e) => (
               <label
                 key={e._id}
-                className="flex cursor-pointer items-start gap-3 rounded-md border p-3 hover:bg-muted"
+                htmlFor={`exclude-${e._id}`}
+                className="flex cursor-pointer items-start gap-3 rounded-lg border p-3 transition-colors hover:bg-muted/50 has-[[data-state=checked]]:border-warn/40 has-[[data-state=checked]]:bg-warn-muted/40"
               >
-                <input
-                  type="checkbox"
-                  className="mt-1 size-4 accent-[hsl(var(--primary))]"
+                <Checkbox
+                  id={`exclude-${e._id}`}
+                  className="mt-0.5"
                   checked={Boolean(excluded[e._id])}
-                  onChange={(ev) =>
-                    setExcluded((x) => ({ ...x, [e._id]: ev.target.checked }))
-                  }
+                  onCheckedChange={(v) => setExcluded((x) => ({ ...x, [e._id]: v === true }))}
                 />
                 <span className="min-w-0">
                   <span className="block text-sm font-medium">{e.title}</span>
@@ -434,7 +515,7 @@ function DisclosureTab({ caseId, caseDoc }) {
 
         {prepare.isError && <Denial error={prepare.error} heading="Pack not prepared" />}
         {pack && (
-          <div className="rounded-md border border-ok/40 bg-ok-muted p-3 text-sm">
+          <div className="rounded-lg border border-ok/40 bg-ok-muted p-3 text-sm">
             <p className="font-medium text-ok">Pack prepared</p>
             <p className="mt-1 font-mono text-xs">{pack.packId}</p>
             <p className="mt-1 text-xs text-muted-foreground">
@@ -468,8 +549,7 @@ function DisclosureTab({ caseId, caseDoc }) {
             })
           }
         >
-          {fileChargesheet.isPending && <Loader2 className="size-4 animate-spin" />}
-          <Gavel className="size-4" />
+          {fileChargesheet.isPending ? <Loader2 className="size-4 animate-spin" /> : <Gavel className="size-4" />}
           File the chargesheet
         </Button>
         {fileChargesheet.isError && (
@@ -560,17 +640,16 @@ function CustodyTab({ caseId }) {
             </div>
           </div>
           <Button type="submit" disabled={create.isPending || !form.description.trim()}>
-            {create.isPending && <Loader2 className="size-4 animate-spin" />}
-            <Boxes className="size-4" />
+            {create.isPending ? <Loader2 className="size-4 animate-spin" /> : <Boxes className="size-4" />}
             Book into custody
           </Button>
         </form>
         {create.isError && <Denial error={create.error} heading="Item not booked" />}
         {qr && (
-          <div className="rounded-md border p-3">
+          <div className="space-y-2 rounded-lg border bg-muted/30 p-3">
             <p className="text-sm font-medium">QR label payload</p>
-            <Hash value={qr} />
-            <p className="mt-1 text-xs text-muted-foreground">
+            <Hash value={qr} className={DIGEST} />
+            <p className="text-xs text-muted-foreground">
               The label identifies the item. It grants no authority to move it — that comes from
               the resolver, on every scan.
             </p>
@@ -586,37 +665,44 @@ function CustodyTab({ caseId }) {
         ) : items.length === 0 ? (
           <EmptyState title="No custody items on this case" icon={Boxes} />
         ) : (
-          <div className="overflow-x-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Item</TableHead>
-                  <TableHead>Description</TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead>Location</TableHead>
-                  <TableHead>Seal</TableHead>
+          <Table>
+            <TableHeader className={TABLE_HEAD}>
+              <TableRow>
+                <TableHead>Item</TableHead>
+                <TableHead>Description</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead>Location</TableHead>
+                <TableHead>Seal</TableHead>
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {items.map((i) => (
+                <TableRow key={i.id} className="hover:bg-muted/50">
+                  <TableCell>
+                    <code className="font-mono text-xs">{i.itemCode}</code>
+                  </TableCell>
+                  <TableCell className="max-w-56 truncate">{i.description}</TableCell>
+                  <TableCell>
+                    <Badge variant="secondary" className="rounded-full">
+                      {humanise(i.status)}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>{humanise(i.currentLocation)}</TableCell>
+                  <TableCell>
+                    <Badge
+                      variant="outline"
+                      className={cn(
+                        'rounded-full',
+                        i.sealIntact ? 'border-ok/40 bg-ok-muted text-ok' : 'border-bad/40 bg-bad-muted text-bad'
+                      )}
+                    >
+                      {i.sealIntact ? 'Intact' : 'Broken'}
+                    </Badge>
+                  </TableCell>
                 </TableRow>
-              </TableHeader>
-              <TableBody>
-                {items.map((i) => (
-                  <TableRow key={i.id}>
-                    <TableCell className="font-mono text-xs">{i.itemCode}</TableCell>
-                    <TableCell className="max-w-56 truncate">{i.description}</TableCell>
-                    <TableCell><Badge variant="secondary">{humanise(i.status)}</Badge></TableCell>
-                    <TableCell>{humanise(i.currentLocation)}</TableCell>
-                    <TableCell>
-                      <Badge
-                        variant="outline"
-                        className={i.sealIntact ? 'border-ok/40 bg-ok-muted text-ok' : 'border-bad/40 bg-bad-muted text-bad'}
-                      >
-                        {i.sealIntact ? 'Intact' : 'Broken'}
-                      </Badge>
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          </div>
+              ))}
+            </TableBody>
+          </Table>
         )}
       </Section>
     </div>
@@ -644,30 +730,103 @@ export default function OfficerPage() {
   const caseQuery = useCase(workingCaseId);
   const caseDoc = caseQuery.data?.case ?? cases.find((c) => c._id === workingCaseId) ?? null;
 
+  // The figures at the top read the same queries, under the same keys, as the Evidence
+  // and Custody tabs — so once a tab has loaded they cost nothing extra. They are
+  // asked for here as well because a tab's own query exists only while that tab is
+  // open, and the figures have to be right on arrival, before any tab but the first
+  // has been looked at.
+  const evidenceQuery = useEvidence({ caseId: workingCaseId }, { enabled: Boolean(workingCaseId) });
+  const custodyQuery = useCustodyItems({ caseId: workingCaseId }, { enabled: Boolean(workingCaseId) });
+  const exhibits = evidenceQuery.data?.evidence ?? [];
+  const custodyItems = custodyQuery.data?.items ?? [];
+  const opinions = exhibits.filter((e) => e.forensic?.opinion).length;
+
   return (
-    <div ref={scope} className="container space-y-6 py-8">
-      <PageHeader
-        title="Investigating officer"
-        lede="Case file, evidence ingest and custody. Every action you take here is written to an append-only ledger, and every refusal is written there too."
-      />
+    <div ref={scope} className="container space-y-8 py-10">
+      <div className="space-y-3">
+        <div className="will-reveal">
+          <Eyebrow>Police · investigating officer</Eyebrow>
+        </div>
+        <PageHeader
+          title="Investigating officer"
+          lede="Case file, evidence ingest and custody. Every action you take here is written to an append-only ledger, and every refusal is written there too."
+        />
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard
+          className="will-reveal"
+          label="Cases in scope"
+          value={figure(casesQuery, cases.length)}
+          icon={FileText}
+          tone="accent"
+          caption="What the access resolver puts in front of you — the cases you are on record for, and no others."
+        />
+        <StatCard
+          className="will-reveal"
+          label="Exhibits on this case"
+          value={figure(evidenceQuery, exhibits.length)}
+          icon={PackageSearch}
+          tone="accent"
+          delay={0.1}
+          caption={
+            caseDoc
+              ? `Uploaded against FIR ${caseDoc.firNumber}, each hashed and signed in a browser first.`
+              : 'Select a working case to count them.'
+          }
+        />
+        <StatCard
+          className="will-reveal"
+          label="Custody items"
+          value={figure(custodyQuery, custodyItems.length)}
+          icon={Boxes}
+          delay={0.2}
+          caption="Physical articles booked on the working case, each under a seal number."
+        />
+        <StatCard
+          className="will-reveal"
+          label="Laboratory opinions"
+          value={figure(evidenceQuery, opinions)}
+          icon={FlaskConical}
+          tone="ok"
+          delay={0.3}
+          caption="Exhibits carrying a s.79A laboratory finding — the only authenticity claim on this screen."
+        />
+      </div>
 
       {cases.length > 0 && (
-        <div className="will-reveal">
+        <div className="surface will-reveal flex flex-wrap items-end justify-between gap-4 p-4 sm:p-5">
           <CasePicker
             cases={cases}
             value={workingCaseId}
             onChange={(v) => dispatch(workingCaseSet(v))}
           />
+          {caseDoc && <CaseStanding caseDoc={caseDoc} />}
         </div>
       )}
 
       <Tabs defaultValue="cases" className="will-reveal">
-        <TabsList>
-          <TabsTrigger value="cases">Cases</TabsTrigger>
-          <TabsTrigger value="evidence">Evidence</TabsTrigger>
-          <TabsTrigger value="disclosure">Disclosure</TabsTrigger>
-          <TabsTrigger value="custody">Custody</TabsTrigger>
-          <TabsTrigger value="search">Search</TabsTrigger>
+        <TabsList className="h-10 p-1">
+          <TabsTrigger value="cases" className="gap-1.5">
+            <FileText className="size-3.5" />
+            Cases
+          </TabsTrigger>
+          <TabsTrigger value="evidence" className="gap-1.5">
+            <PackageSearch className="size-3.5" />
+            Evidence
+          </TabsTrigger>
+          <TabsTrigger value="disclosure" className="gap-1.5">
+            <Scale className="size-3.5" />
+            Disclosure
+          </TabsTrigger>
+          <TabsTrigger value="custody" className="gap-1.5">
+            <Boxes className="size-3.5" />
+            Custody
+          </TabsTrigger>
+          <TabsTrigger value="search" className="gap-1.5">
+            <Search className="size-3.5" />
+            Search
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="cases" className="mt-6">
@@ -708,16 +867,32 @@ export default function OfficerPage() {
             {search.isError && <Denial error={search.error} heading="Search unavailable" />}
             {search.isPending && q.trim().length >= 2 && <TableSkeleton rows={2} cols={2} />}
             {search.data && (
-              <div className="space-y-4">
+              <div className="space-y-3">
                 <p className="text-xs text-muted-foreground">{search.data.total} result(s)</p>
                 {(search.data.cases ?? []).map((c) => (
-                  <div key={c._id} className="rounded-md border p-3 text-sm">
-                    <span className="font-medium">FIR {c.firNumber}</span> — {c.title}
+                  <div
+                    key={c._id}
+                    className="flex items-center gap-3 rounded-lg border p-3 text-sm transition-colors hover:bg-muted/50"
+                  >
+                    <span className="grid size-7 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground">
+                      <FileText className="size-3.5" />
+                    </span>
+                    <span className="min-w-0">
+                      <span className="font-medium">FIR {c.firNumber}</span> — {c.title}
+                    </span>
                   </div>
                 ))}
                 {(search.data.evidence ?? []).map((e) => (
-                  <div key={e._id} className="rounded-md border p-3 text-sm">
-                    <span className="font-mono text-xs">{e.exhibitCode}</span> — {e.title}
+                  <div
+                    key={e._id}
+                    className="flex items-center gap-3 rounded-lg border p-3 text-sm transition-colors hover:bg-muted/50"
+                  >
+                    <span className="grid size-7 shrink-0 place-items-center rounded-md bg-muted text-muted-foreground">
+                      <PackageSearch className="size-3.5" />
+                    </span>
+                    <span className="min-w-0">
+                      <code className="font-mono text-xs">{e.exhibitCode}</code> — {e.title}
+                    </span>
                   </div>
                 ))}
                 {search.data.total === 0 && (

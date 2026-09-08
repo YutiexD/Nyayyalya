@@ -14,7 +14,7 @@
  */
 import { useState } from 'react';
 import { toast } from 'sonner';
-import { FlaskConical, Inbox, Microscope, PenLine } from 'lucide-react';
+import { FileCheck2, FlaskConical, Hourglass, Inbox, Microscope, PenLine } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -40,11 +40,12 @@ import {
 } from '@/components/ui/table';
 
 import { Section, KeyValue, Hash, PageHeader, TableSkeleton, EmptyState } from '@/components/common/Primitives';
+import { Eyebrow, StatCard } from '@/components/common/Premium';
 import { ForensicOpinion, Denial, Note } from '@/components/common/Verdicts';
 import { useReferrals, useAcceptReferral, useFileReport, useExhibit } from '@/hooks/queries';
 import { getOrCreateKeyPair, hashFile, signHashHex } from '@/lib/crypto';
 import { useReveal } from '@/hooks/useGsap';
-import { humanise, fmtDate, fmtBytes } from '@/lib/utils';
+import { cn, humanise, fmtDate, fmtBytes } from '@/lib/utils';
 
 /** The whole authenticity vocabulary of this system. There is no fourth value. */
 const OPINIONS = ['AUTHENTIC', 'MANIPULATED', 'INCONCLUSIVE'];
@@ -58,11 +59,75 @@ const STATUS_STYLES = {
 
 const STATUS_FILTERS = ['ALL', 'OPEN', 'ACCEPTED', 'REPORTED'];
 
+/** Column headings read as labels over the data, not as a first row of it. */
+const HEADINGS = '[&_th]:text-xs [&_th]:uppercase [&_th]:tracking-wider hover:bg-transparent';
+
+/** The open referral, marked by the accent on its leading edge — the queue's one active state. */
+const OPENABLE_ROW =
+  'data-[state=selected]:[box-shadow:inset_3px_0_0_0_hsl(var(--accent-from))]';
+
 const StatusBadge = ({ status }) => (
-  <Badge variant="outline" className={STATUS_STYLES[status] ?? STATUS_STYLES.WITHDRAWN}>
+  <Badge
+    variant="outline"
+    className={cn('rounded-full', STATUS_STYLES[status] ?? STATUS_STYLES.WITHDRAWN)}
+  >
     {humanise(status)}
   </Badge>
 );
+
+// ------------------------------------------------------------------ figures ----
+
+/**
+ * The laboratory's queue in numbers. Fed by the UNFILTERED referral list rather than
+ * the queue below it: filtered to OPEN, the queue would report "0 reported", which is
+ * a statement about the filter and reads as a statement about the laboratory. Until
+ * the list has answered each card shows a dash, never a 0.
+ */
+function LabFigures({ referrals }) {
+  const all = referrals.data?.referrals ?? [];
+  const ready = referrals.isSuccess;
+  const count = (status) => all.filter((r) => r.status === status).length;
+  const open = count('OPEN');
+
+  return (
+    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <StatCard
+        className="will-reveal"
+        label="Referrals"
+        value={ready ? all.length : '—'}
+        icon={Inbox}
+        tone="accent"
+        caption="Every referral naming your laboratory, in any state."
+      />
+      <StatCard
+        className="will-reveal"
+        label="Awaiting acceptance"
+        value={ready ? open : '—'}
+        icon={Hourglass}
+        tone={open > 0 ? 'warn' : undefined}
+        caption="Referred by an investigating officer and not yet taken on."
+        delay={0.1}
+      />
+      <StatCard
+        className="will-reveal"
+        label="Accepted"
+        value={ready ? count('ACCEPTED') : '—'}
+        icon={Microscope}
+        caption="Under examination here. No opinion has been filed yet."
+        delay={0.2}
+      />
+      <StatCard
+        className="will-reveal"
+        label="Reported"
+        value={ready ? count('REPORTED') : '—'}
+        icon={FileCheck2}
+        tone="ok"
+        caption="Opinion signed and filed — the source for Part B of the section 63 certificate."
+        delay={0.3}
+      />
+    </div>
+  );
+}
 
 // ------------------------------------------------------------------ exhibit ----
 
@@ -186,7 +251,10 @@ function ReportForm({ referral }) {
   };
 
   return (
+    // The one panel on this screen that creates something — an authenticity opinion —
+    // so it is the one that carries the beam.
     <Section
+      accent
       title="File the forensic report"
       description="Your opinion is expert evidence under BSA s.39, and this form is the only route by which an authenticity finding enters Lexx. It is recorded, displayed and reasoned about separately from machine review prioritisation, which is investigative triage and never an authenticity claim."
     >
@@ -303,6 +371,9 @@ export default function LabPage() {
   const [selectedId, setSelectedId] = useState(null);
 
   const referrals = useReferrals(status === 'ALL' ? undefined : { status });
+  // The whole queue, for the figures. With no filter set this is the same cache entry
+  // as the list below; with one set it is the only honest source for the counts.
+  const everything = useReferrals();
   const accept = useAcceptReferral();
 
   const rows = referrals.data?.referrals ?? [];
@@ -318,16 +389,7 @@ export default function LabPage() {
   const selected =
     inList ?? (justAccepted && justAccepted.id === selectedId ? justAccepted : null);
 
-  /**
-   * A panel that mounts after the entrance timeline has run would stay at its
-   * pre-animation opacity, so the timeline is re-run whenever the set of panels
-   * changes: when a referral is first opened, and when its status admits the report
-   * form. Switching between two referrals in the same state adds no panels and
-   * therefore does not re-animate the queue.
-   */
-  const scope = useReveal('.will-reveal', {
-    deps: [Boolean(selected), selected?.status ?? null],
-  });
+  const scope = useReveal();
 
   const onAccept = () => {
     accept.mutate(selected.id, {
@@ -340,28 +402,35 @@ export default function LabPage() {
   };
 
   return (
-    <div ref={scope} className="container space-y-6 py-8">
-      <PageHeader
-        title="Referrals to your laboratory"
-        lede="Visibility here is derived per exhibit from a live referral row, not from a role. The server scopes this queue to the laboratory your session is acting for; an examiner at another laboratory is refused with NO_OPEN_REFERRAL_TO_YOUR_LAB — a statement about the absence of a referral, which is the fact that actually matters."
-      />
+    <div ref={scope} className="container space-y-8 py-10">
+      <div className="space-y-4">
+        <div className="will-reveal">
+          <Eyebrow>Forensic science laboratory · IT Act s.79A</Eyebrow>
+        </div>
+        <PageHeader
+          title="Referrals to your laboratory"
+          lede="Visibility here is derived per exhibit from a live referral row, not from a role. The server scopes this queue to the laboratory your session is acting for; an examiner at another laboratory is refused with NO_OPEN_REFERRAL_TO_YOUR_LAB — a statement about the absence of a referral, which is the fact that actually matters."
+        />
+      </div>
 
       {referrals.isSuccess &&
         (referrals.data?.labId ? (
-          <Note>
+          <Note className="will-reveal">
             You are acting for laboratory{' '}
             <span className="font-mono">{referrals.data.labId}</span>. This queue contains only
             exhibits referred to it. Nothing else in the register is visible to this session,
             and no filter on this page can widen that.
           </Note>
         ) : (
-          <Note tone="warn">
+          <Note tone="warn" className="will-reveal">
             This session carries no laboratory scope, so it has no referrals. That is the
             access policy answering, not an empty database.
           </Note>
         ))}
 
-      <div className="grid gap-6 lg:grid-cols-2">
+      <LabFigures referrals={everything} />
+
+      <div className="grid items-start gap-6 lg:grid-cols-2">
         <Section
           title="Queue"
           description="Every referral naming your laboratory, in the state the register holds it."
@@ -393,7 +462,7 @@ export default function LabPage() {
             ) : (
               <Table>
                 <TableHeader>
-                  <TableRow>
+                  <TableRow className={HEADINGS}>
                     <TableHead>Exhibit</TableHead>
                     <TableHead>Discipline</TableHead>
                     <TableHead>Status</TableHead>
@@ -403,7 +472,11 @@ export default function LabPage() {
                 </TableHeader>
                 <TableBody>
                   {rows.map((r) => (
-                    <TableRow key={r.id} data-state={r.id === selectedId ? 'selected' : undefined}>
+                    <TableRow
+                      key={r.id}
+                      data-state={r.id === selectedId ? 'selected' : undefined}
+                      className={OPENABLE_ROW}
+                    >
                       <TableCell className="font-mono">{r.exhibitCode ?? '—'}</TableCell>
                       <TableCell>{humanise(r.discipline)}</TableCell>
                       <TableCell>
@@ -413,7 +486,12 @@ export default function LabPage() {
                         {fmtDate(r.referredAt)}
                       </TableCell>
                       <TableCell>
-                        <Button variant="outline" size="sm" onClick={() => setSelectedId(r.id)}>
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="rounded-full"
+                          onClick={() => setSelectedId(r.id)}
+                        >
                           Open
                         </Button>
                       </TableCell>
@@ -485,7 +563,7 @@ export default function LabPage() {
                 // a different exhibit.
                 <ReportForm key={selected.id} referral={selected} />
               ) : (
-                <Note>
+                <Note className="will-reveal">
                   Accept the referral before filing a report. Accepting is the laboratory
                   taking the exhibit on, and an opinion from a laboratory that never accepted
                   the work has no chain to stand on.

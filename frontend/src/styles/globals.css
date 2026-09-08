@@ -5,103 +5,121 @@
 /**
  * Design tokens.
  *
- * Light is the default because this is a records system that people print from and
- * read in daylight offices. Dark is a first-class alternative, not an inversion: the
- * surfaces are a warm-neutral charcoal rather than pure black, and the accent lifts
- * rather than dims, so a projector in a dark hall stays legible.
+ * The register is an institutional product, so the base stays quiet: cool neutrals, a
+ * deep navy primary, hairline borders. What makes it feel current rather than
+ * bureaucratic is a single luminous accent gradient — indigo into cyan — used with
+ * discipline: the brand mark, the hero headline, an active border, a beam tracing a
+ * flow. Never on body text, never on a table, never as a background wash.
  *
- * Every colour lives here as an HSL triple. Nothing in a component hard-codes one.
+ * Every colour is an HSL triple here and nothing in a component hard-codes one; the
+ * theme swap is one class on <html>.
  */
 @layer base {
   :root {
-    --background: 210 20% 98%;
-    --foreground: 222 47% 11%;
+    --background: 220 25% 97.5%;
+    --foreground: 224 45% 10%;
 
     --card: 0 0% 100%;
-    --card-foreground: 222 47% 11%;
+    --card-foreground: 224 45% 10%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 222 47% 11%;
+    --popover-foreground: 224 45% 10%;
 
-    /* The navy carried over from the previous client — the one piece of brand. */
-    --primary: 222 60% 22%;
+    --primary: 226 62% 24%;
     --primary-foreground: 210 40% 98%;
 
-    --secondary: 210 30% 94%;
-    --secondary-foreground: 222 47% 18%;
+    --secondary: 220 22% 94%;
+    --secondary-foreground: 224 40% 18%;
 
-    --muted: 210 25% 95%;
-    --muted-foreground: 215 16% 42%;
+    --muted: 220 20% 95%;
+    --muted-foreground: 220 12% 44%;
 
-    --accent: 210 30% 94%;
-    --accent-foreground: 222 47% 18%;
+    --accent: 220 22% 94%;
+    --accent-foreground: 224 40% 18%;
 
-    --destructive: 0 72% 45%;
+    --destructive: 0 72% 46%;
     --destructive-foreground: 210 40% 98%;
 
-    --border: 214 20% 88%;
-    --input: 214 20% 88%;
-    --ring: 222 60% 30%;
+    --border: 220 16% 88%;
+    --input: 220 16% 88%;
+    --ring: 232 70% 55%;
 
-    /* Verdicts. Deliberately not the Tailwind defaults: these are muted enough to sit
-       beside body text without shouting, and distinguishable in greyscale print. */
-    --ok: 152 55% 30%;
+    /* The one flourish. Indigo -> cyan. */
+    --accent-from: 234 85% 62%;
+    --accent-to: 190 90% 52%;
+
+    --ok: 152 55% 32%;
     --ok-foreground: 150 60% 96%;
     --ok-muted: 152 45% 94%;
 
-    --warn: 35 85% 38%;
+    --warn: 35 85% 40%;
     --warn-foreground: 40 90% 97%;
     --warn-muted: 40 80% 94%;
 
-    --bad: 0 68% 44%;
+    --bad: 0 68% 46%;
     --bad-foreground: 0 80% 97%;
     --bad-muted: 0 70% 95%;
 
-    --radius: 0.5rem;
+    --radius: 0.75rem;
+
+    /* Layered, low-alpha shadows read as depth without looking like a drop shadow. */
+    --shadow-1: 0 1px 2px hsl(224 45% 10% / 0.04), 0 1px 3px hsl(224 45% 10% / 0.06);
+    --shadow-2: 0 2px 4px hsl(224 45% 10% / 0.04), 0 8px 24px -8px hsl(224 45% 10% / 0.12);
+    --shadow-3: 0 4px 8px hsl(224 45% 10% / 0.05), 0 24px 48px -16px hsl(224 45% 10% / 0.18);
+    --glow: 0 0 0 1px hsl(var(--accent-from) / 0.25), 0 8px 32px -8px hsl(var(--accent-from) / 0.35);
   }
 
   .dark {
-    --background: 222 32% 9%;
-    --foreground: 210 30% 94%;
+    --background: 228 32% 7%;
+    --foreground: 220 25% 93%;
 
-    --card: 222 30% 12%;
-    --card-foreground: 210 30% 94%;
+    --card: 228 28% 10%;
+    --card-foreground: 220 25% 93%;
 
-    --popover: 222 30% 12%;
-    --popover-foreground: 210 30% 94%;
+    --popover: 228 28% 10%;
+    --popover-foreground: 220 25% 93%;
 
-    /* Lifted, not dimmed: on a dark surface the navy has to come forward to read as
-       an accent at all. */
-    --primary: 213 75% 62%;
-    --primary-foreground: 222 47% 11%;
+    /* Lifted, not dimmed: on a dark surface the navy must come forward to read as an
+       accent at all. */
+    --primary: 226 85% 68%;
+    --primary-foreground: 228 40% 8%;
 
-    --secondary: 217 25% 18%;
-    --secondary-foreground: 210 30% 94%;
+    --secondary: 226 22% 16%;
+    --secondary-foreground: 220 25% 93%;
 
-    --muted: 217 25% 16%;
-    --muted-foreground: 215 18% 62%;
+    --muted: 226 20% 14%;
+    --muted-foreground: 220 14% 62%;
 
-    --accent: 217 25% 18%;
-    --accent-foreground: 210 30% 94%;
+    --accent: 226 22% 16%;
+    --accent-foreground: 220 25% 93%;
 
-    --destructive: 0 62% 52%;
+    --destructive: 0 65% 56%;
     --destructive-foreground: 210 40% 98%;
 
-    --border: 217 22% 20%;
-    --input: 217 22% 22%;
-    --ring: 213 75% 55%;
+    --border: 226 18% 18%;
+    --input: 226 18% 20%;
+    --ring: 232 80% 66%;
 
-    --ok: 152 50% 52%;
+    --accent-from: 234 90% 70%;
+    --accent-to: 190 95% 60%;
+
+    --ok: 152 55% 55%;
     --ok-foreground: 152 60% 8%;
-    --ok-muted: 152 40% 14%;
+    --ok-muted: 152 40% 13%;
 
-    --warn: 38 85% 58%;
+    --warn: 38 88% 60%;
     --warn-foreground: 35 90% 8%;
-    --warn-muted: 38 45% 15%;
+    --warn-muted: 38 45% 14%;
 
-    --bad: 0 72% 62%;
+    --bad: 0 75% 64%;
     --bad-foreground: 0 80% 8%;
-    --bad-muted: 0 45% 16%;
+    --bad-muted: 0 45% 15%;
+
+    /* In the dark, depth is a highlight on the top edge rather than a shadow below. */
+    --shadow-1: inset 0 1px 0 hsl(220 30% 100% / 0.04), 0 1px 2px hsl(0 0% 0% / 0.4);
+    --shadow-2: inset 0 1px 0 hsl(220 30% 100% / 0.05), 0 8px 24px -8px hsl(0 0% 0% / 0.6);
+    --shadow-3: inset 0 1px 0 hsl(220 30% 100% / 0.06), 0 24px 48px -16px hsl(0 0% 0% / 0.7);
+    --glow: 0 0 0 1px hsl(var(--accent-from) / 0.35), 0 8px 40px -8px hsl(var(--accent-from) / 0.45);
   }
 }
 
@@ -112,8 +130,8 @@
 
   html {
     @apply antialiased;
-    /* The theme swap is a fade, not a flash: no layout shift, no colour flicker. */
     color-scheme: light;
+    scroll-behavior: smooth;
   }
   html.dark {
     color-scheme: dark;
@@ -121,19 +139,23 @@
 
   body {
     @apply bg-background text-foreground;
-    font-feature-settings: 'cv11', 'ss01';
+    font-feature-settings: 'cv11', 'ss01', 'tnum';
     font-variation-settings: 'opsz' 32;
   }
 
-  /* Long hex is data, not prose: it never wraps mid-character-run in a way that makes
-     a reader lose their place, and it is always selectable in one gesture. */
+  h1, h2, h3 {
+    letter-spacing: -0.02em;
+  }
+
+  ::selection {
+    background: hsl(var(--accent-from) / 0.25);
+  }
+
+  /* Long hex is data, not prose. */
   .hash {
     @apply font-mono text-hash break-all select-all text-muted-foreground;
   }
 
-  /* Respect the user's motion preference. Every GSAP timeline checks this too, but a
-     CSS backstop means a missed check cannot produce motion for someone who asked for
-     none. */
   @media (prefers-reduced-motion: reduce) {
     *,
     *::before,
@@ -146,15 +168,71 @@
   }
 }
 
+@layer components {
+  /* A card. Hairline border, layered shadow, and a lift on hover that is felt more
+     than seen. */
+  .surface {
+    @apply rounded-xl border bg-card text-card-foreground;
+    box-shadow: var(--shadow-1);
+    transition: box-shadow 220ms ease, transform 220ms ease, border-color 220ms ease;
+  }
+  .surface-lift:hover {
+    box-shadow: var(--shadow-2);
+    transform: translateY(-1px);
+  }
+
+  /* Frosted. For chrome that floats over content: the header, sticky toolbars. */
+  .surface-glass {
+    background: hsl(var(--background) / 0.72);
+    backdrop-filter: saturate(160%) blur(14px);
+    -webkit-backdrop-filter: saturate(160%) blur(14px);
+  }
+
+  /* The accent gradient, as text. */
+  .text-gradient {
+    background: linear-gradient(100deg, hsl(var(--accent-from)), hsl(var(--accent-to)));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* The accent gradient, as a 1px hairline (border-box trick keeps it crisp). */
+  .border-gradient {
+    position: relative;
+    background:
+      linear-gradient(hsl(var(--card)), hsl(var(--card))) padding-box,
+      linear-gradient(120deg, hsl(var(--accent-from) / 0.7), hsl(var(--accent-to) / 0.7)) border-box;
+    border: 1px solid transparent;
+  }
+
+  /* Emphasis ring for the thing on screen that matters most right now. */
+  .glow {
+    box-shadow: var(--glow);
+  }
+
+  /* Fades a pattern out towards the edges so it never competes with content. */
+  .mask-radial {
+    -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 30%, black 20%, transparent 75%);
+    mask-image: radial-gradient(ellipse 70% 60% at 50% 30%, black 20%, transparent 75%);
+  }
+  .mask-fade-b {
+    -webkit-mask-image: linear-gradient(to bottom, black 55%, transparent 100%);
+    mask-image: linear-gradient(to bottom, black 55%, transparent 100%);
+  }
+}
+
 @layer utilities {
   /* Elements GSAP will reveal start invisible, so there is no flash of finished
-     layout before the timeline runs. Cleared by the animation itself, and by the
-     reduced-motion path immediately. */
+     layout before the timeline runs. The reveal removes the class. */
   .will-reveal {
     opacity: 0;
   }
 
   .text-balance {
     text-wrap: balance;
+  }
+
+  .tabular {
+    font-variant-numeric: tabular-nums;
   }
 }

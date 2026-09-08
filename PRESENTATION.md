@@ -70,8 +70,13 @@ Then re-seed so the certificate is generated with a scannable URL.
 
 - One window, **two tabs**: the app, and the public verifier at `/verify`.
 - Zoom to **125%**. Hashes are the point; they have to be readable from the back.
-- Decide light or dark **now** and stay there. The toggle is in the header — show it once,
-  in passing, and move on.
+- Use **dark mode** on a projector. The accent gradient and the beam diagrams read best on
+  the deep navy, and dark surfaces do not wash out under hall lighting. The toggle is in the
+  header — show it once, in passing, and move on.
+- If the laptop has Windows "Show animations" switched off (`prefers-reduced-motion`), the
+  interface degrades to its finished state — everything is visible, the counts show their
+  final values, only the travelling beams stand still. Nothing depends on an animation
+  having played.
 
 ---
 
@@ -326,7 +331,7 @@ question you will be asked.
 **"Is this production ready?"**
 No, and `docs/PRODUCTION_READINESS.md` says exactly what is missing: the master key belongs
 in an HSM, the directories are simulated, there is no HA story. What is solid is the
-security model, and there are 453 tests behind it.
+security model, and there are 455 tests behind it.
 
 **"Why not put the evidence on the blockchain?"**
 Because that would put case data on a public, permanent, unredactable ledger. We publish a

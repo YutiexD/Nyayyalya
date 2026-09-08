@@ -15,7 +15,9 @@
  */
 import { useState } from 'react';
 import { toast } from 'sonner';
-import { FlaskConical, ScanLine, ShieldAlert, Boxes, ListChecks } from 'lucide-react';
+import {
+  FlaskConical, ScanLine, ShieldAlert, Boxes, ListChecks, AlertTriangle, Link2,
+} from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -49,6 +51,7 @@ import {
   TableSkeleton,
   EmptyState,
 } from '@/components/common/Primitives';
+import { Eyebrow, StatCard } from '@/components/common/Premium';
 import { ReviewPriority, ForensicOpinion, Denial, Note } from '@/components/common/Verdicts';
 import {
   useTriageQueue,
@@ -62,7 +65,7 @@ import {
 } from '@/hooks/queries';
 import { explain } from '@/lib/api';
 import { useReveal } from '@/hooks/useGsap';
-import { humanise, fmtDate, fmtBytes } from '@/lib/utils';
+import { humanise, fmtDate, fmtBytes, cn } from '@/lib/utils';
 
 /** The disciplines a s.79A laboratory can be asked for. Mirrors FSL_DISCIPLINE. */
 const DISCIPLINES = ['MOBILE_FORENSICS', 'MEDIA_FORENSICS', 'COMPUTER_FORENSICS'];
@@ -77,6 +80,19 @@ const DISCIPLINES = ['MOBILE_FORENSICS', 'MEDIA_FORENSICS', 'COMPUTER_FORENSICS'
 const TRIAGE_FALLBACK =
   'Automated triage only. Not expert opinion under BSA s.39 / IT Act s.79A.';
 
+/** Column headings, set once so every table on the page reads the same. */
+const TABLE_HEAD = '[&_th]:text-xs [&_th]:uppercase [&_th]:tracking-wider';
+
+/** A digest gets a block of its own: long hex read off a projector is data, not prose. */
+const DIGEST = 'block rounded-md bg-muted/60 p-2';
+
+/**
+ * A count for a StatCard, or a dash until the query has something to count. A zero
+ * that means "not loaded yet" looks exactly like a zero that means "none", and only
+ * the second is a fact about the station.
+ */
+const figure = (query, n) => (query.isSuccess && !query.isPlaceholderData ? n : '—');
+
 /** A verdict pill. Colour comes from the semantic tokens so dark mode follows. */
 function Verdict({ tone = 'neutral', children }) {
   const styles = {
@@ -86,7 +102,7 @@ function Verdict({ tone = 'neutral', children }) {
     neutral: 'border-border bg-muted text-muted-foreground',
   };
   return (
-    <Badge variant="outline" className={styles[tone] ?? styles.neutral}>
+    <Badge variant="outline" className={cn('rounded-full', styles[tone] ?? styles.neutral)}>
       {children}
     </Badge>
   );
@@ -190,21 +206,23 @@ function ReferralForm({ evidence }) {
       {refer.isError && <Denial error={refer.error} heading="Referral refused" />}
 
       {refer.data && (
-        <KeyValue
-          rows={[
-            ['Referral', <code key="r" className="font-mono text-xs">{refer.data.referral?.id}</code>],
-            ['Laboratory', refer.data.referral?.labName ?? refer.data.referral?.labId ?? '—'],
-            [
-              's.79A notification',
-              <code key="s" className="font-mono text-xs">
-                {refer.data.referral?.section79ARef ?? 'not recorded'}
-              </code>,
-            ],
-            ['Discipline', humanise(refer.data.referral?.discipline)],
-            ['Ledger sequence', <span key="q" className="tabular-nums">{refer.data.ledgerSeq}</span>],
-            ['Entry hash', <Hash key="h" value={refer.data.entryHash} />],
-          ]}
-        />
+        <div className="rounded-lg border border-ok/40 bg-ok-muted/60 p-4">
+          <KeyValue
+            rows={[
+              ['Referral', <code key="r" className="font-mono text-xs">{refer.data.referral?.id}</code>],
+              ['Laboratory', refer.data.referral?.labName ?? refer.data.referral?.labId ?? '—'],
+              [
+                's.79A notification',
+                <code key="s" className="font-mono text-xs">
+                  {refer.data.referral?.section79ARef ?? 'not recorded'}
+                </code>,
+              ],
+              ['Discipline', humanise(refer.data.referral?.discipline)],
+              ['Ledger sequence', <span key="q" className="tabular-nums">{refer.data.ledgerSeq}</span>],
+              ['Entry hash', <Hash key="h" value={refer.data.entryHash} className={DIGEST} />],
+            ]}
+          />
+        </div>
       )}
     </form>
   );
@@ -255,8 +273,8 @@ function ExhibitDetail({ exhibitId }) {
 
       <KeyValue
         rows={[
-          ['Recorded digest', <Hash key="d" value={e.sha256Server} />],
-          ['Signer fingerprint', <Hash key="f" value={e.signerPubKeyFingerprint} />],
+          ['Recorded digest', <Hash key="d" value={e.sha256Server} className={DIGEST} />],
+          ['Signer fingerprint', <Hash key="f" value={e.signerPubKeyFingerprint} className={DIGEST} />],
           [
             'Hash matched at ingest',
             <Verdict key="h" tone={e.hashMatchedOnIngest ? 'ok' : 'bad'}>
@@ -305,8 +323,14 @@ function QueueTab() {
   return (
     <div className="grid gap-6 xl:grid-cols-2">
       <Section
+        accent
         title="Review queue"
         description="Ordered by machine review priority so scarce examiner time reaches the right exhibits first. The ordering is a decision about this queue, not a finding about any exhibit in it."
+        actions={
+          <span className="grid size-9 place-items-center rounded-lg bg-accent-gradient-soft text-accent-from">
+            <ListChecks className="size-4" />
+          </span>
+        }
       >
         {/* The disclaimer the API sends, rendered verbatim and above the data rather
             than as a footnote under it. */}
@@ -324,7 +348,7 @@ function QueueTab() {
 
         {!queue.isPending && !queue.isError && items.length > 0 && (
           <Table>
-            <TableHeader>
+            <TableHeader className={TABLE_HEAD}>
               <TableRow>
                 <TableHead>Exhibit</TableHead>
                 <TableHead>Title</TableHead>
@@ -341,13 +365,13 @@ function QueueTab() {
                   <TableRow
                     key={id}
                     data-state={id === selectedId ? 'selected' : undefined}
-                    className="cursor-pointer align-top"
+                    className="cursor-pointer align-top hover:bg-muted/50"
                     onClick={() => setSelectedId(id)}
                   >
                     <TableCell>
                       <code className="font-mono text-xs">{item.exhibitCode}</code>
                     </TableCell>
-                    <TableCell className="max-w-[16rem]">{item.title ?? '—'}</TableCell>
+                    <TableCell className="max-w-[16rem] font-medium">{item.title ?? '—'}</TableCell>
                     <TableCell className="max-w-[20rem]">
                       <ReviewPriority
                         priority={item.triage?.priority}
@@ -362,7 +386,7 @@ function QueueTab() {
                     <TableCell className="whitespace-nowrap text-muted-foreground">
                       {fmtDate(item.createdAt)}
                     </TableCell>
-                    <TableCell>
+                    <TableCell className="text-right">
                       <Button variant="ghost" size="sm" onClick={() => setSelectedId(id)}>
                         Open
                       </Button>
@@ -433,7 +457,7 @@ function CustodyRegister() {
 
   return (
     <Table>
-      <TableHeader>
+      <TableHeader className={TABLE_HEAD}>
         <TableRow>
           <TableHead>Item</TableHead>
           <TableHead>Description</TableHead>
@@ -444,7 +468,7 @@ function CustodyRegister() {
       </TableHeader>
       <TableBody>
         {items.map((item) => (
-          <TableRow key={item.id}>
+          <TableRow key={item.id} className="hover:bg-muted/50">
             <TableCell>
               <code className="font-mono text-xs">{item.itemCode}</code>
             </TableCell>
@@ -455,9 +479,9 @@ function CustodyRegister() {
               </Verdict>
             </TableCell>
             <TableCell>{humanise(item.currentLocation)}</TableCell>
-            <TableCell className="space-y-1">
-              <code className="font-mono text-xs">{item.sealNumber ?? '—'}</code>
-              <div>
+            <TableCell>
+              <div className="flex flex-wrap items-center gap-2">
+                <code className="font-mono text-xs">{item.sealNumber ?? '—'}</code>
                 <Verdict tone={item.sealIntact === false ? 'bad' : 'ok'}>
                   {item.sealIntact === false ? 'Broken' : 'Intact'}
                 </Verdict>
@@ -511,7 +535,7 @@ function ScanBox({ onShowChain }) {
       {scan.isError && <Denial error={scan.error} heading="Label resolved, access refused" />}
 
       {scan.data && (
-        <div className="space-y-4">
+        <div className="space-y-4 rounded-lg border bg-muted/30 p-4">
           <Note>{scan.data.notice}</Note>
           <KeyValue
             rows={[
@@ -530,6 +554,7 @@ function ScanBox({ onShowChain }) {
           />
           {itemId && (
             <Button variant="outline" size="sm" onClick={() => onShowChain(itemId)}>
+              <Link2 className="size-3.5" />
               Show the chain
             </Button>
           )}
@@ -568,7 +593,7 @@ function GapReport({ onShowChain }) {
       </div>
 
       <Table>
-        <TableHeader>
+        <TableHeader className={TABLE_HEAD}>
           <TableRow>
             <TableHead>Item</TableHead>
             <TableHead>Chain</TableHead>
@@ -578,7 +603,7 @@ function GapReport({ onShowChain }) {
         </TableHeader>
         <TableBody>
           {items.map((report) => (
-            <TableRow key={report.itemId} className="align-top">
+            <TableRow key={report.itemId} className="align-top hover:bg-muted/50">
               <TableCell>
                 <code className="font-mono text-xs">{report.itemCode ?? '—'}</code>
               </TableCell>
@@ -598,7 +623,7 @@ function GapReport({ onShowChain }) {
                   <span className="text-xs text-muted-foreground">none</span>
                 )}
               </TableCell>
-              <TableCell>
+              <TableCell className="text-right">
                 <Button variant="ghost" size="sm" onClick={() => onShowChain(report.itemId)}>
                   Chain
                 </Button>
@@ -668,15 +693,14 @@ function CustodyChain({ itemId }) {
           An item with no history in the ledger is itself the finding above.
         </EmptyState>
       ) : (
-        <ol className="space-y-4 border-l border-border pl-5">
+        <ol className="space-y-4 border-l-2 border-border pl-5">
           {events.map((event) => (
             <li key={event.seq} className="relative space-y-1">
               <span
-                className={
-                  event.eventType === 'INTEGRITY_EXCEPTION'
-                    ? 'absolute -left-[1.4rem] top-1.5 size-2 rounded-full bg-bad'
-                    : 'absolute -left-[1.4rem] top-1.5 size-2 rounded-full bg-border'
-                }
+                className={cn(
+                  'absolute -left-[1.625rem] top-1.5 size-2.5 rounded-full ring-4 ring-card',
+                  event.eventType === 'INTEGRITY_EXCEPTION' ? 'bg-bad' : 'bg-muted-foreground/50'
+                )}
               />
               <p className="text-sm font-medium">{humanise(event.eventType)}</p>
               <p className="text-xs text-muted-foreground">
@@ -766,7 +790,7 @@ function DenialsTab() {
 
       {!query.isPending && !query.isError && events.length > 0 && (
         <Table>
-          <TableHeader>
+          <TableHeader className={TABLE_HEAD}>
             <TableRow>
               <TableHead>When</TableHead>
               <TableHead>Who</TableHead>
@@ -778,7 +802,7 @@ function DenialsTab() {
           </TableHeader>
           <TableBody>
             {events.map((event, i) => (
-              <TableRow key={`${event.at}-${i}`} className="align-top">
+              <TableRow key={`${event.at}-${i}`} className="align-top hover:bg-muted/50">
                 <TableCell className="whitespace-nowrap text-muted-foreground">
                   {fmtDate(event.at)}
                 </TableCell>
@@ -820,18 +844,88 @@ export default function StationPage() {
   // `.will-reveal` starts at opacity 0 and nothing else clears it.
   const scope = useReveal('.will-reveal', { deps: [tab] });
 
+  // The figures at the top read the same queries, under the same keys, as the three
+  // tab panels — so once a tab has loaded they cost nothing extra. They are asked for
+  // here as well because a panel's own query exists only while its tab is open, and
+  // the figures have to be right on arrival, before any tab but the first has been
+  // looked at.
+  const queue = useTriageQueue();
+  const custody = useCustodyItems();
+  const gaps = useCustodyGaps();
+
+  const queued = queue.data?.queue ?? [];
+  const high = queued.filter((item) => item.triage?.priority === 'HIGH').length;
+  const custodyItems = custody.data?.items ?? [];
+  const broken =
+    gaps.data?.broken?.length ??
+    (gaps.data?.items ?? []).filter((report) => report.intact === false).length;
+  const brokenTone = !gaps.isSuccess ? undefined : broken > 0 ? 'bad' : 'ok';
+
   return (
-    <div ref={scope} className="container space-y-6 py-8">
-      <PageHeader
-        title="Station supervision"
-        lede="What to look at first, whether each item's custody makes a lawful chain, and who was refused. The first is a machine's opinion about workload, the second and third are the record itself."
-      />
+    <div ref={scope} className="container space-y-8 py-10">
+      <div className="space-y-3">
+        <div className="will-reveal">
+          <Eyebrow>Police · station supervision</Eyebrow>
+        </div>
+        <PageHeader
+          title="Station supervision"
+          lede="What to look at first, whether each item's custody makes a lawful chain, and who was refused. The first is a machine's opinion about workload, the second and third are the record itself."
+        />
+      </div>
+
+      <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <StatCard
+          className="will-reveal"
+          label="In the review queue"
+          value={figure(queue, queued.length)}
+          icon={ListChecks}
+          tone="accent"
+          caption="Exhibits in your station or district that machine triage has placed in an order."
+        />
+        {/* The API's own disclaimer sits under the count, because a count of HIGH
+            priorities is still a statement about a queue and never about an exhibit. */}
+        <StatCard
+          className="will-reveal"
+          label="High review priority"
+          value={figure(queue, high)}
+          icon={AlertTriangle}
+          tone="warn"
+          delay={0.1}
+          caption={queue.data?.disclaimer ?? TRIAGE_FALLBACK}
+        />
+        <StatCard
+          className="will-reveal"
+          label="Custody items"
+          value={figure(custody, custodyItems.length)}
+          icon={Boxes}
+          delay={0.2}
+          caption="Physical articles held in your scope, each under a seal number the register records."
+        />
+        <StatCard
+          className="will-reveal"
+          label="Broken chains"
+          value={figure(gaps, broken)}
+          icon={Link2}
+          tone={brokenTone}
+          delay={0.3}
+          caption="Items whose recorded history fails the gap walk — an inversion, a missing sequence, a skipped malkhana."
+        />
+      </div>
 
       <Tabs value={tab} onValueChange={setTab} className="space-y-6">
-        <TabsList>
-          <TabsTrigger value="queue">Queue</TabsTrigger>
-          <TabsTrigger value="custody">Custody</TabsTrigger>
-          <TabsTrigger value="denials">Denials</TabsTrigger>
+        <TabsList className="h-10 p-1">
+          <TabsTrigger value="queue" className="gap-1.5">
+            <ListChecks className="size-3.5" />
+            Queue
+          </TabsTrigger>
+          <TabsTrigger value="custody" className="gap-1.5">
+            <Boxes className="size-3.5" />
+            Custody
+          </TabsTrigger>
+          <TabsTrigger value="denials" className="gap-1.5">
+            <ShieldAlert className="size-3.5" />
+            Denials
+          </TabsTrigger>
         </TabsList>
 
         <TabsContent value="queue" className="mt-0">
