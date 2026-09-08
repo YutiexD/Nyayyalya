@@ -546,6 +546,19 @@ export async function materialiseScopeFilter(user, resourceType = RESOURCE_TYPE.
   }
 
   if (filter.__fslLab) {
+    // An examiner listing EVIDENCE is limited to the exhibits actually referred to
+    // their lab — not to every exhibit in a case that happens to contain one
+    // referral. `resolve()` has always applied that rule to a single exhibit; the
+    // list path applied only the coarse case rule, so one referral in a case exposed
+    // the whole case's exhibits in `GET /api/evidence` and the triage queue.
+    if (resourceType === RESOURCE_TYPE.EVIDENCE) {
+      const evidenceIds = await Referral.distinct('evidenceId', {
+        labId: filter.__fslLab,
+        status: { $in: [REFERRAL_STATUS.OPEN, REFERRAL_STATUS.ACCEPTED] },
+      });
+      return evidenceIds.length ? { _id: { $in: evidenceIds } } : null;
+    }
+
     const caseIds = await Referral.distinct('caseId', {
       labId: filter.__fslLab,
       status: { $in: [REFERRAL_STATUS.OPEN, REFERRAL_STATUS.ACCEPTED] },
@@ -566,6 +579,27 @@ export async function materialiseScopeFilter(user, resourceType = RESOURCE_TYPE.
       .select('caseId')
       .lean();
     const caseIds = grants.map((g) => g.caseId);
+
+    // Being on record gets counsel the CASE. It does not get them every exhibit in
+    // it — that is the whole point of a disclosure pack, and `resolve()` enforces it
+    // per exhibit. The list path did not, so an advocate correctly refused an
+    // excluded exhibit at `GET /api/evidence/:id` could still enumerate it, with its
+    // title, mime type, size and triage priority, from `GET /api/evidence` and
+    // `GET /api/evidence/queue/triage`. Same served set, same rule, both paths.
+    if (resourceType === RESOURCE_TYPE.EVIDENCE) {
+      if (!caseIds.length) return null;
+      const packs = await DisclosurePack.find({
+        caseId: { $in: caseIds },
+        status: DISCLOSURE_STATUS.SERVED,
+        'servedTo.userId': filter.__legalGrants,
+      })
+        .select('exhibitIds')
+        .lean();
+
+      const exhibitIds = packs.flatMap((p) => p.exhibitIds ?? []);
+      return exhibitIds.length ? { _id: { $in: exhibitIds } } : null;
+    }
+
     return byCaseIds(caseIds);
   }
 

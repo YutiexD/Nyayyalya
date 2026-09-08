@@ -45,6 +45,7 @@ import {
   FILE_INTEGRITY,
   CHAIN_INTEGRITY,
   ANCHOR_INTEGRITY,
+  ANCHOR_STATUS,
   RESOURCE_TYPE,
   ACTION,
   DECISION,
@@ -430,14 +431,21 @@ export async function getEvidence(req, res) {
 /** GET /api/evidence?caseId= — scope-filtered list. */
 export async function listEvidence(req, res, next) {
   try {
-    const caseFilter = await materialiseScopeFilter(req.user, RESOURCE_TYPE.CASE);
-    if (!caseFilter) return res.json({ evidence: [], total: 0 });
+    // EVIDENCE, not CASE. Asking for the case-level filter and listing everything
+    // inside those cases is what let an advocate enumerate exhibits withheld from
+    // their disclosure pack, and an examiner see exhibits never referred to them —
+    // both of which `GET /api/evidence/:id` correctly refuses. The resolver now
+    // answers the per-exhibit question for the list path too.
+    const scope = await materialiseScopeFilter(req.user, RESOURCE_TYPE.EVIDENCE);
+    if (!scope) return res.json({ evidence: [], total: 0 });
 
-    const caseIds = await Case.distinct('_id', caseFilter);
-    const query = { caseId: { $in: caseIds } };
+    const query = { ...scope };
     if (req.query.caseId && /^[0-9a-fA-F]{24}$/.test(req.query.caseId)) {
-      // Intersect, never replace: a caseId the user cannot see yields nothing.
-      query.caseId = { $in: caseIds.filter((id) => String(id) === req.query.caseId) };
+      // Intersect, never replace: a caseId outside the scope yields nothing, and a
+      // requested case can only ever narrow what the resolver already allowed.
+      query.caseId = query.caseId
+        ? { $in: (query.caseId.$in ?? []).filter((id) => String(id) === req.query.caseId) }
+        : req.query.caseId;
     }
 
     const items = await Evidence.find(query)
@@ -505,7 +513,35 @@ export async function verifyEvidence(req, res, next) {
       : false;
 
     // ---- light 3: the ledger chain ----
-    const chain = await verifyChain();
+    //
+    // Bounded to the UNANCHORED TAIL, not the whole ledger.
+    //
+    // This used to be a bare `verifyChain()`, which walks from seq 1 and re-hashes
+    // every entry in the system on every click of Verify. That is O(entire ledger)
+    // per request on a collection that only ever grows, and the demo alone clicks it
+    // repeatedly — so it gets slower for the rest of the presentation each time.
+    //
+    // The work is also redundant, and light 4 is why. `verifyAnchorForEvidence`
+    // recomputes this exhibit's batch Merkle root from the ledger AS IT STANDS NOW
+    // and compares it against the root recorded when the batch was sealed: any edit
+    // to an anchored entry changes the recomputed root and shows up there. So
+    // re-walking anchored history here proves nothing light 4 has not already proved.
+    //
+    // What the anchor does NOT cover is everything written since the last batch, and
+    // that is exactly what this now checks. The two lights together still cover the
+    // whole chain; the range checked is reported so the claim stays precise rather
+    // than implied.
+    const lastBatch = await AnchorBatch.findOne({
+      status: { $in: [ANCHOR_STATUS.CONFIRMED, ANCHOR_STATUS.DRY_RUN] },
+    })
+      .sort({ toSeq: -1 })
+      .select('toSeq')
+      .lean();
+
+    // Start AT the last anchored entry, not after it, so the first link verified is
+    // the one joining anchored history to the tail.
+    const chainFrom = lastBatch?.toSeq ? Math.max(1, lastBatch.toSeq) : 1;
+    const chain = await verifyChain({ from: chainFrom });
     const chainIntegrity = chain.intact ? CHAIN_INTEGRITY.CHAIN_INTACT : CHAIN_INTEGRITY.CHAIN_BROKEN;
 
     // ---- light 4: the anchored Merkle root ----
@@ -542,6 +578,10 @@ export async function verifyEvidence(req, res, next) {
       // having to know that `ANCHOR_LOCAL_ONLY` means the latter.
       anchorSubmitted: anchorResult.submitted,
       anchorBatchStatus: anchorResult.batchStatus,
+      // Exactly which entries light 3 walked. Anything before `chainCheckedFrom` is
+      // covered by the anchored Merkle root that light 4 recomputes, not by this walk.
+      chainCheckedFrom: chainFrom,
+      chainCheckedTo: chain.lastSeq,
       verifiedAt,
       // The nuance worth stating plainly: these lights are independent.
       interpretation: buildInterpretation(fileIntegrity, chainIntegrity, signatureValid),
@@ -729,16 +769,46 @@ export async function streamEvidence(req, res, next) {
 /** GET /api/evidence/queue/triage — sorted by review priority. */
 export async function triageQueue(req, res, next) {
   try {
-    const caseFilter = await materialiseScopeFilter(req.user, RESOURCE_TYPE.CASE);
-    if (!caseFilter) return res.json({ queue: [], disclaimer: null });
+    // Same per-exhibit scope as the list. The triage queue additionally exposes
+    // `triage.priority`, which `exhibitView` deliberately withholds from an
+    // advocate's disclosure pack — so a case-level filter here leaked the one field
+    // the disclosure view is careful never to show them.
+    const scope = await materialiseScopeFilter(req.user, RESOURCE_TYPE.EVIDENCE);
+    if (!scope) return res.json({ queue: [], disclaimer: null });
 
-    const caseIds = await Case.distinct('_id', caseFilter);
-    const items = await Evidence.find({ caseId: { $in: caseIds }, 'triage.priority': { $ne: null } })
-      .select('exhibitCode title caseId triage forensic mimeType createdAt')
-      .lean();
-
-    const order = { HIGH: 0, MEDIUM: 1, LOW: 2 };
-    items.sort((a, b) => (order[a.triage?.priority] ?? 9) - (order[b.triage?.priority] ?? 9));
+    // Rank, sort and bound in the database.
+    //
+    // This was an unbounded find() followed by an in-JavaScript sort, which fetched
+    // every exhibit in scope on every request. It cannot simply become
+    // `.sort({'triage.priority': 1}).limit(n)` — the values are strings, so a Mongo
+    // sort orders them HIGH, LOW, MEDIUM and a limit would then drop MEDIUM before
+    // LOW. The rank has to be computed before the sort, which is what this does.
+    const limit = Math.min(Number(req.query.limit) || 100, 200);
+    const items = await Evidence.aggregate([
+      { $match: { ...scope, 'triage.priority': { $ne: null } } },
+      {
+        $addFields: {
+          __rank: {
+            $switch: {
+              branches: [
+                { case: { $eq: ['$triage.priority', 'HIGH'] }, then: 0 },
+                { case: { $eq: ['$triage.priority', 'MEDIUM'] }, then: 1 },
+                { case: { $eq: ['$triage.priority', 'LOW'] }, then: 2 },
+              ],
+              default: 9,
+            },
+          },
+        },
+      },
+      { $sort: { __rank: 1, createdAt: -1 } },
+      { $limit: limit },
+      {
+        $project: {
+          exhibitCode: 1, title: 1, caseId: 1, triage: 1,
+          forensic: 1, mimeType: 1, createdAt: 1,
+        },
+      },
+    ]);
 
     return res.json({
       queue: items,

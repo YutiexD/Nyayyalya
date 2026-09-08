@@ -899,3 +899,86 @@ describe('GET /api/disclosure/case/:caseId/packs', () => {
     expect(res.body.error.code).toBe(DENY_REASON.READ_ONLY_ROLE);
   });
 });
+
+// ============================ the LIST paths obey the served set too ==
+
+/**
+ * REGRESSION — the disclosure boundary held on one exhibit and leaked on the list.
+ *
+ * `GET /api/evidence/:id` refuses an advocate an exhibit outside their served pack.
+ * `GET /api/evidence` and `GET /api/evidence/queue/triage` did not: both scoped by
+ * CASE, so being on record for a case listed every exhibit in it — title, mime type,
+ * size, and on the triage queue the `triage.priority` that `exhibitView` deliberately
+ * withholds from an advocate's own disclosure view.
+ *
+ * The exclusion still hid the bytes. It stopped hiding that the exhibit exists, what
+ * it is, and how the system ranked it — which is most of what an exclusion is for.
+ */
+describe('evidence LIST endpoints are scoped to the served set, not the case', () => {
+  it('lists an advocate only the exhibits actually served on them', async () => {
+    const f = await fixture({ exclude: 1 });
+    expect(f.served.status, JSON.stringify(f.served.body)).toBe(200);
+
+    const res = await as(onRecord, request(server).get('/api/evidence'));
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+
+    const codes = (res.body.evidence ?? []).map((e) => e.exhibitCode);
+    for (const e of f.disclosed) expect(codes).toContain(e.exhibitCode);
+    for (const e of f.excluded) {
+      expect(codes, `${e.exhibitCode} was withheld and must not be listed`).not.toContain(
+        e.exhibitCode
+      );
+    }
+  });
+
+  it('keeps the withheld exhibit out of the triage queue, priority and all', async () => {
+    const f = await fixture({ exclude: 1 });
+    const res = await as(onRecord, request(server).get('/api/evidence/queue/triage'));
+    expect(res.status).toBe(200);
+
+    const codes = (res.body.queue ?? []).map((e) => e.exhibitCode);
+    for (const e of f.excluded) expect(codes).not.toContain(e.exhibitCode);
+
+    // Nothing in the payload may carry the excluded exhibit under any other key.
+    const body = JSON.stringify(res.body);
+    for (const e of f.excluded) expect(body).not.toContain(String(e._id));
+  });
+
+  it('shows an advocate on record NOTHING until a pack is actually served', async () => {
+    // Live grant, pack still DRAFT: the case is theirs, the exhibits are not.
+    const caseDoc = await createCase();
+    await uploadExhibit(caseDoc._id, 'CCTV clip');
+    await as(io, request(server).post(`/api/disclosure/${caseDoc._id}/prepare`)).send({
+      excludedItems: [],
+    });
+    await as(io, request(server).post(`/api/cases/${caseDoc._id}/file-chargesheet`)).send({});
+    await as(
+      registrar,
+      request(server).post(`/api/disclosure/${caseDoc._id}/sync-representation`)
+    ).send({});
+
+    const res = await as(onRecord, request(server).get('/api/evidence'));
+    expect(res.status).toBe(200);
+    expect(res.body.evidence).toEqual([]);
+  });
+
+  it('still lists every exhibit to the investigating officer', async () => {
+    const f = await fixture({ exclude: 1 });
+    const res = await as(io, request(server).get('/api/evidence'));
+    expect(res.status).toBe(200);
+    const codes = res.body.evidence.map((e) => e.exhibitCode);
+    for (const e of f.exhibits) expect(codes).toContain(e.exhibitCode);
+  });
+
+  it('a caseId narrows the served set and can never widen it', async () => {
+    const f = await fixture({ exclude: 1 });
+    const res = await as(
+      onRecord,
+      request(server).get(`/api/evidence?caseId=${f.caseId}`)
+    );
+    expect(res.status).toBe(200);
+    const codes = res.body.evidence.map((e) => e.exhibitCode);
+    for (const e of f.excluded) expect(codes).not.toContain(e.exhibitCode);
+    expect(codes.length).toBe(f.disclosed.length);
+  });
+});

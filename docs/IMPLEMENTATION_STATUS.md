@@ -11,7 +11,7 @@
 
 | | |
 |---|---|
-| Backend tests | **448 passing**, 15 suites, 0 skipped, 0 failing |
+| Backend tests | **453 passing**, 15 suites, 0 skipped, 0 failing |
 | Contract tests | **36 passing** |
 | ESLint | **0 errors** (10 warnings, all one documented false-positive class) |
 | `npm audit` | **0 vulnerabilities** |
