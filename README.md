@@ -14,7 +14,7 @@ Only the forensic laboratory decides authenticity. The AI decides what gets look
 
 | | |
 |---|---|
-| **Stack** | Node 20+ · Express · MongoDB · Vite (vanilla JS) · Solidity |
+| **Stack** | Node 20+ · Express · MongoDB · Vite (React) · Solidity |
 | **Anchoring** | **Monad Testnet**, chain ID **10143** — Merkle roots only |
 | **Identity** | Three external authority directories; no self-registration |
 | **Tests** | 453 backend + 36 contract, all passing |
@@ -128,7 +128,7 @@ lexx/
 │   ├── controllers/ routes/
 │   └── tests/            unit · integration · authz · redteam
 │
-├── frontend/             Vite MPA, vanilla JS, no framework
+├── frontend/             Vite MPA, React, no framework
 ├── contracts/            LexxAnchor.sol + Hardhat (its own package)
 ├── seed/                 seed-all.js · reset.js
 ├── scripts/              bootstrap-env · mongo-dev-server · health-check

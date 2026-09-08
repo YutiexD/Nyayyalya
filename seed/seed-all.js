@@ -654,6 +654,8 @@ if (openCase) {
 console.log(`  Tamper target ${ex4.evidence.exhibitCode}  storage key:`);
 console.log(`                ${ex4.evidence.storageKey}`);
 console.log(`  Custody       ${goodItem.item.itemCode} (complete)   ${brokenItem.item.itemCode} (gap)`);
+console.log('  Unregistered  FIR 0125/2026 — in the police directory, NOT yet a case.');
+console.log('                Create the case from it live on stage; that is beat 2.');
 console.log(`\n  Password for every demo account:  ${PASSWORD}`);
 console.log('  OTPs are returned by the API while DEMO_ECHO_OTP=true.\n');
 console.log('  Next:  see docs/DEMO_SCRIPT.md for the eleven beats.');

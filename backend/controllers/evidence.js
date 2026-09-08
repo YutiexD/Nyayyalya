@@ -408,6 +408,11 @@ export async function uploadEvidence(req, res, next) {
     return res.status(201).json({
       evidence: {
         ...evidence.toObject(),
+        // The document was serialised before the ledger sequence was written back to
+        // it, so `toObject()` still carries the null it was created with. Carry the
+        // real value: a client showing "—" for a record that IS in the ledger reads
+        // as a failure of the thing this endpoint exists to guarantee.
+        ledgerSeq: entry.seq,
         encryption: undefined, // key material never leaves the server
       },
       receipt,

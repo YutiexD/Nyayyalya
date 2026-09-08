@@ -3,7 +3,7 @@
   "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "LEXX 2.0 — AI-assisted, blockchain-backed digital evidence registry (Monad Testnet anchoring)",
+  "description": "LEXX 2.0 \u2014 AI-assisted, blockchain-backed digital evidence registry (Monad Testnet anchoring)",
   "engines": {
     "node": ">=20.10.0"
   },
@@ -35,7 +35,8 @@
     "verify:no-stale-sepolia": "node scripts/check-network-references.js",
     "mongo:dev": "node scripts/mongo-dev-server.js",
     "dev:web": "npm --prefix frontend run dev",
-    "routes": "node scripts/dump-routes.js"
+    "routes": "node scripts/dump-routes.js",
+    "tamper": "node scripts/tamper-demo.js"
   },
   "dependencies": {
     "axios": "^1.7.9",

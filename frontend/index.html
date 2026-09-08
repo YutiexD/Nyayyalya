@@ -3,94 +3,34 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <meta name="referrer" content="no-referrer" />
-    <title>LEXX 2.0</title>
-    <link rel="stylesheet" href="./lib/styles.css" />
+    <title>LEXX 2.0 — Digital evidence register</title>
+    <meta
+      name="description"
+      content="LEXX 2.0 — an evidence register for the Indian criminal justice chain. Hashed and signed in the browser, append-only ledger, Merkle-anchored."
+    />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,400;14..32,500;14..32,600;14..32,700&display=swap"
+      rel="stylesheet"
+    />
+    <script>
+      // Apply the stored theme BEFORE first paint. Without this the page renders light
+      // and then flips, which on a projector reads as a glitch.
+      (function () {
+        try {
+          var t = localStorage.getItem('lexx.theme');
+          if (!t) t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+          if (t === 'dark') document.documentElement.classList.add('dark');
+          document.documentElement.style.colorScheme = t;
+        } catch (e) {
+          /* private mode: default light */
+        }
+      })();
+    </script>
   </head>
   <body>
-    <header class="app-header">
-      <div class="app-header__brand">
-        <div class="app-header__mark">LEXX</div>
-        <div>
-          <h1 class="app-header__title">Digital evidence register</h1>
-          <p class="app-header__subtitle">Five role views, one public verifier</p>
-        </div>
-      </div>
-    </header>
-
-    <main>
-      <h2 class="page-title">Views</h2>
-      <p class="page-lede">
-        Each view is a separate page. Sign-in routes you to the one your directory role
-        entitles you to; the links below are here for the demo, and every one of them is
-        still authorised by the server on every request.
-      </p>
-
-      <div class="grid grid--3">
-        <section class="panel">
-          <div class="panel__head"><h2 class="panel__title">Sign in</h2></div>
-          <div class="panel__body">
-            <p>
-              Identity is checked against the police, court and legal/FSL directories before
-              anything else happens.
-            </p>
-            <p><a class="link" href="./login.html">login.html</a></p>
-          </div>
-        </section>
-
-        <section class="panel">
-          <div class="panel__head"><h2 class="panel__title">Investigating officer</h2></div>
-          <div class="panel__body">
-            <p>Case from FIR, jurisdiction reasoning, evidence ingest, receipts, custody labels.</p>
-            <p><a class="link" href="./officer.html">officer.html</a></p>
-          </div>
-        </section>
-
-        <section class="panel">
-          <div class="panel__head"><h2 class="panel__title">Station supervision</h2></div>
-          <div class="panel__body">
-            <p>Review priority queue, laboratory referrals, the audit and denial feed, custody gaps.</p>
-            <p><a class="link" href="./sho.html">sho.html</a></p>
-          </div>
-        </section>
-
-        <section class="panel">
-          <div class="panel__head"><h2 class="panel__title">Forensic examiner</h2></div>
-          <div class="panel__body">
-            <p>Only referrals to this examiner's own laboratory. Accept, examine, file an opinion.</p>
-            <p><a class="link" href="./fsl.html">fsl.html</a></p>
-          </div>
-        </section>
-
-        <section class="panel">
-          <div class="panel__head"><h2 class="panel__title">Court</h2></div>
-          <div class="panel__body">
-            <p>Cause list, ledger timeline, judicial orders, disclosure approval and service.</p>
-            <p><a class="link" href="./court.html">court.html</a></p>
-          </div>
-        </section>
-
-        <section class="panel">
-          <div class="panel__head"><h2 class="panel__title">Advocate</h2></div>
-          <div class="panel__body">
-            <p>The disclosure set served on you, watermarked — and a visible, explained refusal for
-              anything outside it.</p>
-            <p><a class="link" href="./lawyer.html">lawyer.html</a></p>
-          </div>
-        </section>
-
-        <section class="panel">
-          <div class="panel__head"><h2 class="panel__title">Public verifier</h2></div>
-          <div class="panel__body">
-            <p>
-              No account. Verify a section 63 certificate from its QR, and read the anchoring
-              record — network <code>monad-testnet</code>, chain id <code>10143</code>.
-              Only the Merkle root is written on chain.
-            </p>
-            <p><a class="link" href="./verify.html">verify.html</a></p>
-          </div>
-        </section>
-      </div>
-    </main>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>

@@ -45,3 +45,6 @@ Thumbs.db
 # Stray local server logs from ad-hoc runs
 .api.log
 .api.err
+
+# Reference copy of the pre-React client, kept during the rewrite
+frontend-legacy/

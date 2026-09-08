@@ -1,0 +1,160 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/**
+ * Design tokens.
+ *
+ * Light is the default because this is a records system that people print from and
+ * read in daylight offices. Dark is a first-class alternative, not an inversion: the
+ * surfaces are a warm-neutral charcoal rather than pure black, and the accent lifts
+ * rather than dims, so a projector in a dark hall stays legible.
+ *
+ * Every colour lives here as an HSL triple. Nothing in a component hard-codes one.
+ */
+@layer base {
+  :root {
+    --background: 210 20% 98%;
+    --foreground: 222 47% 11%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+
+    /* The navy carried over from the previous client — the one piece of brand. */
+    --primary: 222 60% 22%;
+    --primary-foreground: 210 40% 98%;
+
+    --secondary: 210 30% 94%;
+    --secondary-foreground: 222 47% 18%;
+
+    --muted: 210 25% 95%;
+    --muted-foreground: 215 16% 42%;
+
+    --accent: 210 30% 94%;
+    --accent-foreground: 222 47% 18%;
+
+    --destructive: 0 72% 45%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 214 20% 88%;
+    --input: 214 20% 88%;
+    --ring: 222 60% 30%;
+
+    /* Verdicts. Deliberately not the Tailwind defaults: these are muted enough to sit
+       beside body text without shouting, and distinguishable in greyscale print. */
+    --ok: 152 55% 30%;
+    --ok-foreground: 150 60% 96%;
+    --ok-muted: 152 45% 94%;
+
+    --warn: 35 85% 38%;
+    --warn-foreground: 40 90% 97%;
+    --warn-muted: 40 80% 94%;
+
+    --bad: 0 68% 44%;
+    --bad-foreground: 0 80% 97%;
+    --bad-muted: 0 70% 95%;
+
+    --radius: 0.5rem;
+  }
+
+  .dark {
+    --background: 222 32% 9%;
+    --foreground: 210 30% 94%;
+
+    --card: 222 30% 12%;
+    --card-foreground: 210 30% 94%;
+
+    --popover: 222 30% 12%;
+    --popover-foreground: 210 30% 94%;
+
+    /* Lifted, not dimmed: on a dark surface the navy has to come forward to read as
+       an accent at all. */
+    --primary: 213 75% 62%;
+    --primary-foreground: 222 47% 11%;
+
+    --secondary: 217 25% 18%;
+    --secondary-foreground: 210 30% 94%;
+
+    --muted: 217 25% 16%;
+    --muted-foreground: 215 18% 62%;
+
+    --accent: 217 25% 18%;
+    --accent-foreground: 210 30% 94%;
+
+    --destructive: 0 62% 52%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 217 22% 20%;
+    --input: 217 22% 22%;
+    --ring: 213 75% 55%;
+
+    --ok: 152 50% 52%;
+    --ok-foreground: 152 60% 8%;
+    --ok-muted: 152 40% 14%;
+
+    --warn: 38 85% 58%;
+    --warn-foreground: 35 90% 8%;
+    --warn-muted: 38 45% 15%;
+
+    --bad: 0 72% 62%;
+    --bad-foreground: 0 80% 8%;
+    --bad-muted: 0 45% 16%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  html {
+    @apply antialiased;
+    /* The theme swap is a fade, not a flash: no layout shift, no colour flicker. */
+    color-scheme: light;
+  }
+  html.dark {
+    color-scheme: dark;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-feature-settings: 'cv11', 'ss01';
+    font-variation-settings: 'opsz' 32;
+  }
+
+  /* Long hex is data, not prose: it never wraps mid-character-run in a way that makes
+     a reader lose their place, and it is always selectable in one gesture. */
+  .hash {
+    @apply font-mono text-hash break-all select-all text-muted-foreground;
+  }
+
+  /* Respect the user's motion preference. Every GSAP timeline checks this too, but a
+     CSS backstop means a missed check cannot produce motion for someone who asked for
+     none. */
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+      scroll-behavior: auto !important;
+    }
+  }
+}
+
+@layer utilities {
+  /* Elements GSAP will reveal start invisible, so there is no flash of finished
+     layout before the timeline runs. Cleared by the animation itself, and by the
+     reduced-motion path immediately. */
+  .will-reveal {
+    opacity: 0;
+  }
+
+  .text-balance {
+    text-wrap: balance;
+  }
+}

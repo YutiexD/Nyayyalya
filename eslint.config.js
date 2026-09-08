@@ -14,6 +14,14 @@ export default [
       'contracts/**',
       'coverage/**',
       'frontend/dist/**',
+      // The web client is a React package with its own flat config, its own plugins
+      // (react, react-hooks) and its own parser options for JSX. Linting it from here
+      // with the Node config reports JSX as a syntax error and React hooks as unused
+      // variables — noise that hides real findings in the backend. Run `npm run lint`
+      // inside frontend/ for that tree.
+      'frontend/src/**',
+      'frontend/*.config.js',
+      'frontend-legacy/**',
       '.data/**',
       'vault/**',
     ],

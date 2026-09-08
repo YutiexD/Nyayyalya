@@ -35,7 +35,7 @@ This document is deliberately unflattering where that is accurate. A readiness r
 | Court directory | 6002 | `dir_court` | Stands in for eCourts. Courts, judges, roster, vakalatnamas |
 | Legal/FSL directory | 6003 | `dir_legal` | Stands in for BCI + FSL LIMS. Advocates, labs, examiners |
 | Core API | 5000 | `lexx_core` | Everything else |
-| Frontend | 5173 | — | Vite MPA, vanilla JS |
+| Frontend | 5173 | — | Vite SPA — React 18, Redux Toolkit, TanStack Query, Tailwind, shadcn/ui |
 | Anchor service | in-process | — | Merkle batcher → Monad Testnet |
 
 ### 2.2 Trust boundaries

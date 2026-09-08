@@ -212,6 +212,30 @@ const FIRS = [
     isVictimProtected: false,
     sensitivityClass: 'ORDINARY',
   },
+  {
+    // DELIBERATELY NOT REGISTERED as a case by seed/seed-all.js.
+    //
+    // It sits in the police directory as a real FIR and nothing more, so the first
+    // act of a live demonstration can be the one act this system will not let anyone
+    // fake: creating a case from a record that already exists in an authority
+    // directory. Registering it here would make that step a replay of seeded state
+    // rather than something the audience watches happen.
+    //
+    // Sessions-bound (7 years) and SC/ST, which routes differently again from both
+    // seeded cases — so the jurisdiction router visibly decides rather than echoes.
+    firNumber: '0125/2026',
+    firDate: D('2026-01-28'),
+    stationCode: 'UP-GZB-KVN',
+    districtCode: 'UP-GZB',
+    stateCode: 'UP',
+    bnsSections: ['115(2)', '351(2)'],
+    maxPunishmentYears: 7,
+    complainantName: 'Shri Mohan Lal',
+    accusedNames: ['Vikram Singh'],
+    ioPisId: 'UP-GZB-4471',
+    isVictimProtected: false,
+    sensitivityClass: 'SC_ST',
+  },
 ];
 
 /**
