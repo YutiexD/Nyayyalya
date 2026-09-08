@@ -11,6 +11,8 @@ import env from './config/env.js';
 import { createApp } from './app.js';
 import { connectMongo, syncIndexes, disconnectMongo } from '../shared/mongo.js';
 import { allModels } from './models/index.js';
+import { startAnchorScheduler, stopAnchorScheduler } from './services/anchor.js';
+import { setSchedulerState } from './services/health.js';
 import logger from './utils/logger.js';
 import fs from 'node:fs';
 
@@ -30,6 +32,19 @@ async function main() {
   });
   await syncIndexes(allModels, logger);
 
+  // The batcher runs only after indexes exist — it writes AnchorBatch rows whose
+  // uniqueness constraint is the guard against double-anchoring a sequence range.
+  // Starting it before syncIndexes would remove exactly that protection.
+  try {
+    const timer = startAnchorScheduler();
+    setSchedulerState(timer ? 'active' : 'disabled');
+  } catch (err) {
+    // A scheduler that fails to start must not take the API down with it, but it
+    // must also never look healthy. /readyz reports 'failed' and stays degraded.
+    setSchedulerState('failed', err.message);
+    logger.error({ err: err.message }, 'anchor scheduler failed to start');
+  }
+
   const app = createApp();
   const server = app.listen(env.PORT, () => {
     logger.info({ port: env.PORT }, 'lexx-core listening');
@@ -41,6 +56,10 @@ async function main() {
 
   const shutdown = async (signal) => {
     logger.info({ signal }, 'shutting down');
+    // Stop the batcher first: a cycle that starts while Mongo is closing would fail
+    // mid-write and leave a PENDING batch with no resolution.
+    stopAnchorScheduler();
+    setSchedulerState('stopped');
     server.close(async () => {
       await disconnectMongo();
       process.exit(0);

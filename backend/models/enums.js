@@ -346,6 +346,14 @@ export const ANCHOR_INTEGRITY = Object.freeze({
   ANCHOR_MISMATCH: 'ANCHOR_MISMATCH',
   NOT_ANCHORED: 'NOT_ANCHORED',
   ANCHOR_UNAVAILABLE: 'ANCHOR_UNAVAILABLE',
+  /**
+   * The batch exists, the recomputed root matches it and this entry proves as a
+   * member — but the batch was never submitted to a chain (DRY_RUN). That is a
+   * self-consistency check, NOT external corroboration, and it must never be
+   * reported as ANCHOR_MATCH: the whole value of anchoring is that the root is
+   * held somewhere we cannot rewrite.
+   */
+  ANCHOR_LOCAL_ONLY: 'ANCHOR_LOCAL_ONLY',
 });
 
 export const values = (o) => Object.values(o);

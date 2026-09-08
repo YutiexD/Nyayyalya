@@ -74,7 +74,7 @@ W4 (CI/CD)  ──▶  everyone — this should land FIRST, week one, so every
                  subsequent PR is gated by tests automatically
 ```
 
-**Recommendation: stand up W4's CI pipeline before anything else.** With 6+ people writing code in parallel, an unenforced `main` branch is how the 369-test suite silently breaks. This is a half-day task and it should block nothing else while it happens.
+**Recommendation: stand up W4's CI pipeline before anything else.** With 6+ people writing code in parallel, an unenforced `main` branch is how the 423-test suite silently breaks. This is a half-day task and it should block nothing else while it happens.
 
 ---
 
@@ -96,7 +96,7 @@ Five phases. Each has goals, a task table tagged by workstream, and exit criteri
 | Data retention & deletion policy | W1 | `docs/DATA_RETENTION_POLICY.md`. The system correctly never deletes evidence/ledger history — but PII (OTP records, refresh tokens, stream tokens) already has TTL indexes. Document what's retained, for how long, and under what lawful basis, distinguishing "evidentiary record — permanent by design" from "session/PII artefact — time-bound." |
 | Dependency scanning in CI | W1/W4 | `npm audit --audit-level=high` as a CI step (non-blocking initially given the registry flakiness observed this session; blocking once stable), plus Dependabot or Renovate config. |
 
-**Exit criteria.** CI green on a clean PR from a fresh clone. `KeyProvider` interface merged and both `MASTER_KEK` and `ANCHOR_PRIVATE_KEY` go through it, with all 369 existing tests still passing unmodified (the interface must not change behaviour, only indirection). Two runbook docs exist and have been read aloud by someone who didn't write them, to check they're actually followable under stress.
+**Exit criteria.** CI green on a clean PR from a fresh clone. `KeyProvider` interface merged and both `MASTER_KEK` and `ANCHOR_PRIVATE_KEY` go through it, with all 423 existing tests still passing unmodified (the interface must not change behaviour, only indirection). Two runbook docs exist and have been read aloud by someone who didn't write them, to check they're actually followable under stress.
 
 ---
 

@@ -123,6 +123,10 @@ export const REASON_TEXT = Object.freeze({
   NO_MATCHING_POLICY: 'No access policy covers this combination of role and record.',
   USER_NOT_ACTIVE: 'This account is not active in Lexx.',
   AUDIT_NOT_PERMITTED: 'Your role cannot read the audit feed.',
+  AUDIT_UNAVAILABLE:
+    'This action is refused because the audit trail cannot currently be written. Serving disclosure and filing a forensic report are not permitted to happen unrecorded. Tell an operator, and try again once /readyz reports the audit writer healthy.',
+  SEARCH_UNAVAILABLE:
+    'Search is temporarily unavailable. This is NOT a statement that no records matched — nothing was searched. Do not treat this as an absence of evidence.',
 
   // --- identity and session ---
   IDENTITY_NOT_VERIFIED:
@@ -342,6 +346,9 @@ export const api = {
 
   disclosure: {
     prepare: (caseId, payload) => post(`/api/disclosure/${caseId}/prepare`, payload),
+    /** Court-side discovery: the packs on a case that the registry has to act on. */
+    packsForCase: (caseId, status) =>
+      get(`/api/disclosure/case/${caseId}/packs${status ? `?status=${encodeURIComponent(status)}` : ''}`),
     syncRepresentation: (caseId) => post(`/api/disclosure/${caseId}/sync-representation`, {}),
     approve: (packId, payload) => post(`/api/disclosure/${packId}/approve`, payload),
     serve: (packId, payload) => post(`/api/disclosure/${packId}/serve`, payload ?? {}),

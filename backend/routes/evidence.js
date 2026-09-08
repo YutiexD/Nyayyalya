@@ -9,12 +9,20 @@ router.use(...requireSession);
 
 /**
  * Upload order: parse multipart first (so `req.body.caseId` exists), then authorise
- * against the case loaded FROM THE DATABASE by that id. The uploaded bytes are
- * discarded by the controller's `finally` on every failure path, including denial.
+ * against the case loaded FROM THE DATABASE by that id.
+ *
+ * `reapTempUpload` is what makes that ordering safe. An earlier version of this
+ * comment claimed the controller's own `finally` discarded the bytes "on every
+ * failure path, including denial" — it did not. On denial, `authorizeCreate` calls
+ * `next(err)`, Express skips the controller entirely, and its `finally` never runs,
+ * so every rejected upload left its temp file behind forever. The reaper hooks the
+ * response lifecycle instead of the handler, so it fires whether the request was
+ * served, denied, errored or aborted.
  */
 router.post(
   '/upload',
   evidence.uploadMiddleware,
+  evidence.reapTempUpload,
   authorizeCreate(RESOURCE_TYPE.EVIDENCE, evidence.uploadCaseContext),
   evidence.uploadEvidence
 );

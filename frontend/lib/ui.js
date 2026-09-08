@@ -369,12 +369,25 @@ export const anchorTxLink = (txHash, url) =>
       );
 
 /**
+ * A batch computed but never sent. `DRY_RUN` means the Merkle root was built and
+ * recorded locally and NOTHING was submitted to any chain.
+ */
+const isDryRun = (anchor) => anchor?.status === 'DRY_RUN' || (anchor?.anchored && !anchor?.txHash);
+
+/**
  * The anchoring panel.
  *
- * Two things must be on screen every time anchoring is mentioned: the exact network
- * (this is Monad Testnet, chain 10143) and the fact
- * that a Merkle root is the only thing published. Both are hard-coded here rather
- * than taken from the payload so that a stale server value cannot soften either.
+ * Three things must be on screen every time anchoring is mentioned: the exact network
+ * (this is Monad Testnet, chain 10143), the fact that a Merkle root is the only thing
+ * published, and — the one added after review — whether the root was actually SENT.
+ *
+ * The first two are hard-coded here rather than taken from the payload so that a stale
+ * server value cannot soften either. The third has to come from the payload, because
+ * it is a fact about this deployment; but it is rendered as a banner above the table
+ * rather than as a status pill inside it, because `DRY_RUN` sitting quietly in a
+ * `Status` row next to a populated Merkle root reads, to anyone not looking for it, as
+ * "anchored". A viewer who takes an unanchored root for an anchored one has been
+ * misled about the single strongest claim on the page.
  */
 export function anchorPanel(anchor) {
   const rows = [
@@ -397,7 +410,17 @@ export function anchorPanel(anchor) {
     if (anchor.contractAddress) rows.push(['Contract', el('code', anchor.contractAddress)]);
   }
 
+  const banner = isDryRun(anchor)
+    ? el('div.notice.notice--warn', [
+        el('strong', 'DRY RUN — this root has NOT been written to any chain. '),
+        'The Merkle root below was computed and recorded locally only; no transaction was submitted, ',
+        'so there is nothing on Monad Testnet to check it against. ',
+        'Anchoring is off in this deployment (ANCHOR_ENABLED=false).',
+      ])
+    : null;
+
   return el('div.anchor', [
+    banner,
     kv(rows),
     el('p.anchor__statement', [
       el('strong', 'Only the Merkle root is written on chain. '),

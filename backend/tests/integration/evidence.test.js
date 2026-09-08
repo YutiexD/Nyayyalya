@@ -26,11 +26,14 @@ import { createApp } from '../../app.js';
 import { activateUser, makeBrowserKeyPair } from '../helpers/client.js';
 import { resolveObjectPath } from '../../services/storage.js';
 import { verifyChain } from '../../services/ledger.js';
+import { runAnchorCycle } from '../../services/anchor.js';
+import { AnchorBatch } from '../../models/AnchorBatch.js';
 import {
   FILE_INTEGRITY,
   CHAIN_INTEGRITY,
   LEDGER_EVENT,
   TRIAGE_DISCLAIMER,
+  ANCHOR_STATUS,
 } from '../../models/enums.js';
 
 let mongo;
@@ -353,6 +356,107 @@ describe('BEAT 5 — tamper the stored file, watch the right light go red', () =
 
     expect(res.body.anchorIntegrity).toBe('NOT_ANCHORED');
     expect(res.body.anchorNetwork).toBe('monad-testnet');
+  });
+
+  /**
+   * REGRESSION — a DRY_RUN batch was reported as ANCHOR_MATCH.
+   *
+   * `verifyAnchorForEvidence` compared the root recomputed from the ledger against the
+   * root stored in the batch and called agreement ANCHOR_MATCH. When the batch was
+   * never submitted, both of those roots are ours: the check proves the ledger has not
+   * been edited since we hashed it, and nothing else. The verifier UI rendered that as
+   * a green light reading "equals the root published on chain" — a claim of
+   * independent corroboration where no independent record existed.
+   *
+   * This deployment runs in DRY_RUN, so that was the state a demo actually showed.
+   */
+  it('reports ANCHOR_LOCAL_ONLY — not ANCHOR_MATCH — for a batch never submitted', async () => {
+    const up = await upload(jpegBytes('dryrun'));
+    const cycle = await runAnchorCycle();
+    expect(cycle.batched).toBe(true);
+    expect(cycle.batch.status).toBe(ANCHOR_STATUS.DRY_RUN);
+    expect(cycle.batch.txHash ?? null).toBeNull();
+
+    const res = await request(server)
+      .post(`/api/evidence/${up.body.evidence._id}/verify`)
+      .set('Authorization', `Bearer ${io.accessToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.anchorIntegrity).toBe('ANCHOR_LOCAL_ONLY');
+    expect(res.body.anchorSubmitted).toBe(false);
+    expect(res.body.anchorBatchStatus).toBe(ANCHOR_STATUS.DRY_RUN);
+
+    // The roots DO agree — which is exactly why this needed its own state rather than
+    // a mismatch. The ledger is internally consistent; it is simply not anchored.
+    expect(res.body.computedRoot).toBe(res.body.publishedRoot);
+    expect(res.body.anchorTxHash ?? null).toBeNull();
+    expect(res.body.anchorExplorerUrl ?? null).toBeNull();
+  });
+
+  it('reports ANCHOR_MATCH once the batch carries a transaction', async () => {
+    const up = await upload(jpegBytes('confirmed'));
+    const cycle = await runAnchorCycle();
+
+    // What a real submission leaves behind: a tx hash and a CONFIRMED status.
+    await AnchorBatch.updateOne(
+      { batchId: cycle.batch.batchId },
+      { $set: { txHash: `0x${'a'.repeat(64)}`, status: ANCHOR_STATUS.CONFIRMED } }
+    );
+
+    const res = await request(server)
+      .post(`/api/evidence/${up.body.evidence._id}/verify`)
+      .set('Authorization', `Bearer ${io.accessToken}`);
+
+    expect(res.body.anchorIntegrity).toBe('ANCHOR_MATCH');
+    expect(res.body.anchorSubmitted).toBe(true);
+    expect(res.body.anchorExplorerUrl).toContain('0xaaaa');
+  });
+
+  it('still reports ANCHOR_MISMATCH when the ledger no longer produces the root', async () => {
+    const up = await upload(jpegBytes('tampered-root'));
+    const cycle = await runAnchorCycle();
+
+    await AnchorBatch.updateOne(
+      { batchId: cycle.batch.batchId },
+      { $set: { txHash: `0x${'b'.repeat(64)}`, status: ANCHOR_STATUS.CONFIRMED } }
+    );
+
+    // Edit the ledger underneath it, at the database level, as an attacker with DB
+    // access would. The stored root itself is immutable — the model guard refuses to
+    // let it be rewritten — so the divergence has to come from the ledger side.
+    const anchored = await Ledger.find({ anchorBatchId: cycle.batch.batchId })
+      .sort({ seq: 1 })
+      .lean();
+    await mongoose.connection
+      .collection('ledger')
+      .updateOne({ seq: anchored[0].seq }, { $set: { entryHash: 'f'.repeat(64) } });
+
+    const res = await request(server)
+      .post(`/api/evidence/${up.body.evidence._id}/verify`)
+      .set('Authorization', `Bearer ${io.accessToken}`);
+
+    expect(res.body.anchorIntegrity).toBe('ANCHOR_MISMATCH');
+    expect(res.body.computedRoot).not.toBe(res.body.publishedRoot);
+  });
+
+  it('a mismatch is a mismatch even in DRY_RUN — LOCAL_ONLY is not a catch-all', async () => {
+    const up = await upload(jpegBytes('dryrun-mismatch'));
+    const cycle = await runAnchorCycle();
+
+    const anchored = await Ledger.find({ anchorBatchId: cycle.batch.batchId })
+      .sort({ seq: 1 })
+      .lean();
+    await mongoose.connection
+      .collection('ledger')
+      .updateOne({ seq: anchored[0].seq }, { $set: { entryHash: 'e'.repeat(64) } });
+
+    const res = await request(server)
+      .post(`/api/evidence/${up.body.evidence._id}/verify`)
+      .set('Authorization', `Bearer ${io.accessToken}`);
+
+    // Unsubmitted, but broken: LOCAL_ONLY must never mask a divergence.
+    expect(res.body.anchorIntegrity).toBe('ANCHOR_MISMATCH');
+    expect(res.body.anchorSubmitted).toBe(false);
   });
 });
 

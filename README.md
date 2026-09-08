@@ -17,7 +17,7 @@ Only the forensic laboratory decides authenticity. The AI decides what gets look
 | **Stack** | Node 20+ · Express · MongoDB · Vite (vanilla JS) · Solidity |
 | **Anchoring** | **Monad Testnet**, chain ID **10143** — Merkle roots only |
 | **Identity** | Three external authority directories; no self-registration |
-| **Tests** | 369 backend + 36 contract, all passing |
+| **Tests** | 423 backend + 36 contract, all passing |
 | **Dependencies** | `npm audit`: 0 vulnerabilities |
 
 ---
@@ -147,7 +147,7 @@ lexx/
 | `npm run seed` | Build the full demo state **through the real API** |
 | `npm run reset` | Drop `lexx_core` and clear the vault (`--directories` to reseed those too) |
 | `npm run health` | Check MongoDB, all three directories, the API and the RPC |
-| `npm test` | The whole backend suite (369 tests) |
+| `npm test` | The whole backend suite (423 tests) |
 | `npm run test:authz` | Just the authorization matrix |
 | `npm run test:redteam` | Just the adversarial suite |
 | `npm run lint` | ESLint across backend, directories, frontend, scripts |
@@ -197,7 +197,7 @@ The backend's Merkle implementation is cross-checked against the deployed contra
 | [docs/API.md](docs/API.md) | Every endpoint, request shape, response shape and error code |
 | [docs/SECURITY.md](docs/SECURITY.md) | Trust boundaries, cryptography, what the chain does and does not prove |
 | [docs/SECURITY_FINDINGS.md](docs/SECURITY_FINDINGS.md) | Every vulnerability found, its fix, and its regression test |
-| [docs/AGENT_DECISIONS.md](docs/AGENT_DECISIONS.md) | 19 ADRs — every deviation from the design spec, with reasoning |
+| [docs/AGENT_DECISIONS.md](docs/AGENT_DECISIONS.md) | 29 ADRs — every deviation from the design spec, with reasoning |
 | [docs/PRODUCTION_READINESS.md](docs/PRODUCTION_READINESS.md) | Honest assessment: what is solid, what is MVP, what blocks production |
 | [docs/PRODUCTION_ROADMAP.md](docs/PRODUCTION_ROADMAP.md) | The phased plan to close those gaps for a SIH showcase, incl. the RAG deepfake-triage pipeline |
 | [docs/IMPLEMENTATION_STATUS.md](docs/IMPLEMENTATION_STATUS.md) | Feature-by-feature status against the specification |

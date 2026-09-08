@@ -122,9 +122,12 @@ function renderCases(root) {
                     : null,
                   e.payload?.orderType ? el('div.timeline__meta', `Order: ${e.payload.orderType}`) : null,
                   el('div.timeline__hash', `entry ${e.entryHash ?? '—'}`),
+                  // "In batch", not "Anchored in batch": the entry carries the batch
+                  // id, not whether that batch was ever submitted to a chain. Whether
+                  // it was is stated once, unambiguously, in the anchoring panel.
                   e.anchorBatchId
-                    ? el('div.timeline__meta', `Anchored in batch ${e.anchorBatchId}`)
-                    : el('div.timeline__meta', 'Not yet anchored'),
+                    ? el('div.timeline__meta', `In anchor batch ${e.anchorBatchId}`)
+                    : el('div.timeline__meta', 'Not yet batched'),
                 ]
               )
             )
@@ -233,7 +236,7 @@ function renderDisclosure(root) {
   const approveSlot = el('div');
   const serveSlot = el('div');
 
-  const packIdInput = input({ placeholder: '24-character pack id from the investigating officer' });
+  const packIdInput = input({ placeholder: 'select a pack above, or paste a 24-character pack id' });
   const variantInput = input({ placeholder: 'DEFENCE_V1' });
   const exclusionIdsInput = input({ placeholder: 'exhibit ids to withhold, comma separated' });
   const maskInput = el('input', { type: 'checkbox', id: 'mask-victim' });
@@ -339,14 +342,80 @@ function renderDisclosure(root) {
     })
   );
 
+  // ---- pack discovery -------------------------------------------------------
+  //
+  // Until this existed the registrar had to be TOLD a pack id out of band, which made
+  // a statutory step depend on copying a hex string out of a chat message. The
+  // endpoint behind it is gated on APPROVE over the case, so it shows the packs on
+  // cases listed in this court and nothing else.
+  const findSlot = el('div');
+  const caseIdInput = input({ placeholder: '24-character case id from the cause list' });
+  // Prefilled from whatever the registrar last opened in the cause list, so the
+  // common path is: click the case, switch tab, press the button.
+  if (store.selectedCaseId) caseIdInput.value = store.selectedCaseId;
+  const findBtn = el('button.btn', { type: 'button' }, 'Find packs on this case');
+
+  const usePack = (packId) => {
+    packIdInput.value = packId;
+    packIdInput.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  };
+
+  findBtn.addEventListener('click', (ev) =>
+    withBusy(ev.currentTarget, 'Searching…', async () => {
+      const caseId = caseIdInput.value.trim();
+      if (!caseId) return;
+      try {
+        const result = await api.disclosure.packsForCase(caseId);
+        mount(findSlot, [
+          table(
+            [
+              { header: 'Pack', cell: (p) => el('code', p.packId) },
+              { header: 'Status', cell: (p) => el('span.pill', p.status ?? '—') },
+              { header: 'Exhibits', cell: (p) => String(p.exhibitCount ?? 0) },
+              {
+                header: 'Exclusions',
+                cell: (p) =>
+                  p.unruledExclusionCount
+                    ? el(
+                        'span.pill.pill--warn',
+                        `${p.unruledExclusionCount} of ${p.exclusionCount} awaiting a ruling`
+                      )
+                    : String(p.exclusionCount ?? 0),
+              },
+              { header: 'Served', cell: (p) => fmtDate(p.servedOn) },
+              {
+                header: '',
+                cell: (p) =>
+                  el(
+                    'button.btn.btn--ghost',
+                    { type: 'button', onClick: () => usePack(p.packId) },
+                    'Use this pack'
+                  ),
+              },
+            ],
+            result.packs ?? [],
+            { empty: 'No disclosure pack has been prepared on this case yet.' }
+          ),
+        ]);
+      } catch (error) {
+        mount(findSlot, denial(error, { heading: 'Packs not listed' }));
+      }
+    })
+  );
+
   append(root, [
     el('h2.page-title', 'Disclosure'),
     el(
       'p.page-lede',
       'The investigating officer proposes a set and states a reason for anything withheld. The registry rules on those reasons, then serves — and only then does defence counsel see anything at all.'
     ),
+    section('Find the pack', 'Packs on a case listed in this court.', [
+      field('Case id', caseIdInput, 'A case appears here only once it is listed before this court.'),
+      el('div.row', [findBtn]),
+      findSlot,
+    ]),
     section('Pack', null, [
-      field('Pack id', packIdInput, 'The officer’s disclosure tab prints this id when the set is prepared.'),
+      field('Pack id', packIdInput, 'Filled in by “Use this pack” above, or pasted by hand.'),
     ]),
     el('div.grid.grid--2', [
       section('Approve', 'Rule on each requested exclusion and fix the redaction variant.', [

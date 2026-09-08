@@ -37,7 +37,7 @@ await startService({
     createApp({
       config,
       logger,
-      router: directoryRouter(),
+      router: directoryRouter(config),
       writeExceptions: [{ method: 'POST', path: '/directory/vakalatnama' }],
     }),
 });

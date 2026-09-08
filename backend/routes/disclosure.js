@@ -20,6 +20,7 @@ import { Router } from 'express';
 import * as disclosure from '../controllers/disclosure.js';
 import { requireSession } from '../middleware/authenticate.js';
 import { authorize, authorizeCreate } from '../middleware/authorize.js';
+import { requireHealthyAudit } from '../middleware/audit.js';
 import { ACTION, RESOURCE_TYPE } from '../models/enums.js';
 
 const router = Router();
@@ -73,12 +74,38 @@ router.post(
 /** Registrar serves it, minting one watermark per recipient. */
 router.post(
   '/:packId/serve',
+  // Fails closed if the audit trail is broken: serving disclosure is one of the two
+  // acts that must never happen without a reliable record of who authorised it.
+  requireHealthyAudit,
   authorize({
     action: ACTION.WRITE,
     resourceType: RESOURCE_TYPE.DISCLOSURE_PACK,
     idFrom: 'params.packId',
   }),
   disclosure.servePack
+);
+
+/**
+ * The court's list of packs on a case.
+ *
+ * This exists because `approve` and `serve` both take a packId and there was
+ * previously no way for the registrar to LEARN one: pack ids travelled out of band,
+ * which made a statutory step depend on someone copying a hex string by hand.
+ *
+ * Gated on APPROVE, not READ, and that is the whole point. APPROVE is a
+ * COURT_ONLY_ACTION, so the resolver refuses it to every police role (including the
+ * IO who authored the pack), to FSL, and to counsel — while granting it to the judge
+ * and registry staff whose court the case is listed in. A READ gate would have handed
+ * the draft pack list, exclusions and all, to the advocate the exclusions are against.
+ */
+router.get(
+  '/case/:caseId/packs',
+  authorize({
+    action: ACTION.APPROVE,
+    resourceType: RESOURCE_TYPE.CASE,
+    idFrom: 'params.caseId',
+  }),
+  disclosure.listPacksForCase
 );
 
 /**

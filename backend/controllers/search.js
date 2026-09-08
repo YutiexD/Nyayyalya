@@ -15,7 +15,10 @@ import { Evidence } from '../models/Evidence.js';
 import { materialiseScopeFilter } from '../services/accessResolver.js';
 import { writeAudit } from '../middleware/audit.js';
 import { RESOURCE_TYPE, ACTION, DECISION } from '../models/enums.js';
-import { BadRequest } from '../utils/errors.js';
+import { BadRequest, ServiceUnavailable } from '../utils/errors.js';
+import { loggerFor } from '../utils/logger.js';
+
+const log = loggerFor('search');
 
 const parse = (schema, data) => {
   const r = schema.safeParse(data);
@@ -66,18 +69,35 @@ export async function search(req, res, next) {
       : visibleCaseIds;
 
     // 3. Now, and only now, run the text query — inside the scope, never outside it.
-    const [cases, evidence] = await Promise.all([
-      Case.find({ _id: { $in: scopedCaseIds }, $text: { $search: q.q } })
-        .select('firNumber title stage stationCode districtCode createdAt')
-        .limit(q.limit)
-        .lean()
-        .catch(() => []),
-      Evidence.find({ caseId: { $in: scopedCaseIds }, $text: { $search: q.q } })
-        .select('exhibitCode title caseId mimeType triage.priority courtStatus createdAt')
-        .limit(q.limit)
-        .lean()
-        .catch(() => []),
-    ]);
+    //
+    // These deliberately do NOT swallow errors. An earlier version caught each query
+    // and returned `[]`, which made a dropped connection or a missing text index
+    // indistinguishable from "nothing matched" — the worst possible failure mode for
+    // a search over evidence, because an investigator would conclude a record does
+    // not exist when the truth is that we failed to look. A failure is now reported
+    // as a failure.
+    let cases;
+    let evidence;
+    try {
+      [cases, evidence] = await Promise.all([
+        Case.find({ _id: { $in: scopedCaseIds }, $text: { $search: q.q } })
+          .select('firNumber title stage stationCode districtCode createdAt')
+          .limit(q.limit)
+          .lean(),
+        Evidence.find({ caseId: { $in: scopedCaseIds }, $text: { $search: q.q } })
+          .select('exhibitCode title caseId mimeType triage.priority courtStatus createdAt')
+          .limit(q.limit)
+          .lean(),
+      ]);
+    } catch (err) {
+      // Log the real database error for an operator; return a safe, typed code to the
+      // caller so a client can tell "search is broken" from "search found nothing".
+      log.error({ err: err.message, query: q.q.slice(0, 120) }, 'search query failed');
+      throw ServiceUnavailable(
+        'SEARCH_UNAVAILABLE',
+        'Search is temporarily unavailable. This is not a statement that no records matched.'
+      );
+    }
 
     return res.json({
       query: q.q,

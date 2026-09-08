@@ -93,6 +93,29 @@ export const uploadMiddleware = multer({
   },
 }).single('file');
 
+/**
+ * Guarantee the temp file is removed however this request ends.
+ *
+ * Multer has already written the upload to disk by the time any authorization runs.
+ * If the resolver denies, `next(err)` skips the controller and the controller's own
+ * `finally` never executes — so cleanup cannot live there alone. Hooking `close` on
+ * the response covers every exit: success, denial, thrown error, and client abort.
+ *
+ * `close` rather than `finish`: `finish` fires only when a response was fully sent,
+ * which an aborted upload never does.
+ */
+export function reapTempUpload(req, res, next) {
+  const tempPath = req.file?.path;
+  if (tempPath) {
+    res.on('close', () => {
+      fsp.rm(tempPath, { force: true }).catch((err) =>
+        log.warn({ err: err.message }, 'failed to remove temp upload')
+      );
+    });
+  }
+  next();
+}
+
 const cleanup = (p) => {
   if (p) fsp.rm(p, { force: true }).catch(() => {});
 };
@@ -514,6 +537,11 @@ export async function verifyEvidence(req, res, next) {
       anchorTxHash: anchorResult.txHash,
       anchorNetwork: env.ANCHOR_NETWORK,
       anchorExplorerUrl: anchorResult.explorerUrl,
+      // Whether the root was ever SENT, stated separately from whether it matches.
+      // A viewer must be able to tell corroboration from self-consistency without
+      // having to know that `ANCHOR_LOCAL_ONLY` means the latter.
+      anchorSubmitted: anchorResult.submitted,
+      anchorBatchStatus: anchorResult.batchStatus,
       verifiedAt,
       // The nuance worth stating plainly: these lights are independent.
       interpretation: buildInterpretation(fileIntegrity, chainIntegrity, signatureValid),
@@ -550,6 +578,8 @@ async function verifyAnchorForEvidence(e) {
     computedRoot: null,
     txHash: null,
     explorerUrl: null,
+    submitted: false,
+    batchStatus: null,
   };
   if (!e.ledgerSeq) return empty;
 
@@ -581,12 +611,25 @@ async function verifyAnchorForEvidence(e) {
     }
   }
 
+  // A batch with no transaction hash was computed and stored HERE and nowhere else.
+  // Comparing our recomputed root against our own stored root proves internal
+  // consistency and nothing more, so it must not be reported as ANCHOR_MATCH — that
+  // state asserts agreement with a root we cannot rewrite, which is the entire point.
+  const submitted = Boolean(batch.txHash);
+
+  let status;
+  if (!matches || !inclusionProven) status = ANCHOR_INTEGRITY.ANCHOR_MISMATCH;
+  else if (!submitted) status = ANCHOR_INTEGRITY.ANCHOR_LOCAL_ONLY;
+  else status = ANCHOR_INTEGRITY.ANCHOR_MATCH;
+
   return {
-    status: matches && inclusionProven ? ANCHOR_INTEGRITY.ANCHOR_MATCH : ANCHOR_INTEGRITY.ANCHOR_MISMATCH,
+    status,
     publishedRoot: batch.merkleRoot,
     computedRoot,
     txHash: batch.txHash,
-    explorerUrl: batch.txHash ? `${env.ANCHOR_EXPLORER_BASE}/tx/${batch.txHash}` : null,
+    explorerUrl: submitted ? `${env.ANCHOR_EXPLORER_BASE}/tx/${batch.txHash}` : null,
+    submitted,
+    batchStatus: batch.status,
   };
 }
 

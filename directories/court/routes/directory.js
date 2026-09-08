@@ -7,7 +7,7 @@
  *   GET  /directory/listing/by-fir/:firNumber   CNR + court for a case
  *   GET  /directory/vakalatnama?enrolmentNo=    cases this advocate is on record for
  *   GET  /directory/legal-aid?enrolmentNo=      legal aid assignments
- *   POST /directory/vakalatnama                 registrar files one (demo only)
+ *   POST /directory/vakalatnama                 SIMULATED registrar filing (demo only)
  *   GET  /directory/registry-staff/:staffCode   verify registry user
  *
  * POST /directory/vakalatnama is the single write endpoint in all three
@@ -16,7 +16,7 @@
  */
 import { Router } from 'express';
 import { route } from '../../common/app.js';
-import { NotFound, Conflict } from '../../common/errors.js';
+import { NotFound, Conflict, DirectoryError } from '../../common/errors.js';
 import {
   PATTERNS,
   identifier,
@@ -70,7 +70,7 @@ async function withCourts(records) {
   return { listingByCnr, courtById };
 }
 
-export function directoryRouter() {
+export function directoryRouter(config = {}) {
   const router = Router();
 
   // ------------------------------------------------------------------ judge ----
@@ -217,14 +217,36 @@ export function directoryRouter() {
   );
 
   /**
-   * The one write endpoint in the three directories. The registrar files a
-   * vakalatnama; the record it creates is what later makes Lexx grant an advocate
-   * access to a case. Lexx cannot call this — it is here so the demo can show a
-   * lawyer coming on record, and it is allow-listed by name in the read-only guard.
+   * SIMULATED REGISTRY FILING — not a real vakalatnama.
+   *
+   * The one write endpoint in the three directories. In the real world eCourts owns
+   * this act: a registrar accepts a vakalatnama and the advocate is on record. Here it
+   * exists so the demo can show that happening, because the grant it produces is what
+   * later unlocks disclosure for that advocate inside Lexx.
+   *
+   * It is therefore an AUTHORITY SIMULATOR, and is labelled as one three ways, because
+   * a reviewer who mistook it for a Lexx feature would badly misread the trust model:
+   *
+   *   1. It is refused outright unless `config.allowSimulatedFilings` is set — off by
+   *      default under NODE_ENV=production. With a real dataset behind it and no
+   *      authentication in front of it, this would put any advocate on record for any
+   *      listed case.
+   *   2. Every response carries `simulated: true` and a `notice`.
+   *   3. Lexx has no code path that calls it. The core API only ever READS
+   *      /directory/vakalatnama; this is allow-listed by name in the read-only guard
+   *      so that a human (or the seed) can drive the demo.
    */
   router.post(
     '/vakalatnama',
     route(async (req, res) => {
+      if (!config.allowSimulatedFilings) {
+        throw new DirectoryError(
+          403,
+          'SIMULATED_FILING_DISABLED',
+          'This endpoint simulates a court registrar filing a vakalatnama and is disabled in this environment. In a real deployment the filing is made in eCourts, not here.'
+        );
+      }
+
       const body = objectBody(req.body);
 
       const cnrNumber = identifier(body.cnrNumber, 'cnrNumber', PATTERNS.CNR_NUMBER);
@@ -286,6 +308,9 @@ export function directoryRouter() {
       });
 
       res.status(201).json({
+        simulated: true,
+        notice:
+          'Simulated registry filing. This stands in for a vakalatnama accepted in eCourts; it is not a filing of record.',
         cnrNumber: created.cnrNumber,
         advocateEnrolmentNo: created.advocateEnrolmentNo,
         appearingFor: created.appearingFor,

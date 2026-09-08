@@ -63,6 +63,16 @@ const PER_TEST_COLLECTIONS = [
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
+/** Everything Part A of the s.63 Schedule asks for, so a certificate can be generated. */
+const FULL_DEVICE = Object.freeze({
+  sourceType: 'MOBILE',
+  make: 'Samsung',
+  model: 'Galaxy A54',
+  colour: 'Black',
+  serialNumber: 'R58N90ABCDE',
+  imeiOrUid: '351756051523999',
+});
+
 let io;
 let registrar;
 let onRecord;
@@ -139,13 +149,18 @@ async function uploadExhibit(caseId, title, device = {}) {
  * case → exhibits → IO prepares → chargesheet filed → representation synced from the
  * court directory → registrar approves → registrar serves.
  */
-async function fixture({ exclude = 1, approveAllExclusions = true, serveTo = 'ON_RECORD' } = {}) {
+async function fixture({
+  exclude = 1,
+  approveAllExclusions = true,
+  serveTo = 'ON_RECORD',
+  device = {},
+} = {}) {
   const caseDoc = await createCase();
 
   const exhibits = [
-    await uploadExhibit(caseDoc._id, 'CCTV clip'),
-    await uploadExhibit(caseDoc._id, 'Mobile video'),
-    await uploadExhibit(caseDoc._id, 'Seized phone photo'),
+    await uploadExhibit(caseDoc._id, 'CCTV clip', device),
+    await uploadExhibit(caseDoc._id, 'Mobile video', device),
+    await uploadExhibit(caseDoc._id, 'Seized phone photo', device),
   ];
 
   const excluded = exhibits.slice(exhibits.length - exclude);
@@ -655,5 +670,232 @@ describe('the whole disclosure sequence lands in the append-only ledger', () => 
       LEDGER_EVENT.DISCLOSURE_SERVED,
       LEDGER_EVENT.DISCLOSURE_ACKNOWLEDGED,
     ]);
+  });
+});
+
+// ============================================ certificates follow the pack ==
+
+/**
+ * REGRESSION — a s.63 certificate is a statement ABOUT an exhibit, and was leaking
+ * exhibits the pack deliberately withheld.
+ *
+ * Before this, `GET /api/certificates/:id` was guarded by `authorize(READ,
+ * CERTIFICATE)`, and the resolver's LEGAL branch handled EVIDENCE and
+ * DISCLOSURE_PACK explicitly but let CERTIFICATE fall through to a bare
+ * `allowReadOnly`. So an advocate on record — correctly refused the excluded
+ * exhibit itself — could still fetch the certificate for it and read out the
+ * exhibit code, the SHA-256 digest, the source device's make, model, serial and
+ * IMEI, and the laboratory's opinion. That is most of what the exclusion existed to
+ * withhold, handed over through a side door.
+ */
+describe('a certificate is scoped to the same served set as its exhibit', () => {
+  /** Generate certificates for one disclosed and one excluded exhibit, as the IO. */
+  async function certifiedFixture() {
+    const f = await fixture({ device: FULL_DEVICE });
+    expect(f.served.status, JSON.stringify(f.served.body)).toBe(200);
+
+    const generate = async (evidenceId) => {
+      const res = await as(io, request(server).post('/api/certificates/generate')).send({
+        evidenceId: String(evidenceId),
+      });
+      expect(res.status, JSON.stringify(res.body)).toBe(201);
+      return res.body.certificate.certificateId;
+    };
+
+    return {
+      ...f,
+      disclosedCertId: await generate(f.disclosed[0]._id),
+      excludedCertId: await generate(f.excluded[0]._id),
+    };
+  }
+
+  it('lets the advocate read the certificate for an exhibit they were served', async () => {
+    const f = await certifiedFixture();
+    const res = await as(onRecord, request(server).get(`/api/certificates/${f.disclosedCertId}`));
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.certificate.certificateId).toBe(f.disclosedCertId);
+  });
+
+  it('REFUSES the certificate for an exhibit excluded from their pack', async () => {
+    const f = await certifiedFixture();
+    const res = await as(onRecord, request(server).get(`/api/certificates/${f.excludedCertId}`));
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe(DENY_REASON.EXHIBIT_NOT_IN_DISCLOSURE_SET);
+  });
+
+  it('refuses the PDF of that certificate too, not merely its metadata', async () => {
+    const f = await certifiedFixture();
+    const res = await as(
+      onRecord,
+      request(server).get(`/api/certificates/${f.excludedCertId}/pdf`)
+    );
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe(DENY_REASON.EXHIBIT_NOT_IN_DISCLOSURE_SET);
+  });
+
+  it('records the refusal, so the attempt on a withheld exhibit is provable', async () => {
+    const f = await certifiedFixture();
+    await as(onRecord, request(server).get(`/api/certificates/${f.excludedCertId}`));
+
+    const rows = await denialRows(DENY_REASON.EXHIBIT_NOT_IN_DISCLOSURE_SET);
+    expect(rows.length).toBeGreaterThan(0);
+    expect(rows.some((r) => String(r.resourceId) === f.excludedCertId)).toBe(true);
+  });
+
+  it('refuses an advocate served NO pack at all, even one on record', async () => {
+    // A live grant, but the pack never left DRAFT: nothing has been disclosed yet.
+    const caseDoc = await createCase();
+    const exhibit = await uploadExhibit(caseDoc._id, 'CCTV clip', FULL_DEVICE);
+    await as(io, request(server).post(`/api/disclosure/${caseDoc._id}/prepare`)).send({
+      excludedItems: [],
+    });
+    await as(io, request(server).post(`/api/cases/${caseDoc._id}/file-chargesheet`)).send({});
+    await as(
+      registrar,
+      request(server).post(`/api/disclosure/${caseDoc._id}/sync-representation`)
+    ).send({});
+
+    const cert = await as(io, request(server).post('/api/certificates/generate')).send({
+      evidenceId: String(exhibit._id),
+    });
+    expect(cert.status, JSON.stringify(cert.body)).toBe(201);
+
+    const res = await as(
+      onRecord,
+      request(server).get(`/api/certificates/${cert.body.certificate.certificateId}`)
+    );
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe(DENY_REASON.NO_DISCLOSURE_PACK_SERVED);
+  });
+});
+
+// ============================== the court can find the packs it must rule on ==
+
+/**
+ * REGRESSION — `approve` and `serve` both take a packId and there was no endpoint
+ * that returned one. The registrar had to be told the id out of band, which made a
+ * statutory step depend on copying a hex string by hand.
+ *
+ * The guard is APPROVE on the CASE, not READ, and that distinction is the test: a
+ * READ gate would have handed the draft pack list — exclusion counts and all — to
+ * the advocate the exclusions are directed against.
+ */
+describe('GET /api/disclosure/case/:caseId/packs', () => {
+  /** Case → exhibits → IO prepares → chargesheet filed, which is what lists it. */
+  async function preparedCase() {
+    const caseDoc = await createCase();
+    await uploadExhibit(caseDoc._id, 'CCTV clip');
+    await uploadExhibit(caseDoc._id, 'Mobile video');
+    const prepared = await as(
+      io,
+      request(server).post(`/api/disclosure/${caseDoc._id}/prepare`)
+    ).send({ excludedItems: [] });
+    expect(prepared.status, JSON.stringify(prepared.body)).toBe(201);
+    return { caseDoc, packId: prepared.body.pack.packId };
+  }
+
+  it('returns the pack the registrar has to act on, without being told its id', async () => {
+    const { caseDoc, packId } = await preparedCase();
+    const filed = await as(
+      io,
+      request(server).post(`/api/cases/${caseDoc._id}/file-chargesheet`)
+    ).send({});
+    expect(filed.status, JSON.stringify(filed.body)).toBe(200);
+
+    const res = await as(
+      registrar,
+      request(server).get(`/api/disclosure/case/${caseDoc._id}/packs`)
+    );
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.total).toBe(1);
+    expect(res.body.packs[0].packId).toBe(packId);
+    expect(res.body.packs[0].exhibitCount).toBe(2);
+    expect(res.body.packs[0].exclusionCount).toBe(0);
+  });
+
+  it('shows the court NOTHING until the case is actually listed before it', async () => {
+    // Court scope comes from `Case.courtId`, which is set by filing the chargesheet.
+    // A pack prepared during investigation is an investigative document and the
+    // registry has no business in it yet — the same rule that governs the case.
+    const { caseDoc } = await preparedCase();
+    const res = await as(
+      registrar,
+      request(server).get(`/api/disclosure/case/${caseDoc._id}/packs`)
+    );
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe(DENY_REASON.OUT_OF_COURT_SCOPE);
+  });
+
+  it('reports how many exclusions still await a ruling', async () => {
+    const f = await fixture({ approveAllExclusions: false, exclude: 1 });
+    const res = await as(
+      registrar,
+      request(server).get(`/api/disclosure/case/${f.caseId}/packs`)
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.packs[0].exclusionCount).toBe(1);
+    expect(res.body.packs[0].unruledExclusionCount).toBe(1);
+  });
+
+  it('never returns a watermark token: that names one advocate’s copy', async () => {
+    const f = await fixture();
+    const res = await as(
+      registrar,
+      request(server).get(`/api/disclosure/case/${f.caseId}/packs`)
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.packs[0].recipientCount).toBeGreaterThan(0);
+    expect(JSON.stringify(res.body)).not.toMatch(/watermarkToken/);
+
+    // and no token VALUE leaks under some other key either
+    const pack = await DisclosurePack.findById(f.packId).lean();
+    for (const entry of pack.servedTo ?? []) {
+      expect(JSON.stringify(res.body)).not.toContain(entry.watermarkToken);
+    }
+  });
+
+  it('filters by status', async () => {
+    const f = await fixture();
+    const served = await as(
+      registrar,
+      request(server).get(
+        `/api/disclosure/case/${f.caseId}/packs?status=${DISCLOSURE_STATUS.SERVED}`
+      )
+    );
+    expect(served.status).toBe(200);
+    expect(served.body.total).toBe(1);
+
+    const drafts = await as(
+      registrar,
+      request(server).get(
+        `/api/disclosure/case/${f.caseId}/packs?status=${DISCLOSURE_STATUS.DRAFT}`
+      )
+    );
+    expect(drafts.status).toBe(200);
+    expect(drafts.body.total).toBe(0);
+  });
+
+  it('rejects a status that is not a disclosure status', async () => {
+    const f = await fixture();
+    const res = await as(
+      registrar,
+      request(server).get(`/api/disclosure/case/${f.caseId}/packs?status=ANYTHING`)
+    );
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('VALIDATION_FAILED');
+  });
+
+  it('REFUSES the advocate on record — APPROVE is a court action, not a party’s', async () => {
+    const f = await fixture();
+    const res = await as(onRecord, request(server).get(`/api/disclosure/case/${f.caseId}/packs`));
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe(DENY_REASON.READ_ONLY_ROLE);
+  });
+
+  it('REFUSES the investigating officer who authored the pack', async () => {
+    const f = await fixture();
+    const res = await as(io, request(server).get(`/api/disclosure/case/${f.caseId}/packs`));
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe(DENY_REASON.READ_ONLY_ROLE);
   });
 });

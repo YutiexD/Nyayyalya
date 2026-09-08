@@ -343,3 +343,149 @@ The file's own header states its purpose: *"Written for the five minutes before 
 **Security impact.** None.
 
 **Testing impact.** Verified live: a fresh cold-start run against Atlas reproduced the false negative with the old 3000ms budget; the same run against the same cluster passed cleanly after the fix.
+
+---
+
+## ADR-022 — A s.63 certificate is scoped to the served disclosure set, not to the case grant
+
+**Decision.** The resolver's LEGAL branch now handles `RESOURCE_TYPE.CERTIFICATE` explicitly, applying the same three tests it applies to `EVIDENCE`: a `SERVED` pack must exist on the case, it must have been served to *this* user, and `certificate.evidenceId` must be in that pack's `exhibitIds`. Failing any of them returns `NO_DISCLOSURE_PACK_SERVED` or `EXHIBIT_NOT_IN_DISCLOSURE_SET`.
+
+**Reason.** Found by review, not by a test. `GET /api/certificates/:id` is guarded by `authorize(READ, CERTIFICATE)`. The LEGAL branch handled `EVIDENCE` and `DISCLOSURE_PACK` explicitly and then fell through to a bare `allowReadOnly(action)` for everything else — which included certificates. So an advocate correctly refused an excluded exhibit could fetch the certificate *about* that exhibit and read the exhibit code, the SHA-256 digest, the source device's make, model, serial number and IMEI, and the laboratory's opinion. That is most of what the exclusion existed to withhold, delivered through a side door, and the PDF endpoint leaked the same thing.
+
+The general principle now stated in the code: a fall-through to `allowReadOnly` is safe only for resource types that carry no exhibit-level detail. Every type that does must be handled above that line.
+
+**Affected.** `backend/services/accessResolver.js` (LEGAL branch).
+
+**Alternatives.** Guard the route with a bespoke check in `controllers/certificate.js` — rejected outright: it would put a second authorization path next to the resolver, which is the exact defect ADR-003 and SEC-001 exist to prevent.
+
+**Security impact.** Closes a confidentiality leak of the same class as SEC-001, reachable by any advocate legitimately on record.
+
+**Testing impact.** Five tests in `integration/disclosure.test.js` ("a certificate is scoped to the same served set as its exhibit"). Verified as a genuine regression test: with the new branch removed, four of the five fail and the positive case still passes.
+
+---
+
+## ADR-023 — The anchor scheduler is started at boot and its state is reported on `/readyz`
+
+**Decision.** `backend/server.js` calls `startAnchorScheduler()` after `syncIndexes` and before `app.listen`, records `active` / `disabled` / `failed` in the new `backend/services/health.js`, and calls `stopAnchorScheduler()` on shutdown. `/readyz` reports `anchorScheduler.{state, detail, since, network, submitting}` and is `degraded` unless the state is `active` or `disabled`.
+
+**Reason.** `startAnchorScheduler` existed, was exported, was tested — and was never called by anything except tests. Every running instance therefore anchored nothing at all, while `/readyz` returned `ready` and the documentation described a five-minute batching cycle. A claim about integrity anchoring that is false in every deployment is worse than an absent feature, because nobody looks for it.
+
+`disabled` counts as ready because anchoring off is a configuration (`ANCHOR_ENABLED=false`), not a fault. `submitting` is reported separately so a viewer can tell "computing Merkle roots in DRY_RUN" from "sending transactions to Monad" — the two look identical in the batch records otherwise.
+
+**Affected.** `backend/server.js`, `backend/app.js` (`/readyz`), `backend/services/health.js` (new).
+
+**Alternatives.** Start the scheduler from `createApp()` — rejected: `createApp` is called by every integration test, which would have every test process racing a background chain-anchoring timer.
+
+**Security impact.** None directly; it makes an integrity control observable rather than assumed.
+
+**Testing impact.** Six tests in `integration/resilience.test.js` plus four in `unit/health.test.js`.
+
+---
+
+## ADR-024 — Audit writes stay fail-open, with two exceptions that fail closed
+
+**Decision.** `writeAudit` and `writeAuthAudit` still never throw into the request they describe. But failures are now counted: `AUDIT_UNHEALTHY_THRESHOLD` (3) consecutive failures flip the instance to `audit.healthy = false`, which makes `/readyz` degraded and makes the new `requireHealthyAudit` middleware refuse two operations with `AUDIT_UNAVAILABLE` 503 — `POST /api/disclosure/:packId/serve` and `POST /api/fsl/referrals/:id/report`. The counter resets on the first successful write.
+
+**Reason.** Fail-open was and remains the right default: a logging outage must not become an outage of the system it describes. But nothing bounded it, so "every authorization decision is recorded" could quietly degrade to "every decision we managed to record", with no signal anywhere — including while disclosure was being served on the accused.
+
+Two acts do not tolerate that. Serving disclosure starts the BNSS s.230 clock and mints per-recipient watermarks; filing a forensic report records the laboratory's opinion on authenticity. Both are things this system asks a court to rely on, and neither is acceptable as an event that happened with no reliable account of who authorised it. Everything else — reads, listings, uploads — continues to fail open.
+
+The threshold is consecutive, not cumulative, because one transient failure is noise and a sustained run is an incident.
+
+**Affected.** `backend/middleware/audit.js`, `backend/services/health.js`, `backend/routes/disclosure.js`, `backend/routes/fsl.js`, `backend/app.js`.
+
+**Alternatives.** Fail closed on every write — rejected: it converts a Mongo hiccup into a total outage, which is the trade the original design deliberately refused. Persist the health state — rejected: the question `/readyz` answers is "is this instance healthy right now", and a restart *should* reset it.
+
+**Security impact.** Narrows a documented availability-over-completeness trade at the two points where completeness matters most, without widening it anywhere.
+
+**Testing impact.** Six tests in `integration/resilience.test.js`, including one that confirms the fail-open half still works, and seven in `unit/health.test.js`.
+
+---
+
+## ADR-025 — Temp uploads are reaped on the response lifecycle, not in the controller
+
+**Decision.** New `reapTempUpload` middleware sits between `uploadMiddleware` and `authorizeCreate` on `POST /api/evidence/upload`. It registers an `res.on('close')` handler that removes `req.file.path`.
+
+**Reason.** The route's own comment claimed the controller's `finally` discarded the staged bytes "on every failure path, including denial". It did not. On denial `authorizeCreate` calls `next(err)`, Express skips the controller entirely, and its `finally` never runs — so **every rejected upload left its full plaintext temp file in the OS temp directory, forever**. On a system whose entire premise is custody of evidence, that is both an unbounded disk leak and an uncontrolled copy of material that was refused.
+
+`close` rather than `finish`, deliberately: an aborted upload never finishes, and an abort is precisely when a stray file is most likely.
+
+**Affected.** `backend/controllers/evidence.js`, `backend/routes/evidence.js` (the false comment is now replaced with a statement of what was untrue).
+
+**Alternatives.** Move authorization before multer — rejected: `caseId` arrives in the multipart body, so there is nothing to authorise against until it is parsed. A periodic sweep of the temp directory — rejected as the primary mechanism: it leaves a window, and the correct fix is not to leak in the first place.
+
+**Security impact.** Removes an uncontrolled plaintext copy of refused evidence.
+
+**Testing impact.** Three tests in `integration/resilience.test.js` covering denial, validation failure and the success path. Verified as a genuine regression test: with the middleware removed, the denial case fails with a leaked `.part` file.
+
+---
+
+## ADR-026 — Search reports a database failure as a failure
+
+**Decision.** `controllers/search.js` no longer wraps each query in `.catch(() => [])`. A failure is logged with the real error and returned as `SEARCH_UNAVAILABLE` 503, with a message that says explicitly it is not a statement that no records matched.
+
+**Reason.** The old shape made a dropped connection, a missing text index and a genuine empty result indistinguishable — all three rendered as `{ cases: [], evidence: [], total: 0 }`. For a search over evidence that is the worst available failure mode: an investigator concludes a record does not exist when the truth is that the system failed to look, and there is nothing on screen to suggest otherwise.
+
+The audit row is still written before the query runs, so a failed search is not an unrecorded one.
+
+**Affected.** `backend/controllers/search.js`.
+
+**Security impact.** None. It is an integrity-of-information fix, not an access-control one.
+
+**Testing impact.** Four tests in `integration/resilience.test.js`, including one confirming a genuinely empty result is still a 200.
+
+---
+
+## ADR-027 — The court discovers disclosure packs through `APPROVE`, not `READ`
+
+**Decision.** New `GET /api/disclosure/case/:caseId/packs`, guarded by `authorize({ action: APPROVE, resourceType: CASE })`.
+
+**Reason.** `approve` and `serve` both take a `packId` and nothing returned one. The registrar had to be told the id out of band, which made a statutory step depend on someone copying a hex string by hand — the kind of gap that only shows up when a real user tries to complete the workflow.
+
+The guard is the interesting part. `READ` on the case is held by the advocate on record, so a `READ`-gated listing would have handed the draft pack list — exclusion counts and all — to the party the exclusions are directed against. `APPROVE` is in `COURT_ONLY_ACTIONS`, so the resolver grants it to the judge and registry staff of the court the case is listed in and refuses it to the IO who authored the pack, to FSL, and to counsel. No role comparison was added anywhere; the existing policy already expressed exactly the right rule.
+
+The response is a summary rather than `packView`, and deliberately omits `servedTo[].watermarkToken` — that token identifies one named advocate's copy and belongs in the serve response to the registrar who minted it.
+
+A consequence worth stating: the court sees nothing until the case is actually listed before it, because court scope comes from `Case.courtId`, which is set by filing the chargesheet. A pack prepared during investigation is an investigative document, and the same rule that keeps the registry out of the case keeps it out of the pack.
+
+**Affected.** `backend/controllers/disclosure.js`, `backend/routes/disclosure.js`, `docs/API.md`.
+
+**Security impact.** Positive: it removes the practice of passing pack ids around out of band.
+
+**Testing impact.** Eight tests in `integration/disclosure.test.js`, including the two refusals (advocate, authoring IO), the not-yet-listed case, and an assertion that no watermark token appears in the payload.
+
+---
+
+## ADR-028 — `POST /directory/vakalatnama` is labelled and gated as an authority simulator
+
+**Decision.** The court directory's single write endpoint is refused unless `config.allowSimulatedFilings` is set — which defaults to on outside `NODE_ENV=production` and off inside it, overridable with `DIRECTORY_ALLOW_SIMULATED_FILINGS=true`. Every successful response carries `simulated: true` and a `notice` naming eCourts as the real authority.
+
+**Reason.** In the real world eCourts owns this act; here it exists so the demo can show an advocate coming on record, because the grant it produces is what unlocks disclosure. Nothing in Lexx calls it — not the API, not the seed, not the frontend — which makes it simultaneously the most misreadable thing in the repository and the least likely to be noticed if its label came off. A reviewer who took it for a product feature would conclude that Lexx grants itself lawyer access, which inverts the entire trust model; and with a real dataset behind it and no authentication in front of it, an unauthenticated caller could put any advocate on record for any listed case.
+
+**Affected.** `directories/common/config.js`, `directories/court/routes/directory.js`, `directories/court/server.js`.
+
+**Alternatives.** Delete it and seed vakalatnamas directly — rejected: the demo needs to *show* the act happening, and a seeded row shows only its result.
+
+**Security impact.** Removes an unauthenticated write path from any production-mode run of the simulator.
+
+**Testing impact.** New suite `integration/directory-simulator.test.js` (6 tests), covering the label, the gate both ways, that a refusal writes nothing, and that reads are unaffected.
+
+---
+
+## ADR-029 — A DRY_RUN batch is `ANCHOR_LOCAL_ONLY`, never `ANCHOR_MATCH`
+
+**Decision.** `verifyAnchorForEvidence` returns the new `ANCHOR_INTEGRITY.ANCHOR_LOCAL_ONLY` when the recomputed root matches the stored root and the entry proves as a member of it **but the batch carries no transaction hash**. `ANCHOR_MATCH` now requires a submitted transaction. The verify response also carries `anchorSubmitted` and `anchorBatchStatus`, and the verifier UI renders `ANCHOR_LOCAL_ONLY` amber with the sentence "both roots are held by this system, so this shows internal consistency only".
+
+**Reason.** Found while adding the DRY_RUN banner the review asked for, and it is worse than the banner it was meant to accompany. The comparison in `verifyAnchorForEvidence` is between a root recomputed from the ledger and a root stored in `anchor_batches`. When the batch was never submitted — which is every batch in this deployment, since `ANCHOR_ENABLED=false` — **both sides of that comparison are ours**. The result was reported as `ANCHOR_MATCH`, and the verifier painted it as a green light reading *"equals the root published on chain"*. Nothing was published on any chain. The system was showing a court a self-comparison and describing it as independent corroboration, on the page whose entire purpose is to let someone with no account check our claims.
+
+This is the same class of overstatement the project forbids elsewhere ("AI never determines authenticity", "no accuracy percentages"), applied to the blockchain claim, and it was live in the demo path.
+
+The state is deliberately *not* folded into `ANCHOR_MISMATCH`: the roots genuinely do agree, and reporting a red light would be its own falsehood. It is a third thing — internally consistent, externally unattested — and it needed a third name.
+
+**Affected.** `backend/models/enums.js`, `backend/controllers/evidence.js`, `frontend/lib/verify.js`, `frontend/lib/ui.js` (DRY RUN banner on the anchoring panel), `frontend/pages/court.js` ("In anchor batch", not "Anchored in batch"), `docs/API.md`.
+
+**Alternatives.** Keep `ANCHOR_MATCH` and rely on the banner — rejected: the banner is on a different panel from the light, and the light is what a viewer reads as the verdict. Suppress the anchor light entirely in DRY_RUN — rejected: the check is genuinely informative (it detects post-hoc ledger edits), it just must not be mislabelled.
+
+**Security impact.** Removes a false integrity claim from the public verifier. No access control changes.
+
+**Testing impact.** Four tests in `integration/evidence.test.js`, covering DRY_RUN, a confirmed batch, and a divergence in each mode — because `ANCHOR_LOCAL_ONLY` must not become a catch-all that masks a real mismatch.

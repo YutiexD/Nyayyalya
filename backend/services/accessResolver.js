@@ -322,12 +322,37 @@ async function evaluate({ user, action, resourceType, resource, caseDoc }) {
       return allowReadOnly(action);
     }
 
+    // A certificate is a statement ABOUT an exhibit: it carries the exhibit code, the
+    // evidence hash, the source device's make/model/serial/IMEI and the lab's opinion.
+    // Handing one over for an exhibit that was deliberately withheld from this
+    // advocate's pack would disclose exactly what the exclusion was meant to withhold.
+    // So a certificate is scoped to the SAME served set as the evidence it describes,
+    // not to the case grant alone.
+    if (resourceType === RESOURCE_TYPE.CERTIFICATE) {
+      const pack = await DisclosurePack.findOne({
+        caseId: caseDoc._id,
+        status: DISCLOSURE_STATUS.SERVED,
+      }).lean();
+      if (!pack) return deny(DENY_REASON.NO_DISCLOSURE_PACK_SERVED);
+
+      const servedToUser = (pack.servedTo ?? []).some((s) => sameId(s.userId, user.userId));
+      if (!servedToUser) return deny(DENY_REASON.NO_DISCLOSURE_PACK_SERVED);
+
+      const inSet = (pack.exhibitIds ?? []).some((id) => sameId(id, resource.evidenceId));
+      if (!inSet) return deny(DENY_REASON.EXHIBIT_NOT_IN_DISCLOSURE_SET);
+
+      return allowReadOnly(action);
+    }
+
     if (resourceType === RESOURCE_TYPE.CUSTODY_ITEM) {
       // Physical custody is a police and court matter; counsel see it through
       // disclosure, not directly.
       return deny(DENY_REASON.EXHIBIT_NOT_IN_DISCLOSURE_SET);
     }
 
+    // Anything else a LEGAL user reaches is read-only at most. Note that every
+    // resource type carrying exhibit-level detail is handled explicitly ABOVE this
+    // line — a new such type must be added there, not left to fall through here.
     return allowReadOnly(action);
   }
 

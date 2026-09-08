@@ -649,6 +649,62 @@ export async function getMyPack(req, res, next) {
  * confined by the query below to the caller's OWN `servedTo` entry: an advocate
  * cannot acknowledge on anyone else's behalf.
  */
+/**
+ * GET /api/disclosure/case/:caseId/packs[?status=]
+ *
+ * Lists the disclosure packs on a case, for the court users who have to act on them.
+ *
+ * Added because the registrar previously had no way to DISCOVER a pack: approve and
+ * serve both take a packId, and the only way to learn one was to be told it out of
+ * band by the investigating officer. That made a core statutory workflow depend on
+ * copying an identifier by hand.
+ *
+ * The route gates this on APPROVE over the CASE — a court-only action — so the
+ * resolver alone decides who arrives here, and it is the same rule that decides who
+ * may act on the packs listed. `req.resource` is the case it already loaded.
+ */
+export async function listPacksForCase(req, res, next) {
+  try {
+    const filter = { caseId: req.resource._id };
+
+    const status = req.query.status;
+    if (status) {
+      const parsedStatus = parse(z.enum(Object.values(DISCLOSURE_STATUS)), status);
+      filter.status = parsedStatus;
+    }
+
+    const packs = await DisclosurePack.find(filter).sort({ createdAt: -1 }).lean();
+
+    // A summary, not `packView`. This is a discovery list, so it carries what the
+    // registrar needs to choose a pack and act on it — and deliberately not the
+    // per-recipient `watermarkToken`, which identifies the copy a specific advocate
+    // holds. That belongs in the serve response to the registrar who minted it, not
+    // in a list anyone with court scope can page through.
+    return res.json({
+      caseId: String(req.resource._id),
+      packs: packs.map((p) => ({
+        packId: String(p._id),
+        cnrNumber: p.cnrNumber ?? null,
+        status: p.status,
+        exhibitCount: (p.exhibitIds ?? []).length,
+        exclusionCount: (p.excludedItems ?? []).length,
+        unruledExclusionCount: (p.excludedItems ?? []).filter((x) => !x.approvedByRegistrarId)
+          .length,
+        redactionVariant: p.redactionVariant,
+        dueOn: p.dueOn ?? null,
+        approvedAt: p.approvedAt ?? null,
+        servedOn: p.servedOn ?? null,
+        recipientCount: (p.servedTo ?? []).length,
+        acknowledgedCount: (p.servedTo ?? []).filter((s) => s.acknowledgedAt).length,
+        createdAt: p.createdAt,
+      })),
+      total: packs.length,
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 export async function acknowledgePack(req, res, next) {
   try {
     const pack = req.resource;

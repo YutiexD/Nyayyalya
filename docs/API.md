@@ -401,15 +401,18 @@ Four independent lights, each recomputed from first principles rather than read 
   "fileIntegrity": "FILE_INTACT | FILE_MODIFIED | FILE_MISSING",
   "signatureValid": true,
   "chainIntegrity": "CHAIN_INTACT | CHAIN_BROKEN",
-  "anchorIntegrity": "ANCHOR_MATCH | ANCHOR_MISMATCH | NOT_ANCHORED | ANCHOR_UNAVAILABLE",
+  "anchorIntegrity": "ANCHOR_MATCH | ANCHOR_LOCAL_ONLY | ANCHOR_MISMATCH | NOT_ANCHORED | ANCHOR_UNAVAILABLE",
   "brokenAtSeq": null, "chainBreakReason": null, "entriesChecked": 128,
   "expectedSha256": "…", "recomputedSha256": "…",
   "publishedRoot": "0x…", "computedRoot": "0x…",
   "anchorTxHash": "0x…", "anchorNetwork": "monad-testnet",
   "anchorExplorerUrl": "https://testnet.monadexplorer.com/tx/0x…",
+  "anchorSubmitted": false, "anchorBatchStatus": "DRY_RUN",
   "verifiedAt": "…",
   "interpretation": "The stored file matches its recorded hash, …" }
 ```
+**`ANCHOR_LOCAL_ONLY` is not a weaker `ANCHOR_MATCH`; it is a different claim.** It means the root recomputed from the ledger equals the root this system stored, and the entry proves as a member of it — but the batch was never submitted to a chain (`anchorSubmitted: false`, `anchorBatchStatus: "DRY_RUN"`). Both sides of that comparison are ours, so it demonstrates internal consistency and not independent corroboration. `ANCHOR_MATCH` is returned only when a transaction hash exists. The UI renders `ANCHOR_LOCAL_ONLY` amber, never green.
+
 `recomputedSha256` is `null` when the GCM tag failed (the ciphertext was altered, so no plaintext can be recovered) or the object is missing. `chainIntegrity` reflects the **whole** ledger, not just this exhibit. Writes a `VERIFY` audit row with `reason = fileIntegrity`.
 
 ### `POST /api/evidence/:id/stream-token`
@@ -622,7 +625,9 @@ Also sets `Evidence.forensic.status = UNDER_EXAMINATION` and records the examine
 
 ### `POST /api/fsl/referrals/:id/report` *(multipart)*
 
-**Guard:** `authorize({ WRITE, REFERRAL })` → multer → controller (`assertActingLab` again). Authorisation happens *before* the bytes are buffered.
+**Guard:** `requireHealthyAudit` → `authorize({ WRITE, REFERRAL })` → multer → controller (`assertActingLab` again). Authorisation happens *before* the bytes are buffered.
+
+`requireHealthyAudit` makes this one of the two fail-closed operations (the other is serving disclosure): after 3 consecutive audit-write failures this instance returns `AUDIT_UNAVAILABLE` 503 rather than record a forensic opinion with no reliable account of who filed it.
 
 File field: `report` (exactly one, ≤32 MB, held in memory). Body fields:
 
@@ -729,7 +734,7 @@ Sets `status = APPROVED` and stamps each approved exclusion with the registrar i
 
 ### `POST /api/disclosure/:packId/serve`
 
-**Guard:** `authorize({ WRITE, DISCLOSURE_PACK, idFrom: 'params.packId' })`.
+**Guard:** `requireHealthyAudit` → `authorize({ WRITE, DISCLOSURE_PACK, idFrom: 'params.packId' })`.
 **In practice:** a `REGISTRAR` or `EVIDENCE_CUSTODIAN` in the case's court — *and also* the station `SHO`, and the assigned `IO` while the case is still open to writes, because `WRITE` is not court-only. See [Known inconsistencies](#known-inconsistencies) item 5.
 
 Body: `{ recipientUserIds? }` — array of ObjectId, ≤50. Optional narrowing of the recipient list; every id must already hold a live advocate grant.
@@ -746,7 +751,31 @@ Requires the pack to be past `DRAFT` and **every** exclusion to have been ruled 
 ```
 Also sets `Case.clocks.disclosureServedOn` (the BNSS s.230 clock) and writes the watermark tokens into the ledger payload.
 
-**Errors:** `PACK_NOT_APPROVED` 409 · `UNAPPROVED_EXCLUSIONS` 409 (`details.itemIds`) · `RECIPIENT_NOT_ON_RECORD` 400 (`details.userIds`) · `ALREADY_SERVED` 409 · `NO_RECIPIENTS_ON_RECORD` 409 · `RECIPIENT_NOT_ACTIVE` 409.
+**Errors:** `AUDIT_UNAVAILABLE` 503 · `PACK_NOT_APPROVED` 409 · `UNAPPROVED_EXCLUSIONS` 409 (`details.itemIds`) · `RECIPIENT_NOT_ON_RECORD` 400 (`details.userIds`) · `ALREADY_SERVED` 409 · `NO_RECIPIENTS_ON_RECORD` 409 · `RECIPIENT_NOT_ACTIVE` 409.
+
+`AUDIT_UNAVAILABLE` is the fail-closed guard: after `AUDIT_UNHEALTHY_THRESHOLD` (3) consecutive audit-write failures this instance refuses to serve disclosure at all, rather than serving it with no record of who authorised it. It clears on the first successful audit write.
+
+### `GET /api/disclosure/case/:caseId/packs`
+
+**Guard:** `authorize({ APPROVE, CASE, idFrom: 'params.caseId' })`.
+**In practice:** the `JUDGE`, `REGISTRAR` or `EVIDENCE_CUSTODIAN` of the court the case is listed in — and nobody else. `APPROVE` is in `COURT_ONLY_ACTIONS`, so the IO who *authored* the pack is refused `READ_ONLY_ROLE` here, as are FSL and counsel. A `READ` guard would have handed the draft pack list, exclusion reasons and all, to the advocate the exclusions are directed against.
+
+The registrar's discovery endpoint: `approve` and `serve` both take a `packId`, and before this there was no way to learn one except to be told it out of band.
+
+Query: `status?` — one of `DRAFT | PENDING_APPROVAL | APPROVED | SERVED` (whatever `DISCLOSURE_STATUS` holds); omitted means all, newest first.
+
+**200**
+```json
+{ "caseId": "…", "total": 1,
+  "packs": [ { "packId": "…", "cnrNumber": "…", "status": "APPROVED",
+               "exhibitCount": 6, "exclusionCount": 2, "unruledExclusionCount": 0,
+               "redactionVariant": "…", "dueOn": "…", "approvedAt": "…",
+               "servedOn": null, "recipientCount": 0, "acknowledgedCount": 0,
+               "createdAt": "…" } ] }
+```
+This is a summary, not `packView`. It deliberately omits `servedTo[].watermarkToken` — the token identifies the copy one named advocate holds, and belongs in the serve response to the registrar who minted it, not in a list.
+
+**Errors:** `READ_ONLY_ROLE` 403 · `OUT_OF_COURT_SCOPE` 403 · `CASE_NOT_LISTED_IN_YOUR_COURT` 403 · `RESOURCE_NOT_FOUND` 404 · `VALIDATION_FAILED` 400 (bad `status`).
 
 ### `GET /api/disclosure/my-pack/:caseId`
 
@@ -1033,7 +1062,22 @@ Both are unauthenticated, defined directly in `backend/app.js`.
 **200** `{ "status": "ok", "service": "lexx-core", "db": "connected|disconnected", "anchorNetwork": "monad-testnet", "chainId": 10143 }` — deliberately cheap and dependency-free.
 
 ### `GET /readyz`
-**200 / 503** `{ "status": "ready|degraded", "db": "connected|disconnected", "directories": { "police": { "ok": true, "latencyMs": 4 }, "court": {…}, "legal": {…} } }` — 503 unless the database and all three directories are reachable.
+**200 / 503**
+```json
+{ "status": "ready|degraded",
+  "db": "connected|disconnected",
+  "directories": { "police": { "ok": true, "latencyMs": 4 }, "court": {…}, "legal": {…} },
+  "anchorScheduler": { "state": "active|disabled|failed|stopped|unknown",
+                       "detail": null, "since": "…",
+                       "network": "monad-testnet", "submitting": false },
+  "audit": { "healthy": true, "consecutiveFailures": 0,
+             "totalFailures": 0, "lastFailureAt": null } }
+```
+503 unless the database and the storage directories are usable, the anchor scheduler is `active` or `disabled`, **and** the audit writer is healthy.
+
+`anchorScheduler.state` is `disabled` when `ANCHOR_ENABLED=false` — a deliberate configuration, so it counts as ready — and `failed` when `startAnchorScheduler()` threw at boot. `submitting: false` means the process is in `ANCHOR_DRY_RUN` mode and computes roots without sending a transaction.
+
+`audit.healthy` goes false after 3 consecutive audit-write failures and clears on the first success. While it is false, serving disclosure and filing an FSL report are refused with `AUDIT_UNAVAILABLE`.
 
 ---
 
@@ -1085,7 +1129,7 @@ The remaining unauthenticated routes:
 | `POST /api/auth/verify-identity` | Rate-limited (60/15 min per IP). Returns the directory's `name`, `authority`, `role`, `scope` and a masked phone for a valid identifier — see [Known inconsistencies](#known-inconsistencies) item 7. |
 | `POST /api/auth/request-otp`, `/activate`, `/login`, `/refresh` | The front door. Rate-limited; see the [Auth](#auth) table. |
 | `ALL /api/auth/register` | Always 410. |
-| `GET /healthz`, `GET /readyz` | Liveness and readiness. `/healthz` discloses the anchor network and chain id and whether the database is connected; `/readyz` additionally discloses per-directory reachability and latency. |
+| `GET /healthz`, `GET /readyz` | Liveness and readiness. `/healthz` discloses the anchor network and chain id and whether the database is connected; `/readyz` additionally discloses per-directory reachability and latency, the anchor scheduler's state, and audit-writer health (failure counts, no messages). |
 
 Everything under `/api/cases`, `/api/evidence`, `/api/custody`, `/api/fsl`, `/api/disclosure`, `/api/certificates`, `/api/ledger`, `/api/audit` and `/api/search` requires a session. `GET /api/ledger/verify-chain` was moved behind authentication by ADR-012.
 

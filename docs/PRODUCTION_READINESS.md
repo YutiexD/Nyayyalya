@@ -11,7 +11,7 @@ This document is deliberately unflattering where that is accurate. A readiness r
 
 | | |
 |---|---|
-| Backend tests | **369 passing**, 12 suites, 0 skipped |
+| Backend tests | **423 passing**, 15 suites, 0 skipped |
 | Contract tests | **36 passing** |
 | `npm audit` | **0 vulnerabilities** (production and dev) |
 | ESLint | 0 errors |
@@ -166,16 +166,19 @@ Six findings were discovered and fixed during the build; see `docs/SECURITY_FIND
 | `unit/canonical` | 14 | Determinism of the hash input — key order, unicode, non-finite rejection, cycles, prototype pollution |
 | `unit/ledger` | 21 | Chaining, concurrency, five classes of tamper detection, immutability guards |
 | `unit/services` | 46 | Jurisdiction, QR, Merkle, envelope encryption, triage, ECDSA |
+| `unit/health` | 11 | Scheduler state, audit-failure counting, recovery, reason truncation |
 | `integration/auth` | 34 | Directory → auth → session, against the **real** directory services |
-| `integration/evidence` | 30 | Upload, ingest refusals, tamper detection, streaming, key rotation |
-| `integration/custody` | 22 | Two-scan transfer, forged QR, seal break, gap detection |
-| `integration/fsl` | 29 | Lab scoping, report signing, opinion vocabulary |
-| `integration/disclosure` | 44 | Serving, scoping, exclusions, denial logging |
-| `integration/certificate` | 39 | Part A completeness refusal, Part B from FSL only, public verifier non-disclosure |
+| `integration/evidence` | 34 | Upload, ingest refusals, tamper detection, anchor honesty (`ANCHOR_LOCAL_ONLY`), streaming, key rotation |
+| `integration/custody` | 20 | Two-scan transfer, forged QR, seal break, gap detection |
+| `integration/fsl` | 14 | Lab scoping, report signing, opinion vocabulary |
+| `integration/disclosure` | 47 | Serving, scoping, exclusions, certificate scoping, court pack listing, denial logging |
+| `integration/certificate` | 37 | Part A completeness refusal, Part B from FSL only, public verifier non-disclosure |
 | `integration/anchor` | 22 | Batching, idempotency, root mismatch detection, public surface |
+| `integration/resilience` | 20 | `/readyz` scheduler + audit health, temp-file reaping, `SEARCH_UNAVAILABLE`, fail-closed audit |
+| `integration/directory-simulator` | 6 | The one directory write endpoint is labelled simulated and gated |
 | `authz/matrix` | 58 | The full cross-scope authorization matrix |
-| `redteam/attacks` | 40 | Direct API attacks assuming a hostile frontend |
-| **Total** | **369** | |
+| `redteam/attacks` | 39 | Direct API attacks assuming a hostile frontend |
+| **Total** | **423** | |
 | `contracts/` | 36 | Anti-replay, access control, Merkle proofs, second-preimage resistance |
 
 Integration tests run against **real directory services as child processes** and a **real MongoDB**, not mocks — the unique indexes and append-only guards are security controls, and a mock would let a test pass while the real constraint was broken.

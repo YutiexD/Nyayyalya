@@ -31,8 +31,16 @@ const CHAIN_STATES = {
   CHAIN_BROKEN: [RED, 'Ledger chain does not verify', 'A recomputed entry hash did not match. Treat every record after the break as unproven and escalate.'],
 };
 
+/**
+ * ANCHOR_LOCAL_ONLY is amber, deliberately, and it is the state this deployment is
+ * usually in. The root recomputed from the ledger matches the root we stored and the
+ * entry proves as a member of it — but that root was never submitted to a chain, so
+ * both sides of the comparison are ours. Painting that green would tell a court that
+ * an independent record agrees with us when no independent record exists.
+ */
 const ANCHOR_STATES = {
   ANCHOR_MATCH: [GREEN, 'Anchored root matches', 'The Merkle root recomputed from the ledger equals the root published on chain, and this entry proves as a member of it.'],
+  ANCHOR_LOCAL_ONLY: [AMBER, 'Root matches locally — NOT on chain', 'The recomputed root matches the stored root and this entry proves as a member of it, but the batch was never submitted (DRY RUN). Both roots are held by this system, so this shows internal consistency only — not independent corroboration.'],
   ANCHOR_MISMATCH: [RED, 'Anchored root does not match', 'The root recomputed from the ledger differs from the published root, or this entry does not prove as a member of it.'],
   NOT_ANCHORED: [AMBER, 'Not yet anchored', 'This entry has not been included in an anchor batch yet. Batches are published on a timer.'],
   ANCHOR_UNAVAILABLE: [AMBER, 'Anchor record unavailable', 'The batch this entry belongs to could not be read, so the published root could not be compared.'],

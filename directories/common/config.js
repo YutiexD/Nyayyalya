@@ -38,6 +38,23 @@ export function loadConfig({ service, portVar, portDefault, dbVar, dbDefault }) 
     serverSelectionMs: num(process.env.MONGO_SERVER_SELECTION_MS, 5000),
     bodyLimit: process.env.DIRECTORY_BODY_LIMIT ?? '100kb',
     /**
+     * Whether the court directory's ONE write endpoint — POST /directory/vakalatnama —
+     * is open.
+     *
+     * That endpoint is a stand-in for a registrar filing a vakalatnama in eCourts. It
+     * is how the demo shows an advocate coming on record, and the grant it produces is
+     * what later unlocks disclosure for that advocate in Lexx. In a real deployment
+     * eCourts owns that act and this service would not exist; if this simulator were
+     * ever exposed with a real dataset behind it, an unauthenticated caller could put
+     * any advocate on record for any listed case.
+     *
+     * So it is off under NODE_ENV=production unless someone deliberately turns it back
+     * on, and it says plainly in every response that it is simulated.
+     */
+    allowSimulatedFilings:
+      process.env.DIRECTORY_ALLOW_SIMULATED_FILINGS === 'true' ||
+      (process.env.NODE_ENV ?? 'development') !== 'production',
+    /**
      * CORS is restricted to the local Lexx API origin. These services are consumed
      * server-to-server by backend/services/directoryClient.js — a browser has no
      * business talking to a government directory directly — so the allowlist is

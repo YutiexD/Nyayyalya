@@ -2,6 +2,7 @@ import { Router } from 'express';
 import * as fsl from '../controllers/fsl.js';
 import { requireSession } from '../middleware/authenticate.js';
 import { authorize, authorizeCollection, authorizeCreate } from '../middleware/authorize.js';
+import { requireHealthyAudit } from '../middleware/audit.js';
 import { ACTION, RESOURCE_TYPE } from '../models/enums.js';
 
 // ------------------------------------------------------------ /api/fsl ------
@@ -29,6 +30,9 @@ router.post(
  */
 router.post(
   '/referrals/:id/report',
+  // Fails closed if the audit trail is broken: a forensic opinion is the strongest
+  // evidentiary claim in the system and must not be filed unrecorded.
+  requireHealthyAudit,
   authorize({ action: ACTION.WRITE, resourceType: RESOURCE_TYPE.REFERRAL }),
   fsl.reportUpload,
   fsl.fileReport

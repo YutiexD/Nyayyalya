@@ -11,13 +11,13 @@
 
 | | |
 |---|---|
-| Backend tests | **369 passing**, 12 suites, 0 skipped, 0 failing |
+| Backend tests | **423 passing**, 15 suites, 0 skipped, 0 failing |
 | Contract tests | **36 passing** |
 | ESLint | **0 errors** (10 warnings, all one documented false-positive class) |
 | `npm audit` | **0 vulnerabilities** |
 | Frontend build | **Passing** (8 pages, ~50 kB gzipped JS total) |
 | Network check | **Passing** — no stale Sepolia configuration |
-| API routes | **53** live, **53** documented, 0 phantom, 0 undocumented |
+| API routes | **55** live, **55** documented, 0 phantom, 0 undocumented |
 | Security findings | 6 found, **6 fixed**, each with a regression test or control |
 
 Verified end-to-end against a live system, not only in tests: the full 17-stage seed, the beat-5 tamper demo, and an anchor cycle producing a verified Merkle inclusion proof.
@@ -107,7 +107,7 @@ Verified end-to-end against a live system, not only in tests: the full 17-stage 
 
 ## 3. Specification deviations
 
-Nineteen decisions are recorded in `docs/AGENT_DECISIONS.md`. The ones that change behaviour a reader of the spec would not expect:
+Twenty-nine decisions are recorded in `docs/AGENT_DECISIONS.md`. The ones that change behaviour a reader of the spec would not expect:
 
 | ADR | Deviation |
 |---|---|

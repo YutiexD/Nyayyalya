@@ -12,6 +12,7 @@ import env from './config/env.js';
 import { errorHandler, notFoundHandler } from './middleware/errorHandler.js';
 import { mongoReady } from '../shared/mongo.js';
 import { directoryHealth } from './services/directoryClient.js';
+import { getSchedulerState, getAuditHealth } from './services/health.js';
 
 import authRoutes from './routes/auth.js';
 import caseRoutes from './routes/cases.js';
@@ -75,15 +76,42 @@ export function createApp() {
     });
   });
 
-  /** Readiness: can this instance actually serve? Checks real dependencies. */
+  /**
+   * Readiness: can this instance actually serve? Checks real dependencies.
+   *
+   * Reports the anchor scheduler and the audit writer as well as the database and the
+   * directories, because both can fail in ways that leave the API answering requests
+   * perfectly while a load-bearing claim quietly stops being true.
+   */
   app.get('/readyz', async (req, res) => {
     const directories = await directoryHealth();
     const dbOk = mongoReady();
     const dirsOk = directories.police.ok && directories.court.ok && directories.legal.ok;
-    res.status(dbOk && dirsOk ? 200 : 503).json({
-      status: dbOk && dirsOk ? 'ready' : 'degraded',
+
+    const scheduler = getSchedulerState();
+    const audit = getAuditHealth();
+
+    // 'disabled' is a healthy state — anchoring is off by configuration, not broken.
+    const schedulerOk = scheduler.state === 'active' || scheduler.state === 'disabled';
+
+    const ready = dbOk && dirsOk && schedulerOk && audit.healthy;
+    res.status(ready ? 200 : 503).json({
+      status: ready ? 'ready' : 'degraded',
       db: dbOk ? 'connected' : 'disconnected',
       directories,
+      anchorScheduler: {
+        state: scheduler.state,
+        detail: scheduler.detail,
+        since: scheduler.since,
+        network: env.ANCHOR_NETWORK,
+        submitting: env.ANCHOR_ENABLED,
+      },
+      audit: {
+        healthy: audit.healthy,
+        consecutiveFailures: audit.consecutiveFailures,
+        totalFailures: audit.totalFailures,
+        lastFailureAt: audit.lastFailureAt,
+      },
     });
   });
 
