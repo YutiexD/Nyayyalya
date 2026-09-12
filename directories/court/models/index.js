@@ -16,7 +16,17 @@ const opts = { versionKey: false, timestamps: true };
 
 export const COURT_TYPES = ['MAGISTRATE', 'SESSIONS', 'SPECIAL'];
 export const SERVICE_STATUSES = ['ACTIVE', 'SUSPENDED', 'RETIRED', 'TRANSFERRED'];
-export const REGISTRY_ROLES = ['REGISTRAR', 'EVIDENCE_CUSTODIAN'];
+/**
+ * Registry staff, in the eCourts sense.
+ *
+ * A REGISTRAR used to be here, and Lexx used to require one: an advocate could not
+ * come on record, and the defence could not be served a page, until a second court
+ * account signed in and approved what the judge had already decided. The registry
+ * role that remains is the one that does something nobody else can — keep the
+ * physical articles produced in court. Ruling on representation and on disclosure is
+ * the presiding judge's, and goes through the roster rather than through this table.
+ */
+export const REGISTRY_ROLES = ['EVIDENCE_CUSTODIAN'];
 export const APPEARING_FOR = ['ACCUSED', 'VICTIM'];
 export const VAKALATNAMA_STATUSES = ['ACCEPTED', 'WITHDRAWN'];
 export const LEGAL_AID_STATUSES = ['ACTIVE', 'CLOSED'];
@@ -98,7 +108,8 @@ const vakalatnamaSchema = new Schema(
     appearingFor: { type: String, enum: APPEARING_FOR, required: true },
     partyName: { type: String, required: true },
     filedOn: { type: Date, required: true },
-    acceptedByRegistrar: { type: String, default: null },
+    /** The judge code of the presiding judge who took the advocate on record. */
+    acceptedBy: { type: String, default: null },
     acceptedOn: { type: Date, default: null },
     status: { type: String, enum: VAKALATNAMA_STATUSES, required: true, index: true },
   },

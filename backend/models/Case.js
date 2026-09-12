@@ -76,6 +76,10 @@ const CaseSchema = new Schema(
     courtName: { type: String, default: null },
     chargesheetFiledOn: { type: Date, default: null },
 
+    // ---- the end: set when the court closes the case. Nothing is removed. ----
+    closedOn: { type: Date, default: null },
+    closedByUserId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
+
     jurisdictionComputed: { type: JurisdictionSchema, default: null },
     clocks: { type: ClocksSchema, default: () => ({}) },
 

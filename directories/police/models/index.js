@@ -16,7 +16,15 @@ const opts = { versionKey: false, timestamps: true };
 
 export const RANKS = ['CONSTABLE', 'HEAD_CONSTABLE', 'SUB_INSPECTOR', 'INSPECTOR', 'DSP', 'SP'];
 export const SERVICE_STATUSES = ['ACTIVE', 'SUSPENDED', 'RETIRED', 'TRANSFERRED'];
-export const POSTING_ROLES = ['IO', 'SHO', 'MALKHANA_CUSTODIAN', 'DISTRICT_SP'];
+/**
+ * Posting roles.
+ *
+ * MALKHANA_CUSTODIAN is gone. The station store is still where sealed articles live,
+ * and every movement in or out of it is still a two-scan, ledgered handover — but it
+ * is kept by the station's own officers rather than by a separate account that every
+ * handover had to wait for.
+ */
+export const POSTING_ROLES = ['IO', 'SHO', 'DISTRICT_SP'];
 export const SENSITIVITY_CLASSES = [
   'ORDINARY',
   'POCSO',

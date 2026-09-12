@@ -6,6 +6,7 @@
  * cases should update every tab at once.
  */
 import { createSlice } from '@reduxjs/toolkit';
+import { sessionCleared, sessionEstablished } from '@/features/auth/authSlice';
 
 const THEME_KEY = 'lexx.theme';
 
@@ -49,6 +50,17 @@ const uiSlice = createSlice({
     workingCaseSet(state, action) {
       state.workingCaseId = action.payload ?? null;
     },
+  },
+  // The working case belongs to the person who chose it. A new session — or the end of
+  // one — drops it, so the next user in the same tab never lands on a case id picked by
+  // someone else (typically one they cannot read, which rendered every tab as a denial).
+  extraReducers: (builder) => {
+    builder.addCase(sessionEstablished, (state) => {
+      state.workingCaseId = null;
+    });
+    builder.addCase(sessionCleared, (state) => {
+      state.workingCaseId = null;
+    });
   },
 });
 

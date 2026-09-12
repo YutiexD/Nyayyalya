@@ -2,14 +2,16 @@
  * The one write endpoint in the three authority directories.
  *
  * `POST /directory/vakalatnama` is an AUTHORITY SIMULATOR, not a Lexx feature. In the
- * real world a registrar accepts a vakalatnama in eCourts and Lexx only ever reads the
+ * real world a court accepts a vakalatnama in eCourts and Lexx only ever reads the
  * result; this endpoint exists so the demo can show that happening, because the grant
  * it produces is what later unlocks disclosure for an advocate.
  *
  * That makes it the most misreadable thing in the repo: a reviewer who took it for
- * part of the product would conclude Lexx grants itself lawyer access. Nothing calls
- * it — not the seed, not the frontend, not the API — so nothing else in the suite
- * would have noticed if the label or the gate came off. Hence this file.
+ * part of the product would conclude Lexx grants itself lawyer access. It is called
+ * from exactly one place — the presiding judge's acceptance of a filed vakalatnama
+ * (controllers/vakalatnama.js), relaying the registry's own act to the court register
+ * — and nothing else in the suite would notice if the label or the gate came off.
+ * Hence this file.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import request from 'supertest';
@@ -19,7 +21,7 @@ import { mongoose } from '../../../shared/mongo.js';
 import { createApp } from '../../../directories/common/app.js';
 import { directoryRouter } from '../../../directories/court/routes/directory.js';
 import { seedCourt } from '../../../directories/court/seed.js';
-import { models, CaseListing, RegistryStaff } from '../../../directories/court/models/index.js';
+import { models, CaseListing, Roster, Judge } from '../../../directories/court/models/index.js';
 
 let mongo;
 
@@ -36,11 +38,14 @@ const appWith = (allowSimulatedFilings) =>
     config: { ...config, allowSimulatedFilings },
     logger: { info() {}, warn() {}, error() {}, debug() {}, child: () => this },
     router: directoryRouter({ ...config, allowSimulatedFilings }),
-    writeExceptions: [{ method: 'POST', path: '/directory/vakalatnama' }],
+    writeExceptions: [
+      { method: 'POST', path: '/directory/vakalatnama' },
+      { method: 'POST', path: '/directory/listing' },
+    ],
   });
 
 let listing;
-let registrar;
+let presidingJudge;
 
 beforeAll(async () => {
   mongo = await MongoMemoryServer.create();
@@ -49,10 +54,13 @@ beforeAll(async () => {
   // The seed manages its own connection when run as a script; here the test owns it.
   await seedCourt({ manageConnection: false, logger: { info() {} } });
 
-  registrar = await RegistryStaff.findOne({ role: 'REGISTRAR', serviceStatus: 'ACTIVE' }).lean();
-  listing = await CaseListing.findOne({ courtId: registrar.courtId }).lean();
-  expect(registrar, 'court seed must contain a serving registrar').toBeTruthy();
-  expect(listing, 'court seed must contain a case listed in that registrar’s court').toBeTruthy();
+  listing = await CaseListing.findOne().lean();
+  // The judge the roster places in that court today — the only identity the court
+  // register will accept an appearance from.
+  const roster = await Roster.findOne({ courtId: listing.courtId, validTo: null }).lean();
+  presidingJudge = await Judge.findById(roster.judgeId).lean();
+  expect(listing, 'court seed must contain a listed case').toBeTruthy();
+  expect(presidingJudge, 'the roster must place a serving judge in that court').toBeTruthy();
 }, 180_000);
 
 afterAll(async () => {
@@ -65,7 +73,7 @@ const filing = (advocate) => ({
   advocateEnrolmentNo: advocate,
   appearingFor: 'ACCUSED',
   partyName: 'Test Party',
-  acceptedByRegistrar: registrar.staffCode,
+  acceptedBy: presidingJudge.judgeCode,
 });
 
 describe('POST /directory/vakalatnama is labelled as a simulator', () => {
@@ -115,11 +123,62 @@ describe('POST /directory/vakalatnama is labelled as a simulator', () => {
     }
   });
 
-  it('reading the register is unaffected — Lexx only ever reads', async () => {
+  it('reading the register is unaffected by the gate', async () => {
+    // Filed through the open gate in the first test of this block.
     const res = await request(appWith(false)).get(
-      `/directory/vakalatnama?enrolmentNo=${encodeURIComponent('UP/1234/2015')}`
+      `/directory/vakalatnama?enrolmentNo=${encodeURIComponent('UP/5551/2021')}`
     );
     expect(res.status).toBe(200);
     expect(res.body.count).toBeGreaterThan(0);
+  });
+});
+
+describe('POST /directory/listing — the court registering a chargesheet', () => {
+  const registration = (firNumber, courtCode = 'UP-GZB-CJM-01') => ({
+    firNumber,
+    stationCode: 'UP-GZB-KVN',
+    courtCode,
+    caseCategory: 'MAGISTRATE_TRIAL',
+  });
+
+  it('allots a CNR, says it is simulated, and lists the FIR before that court', async () => {
+    const res = await request(appWith(true)).post('/directory/listing').send(registration('0901/2026'));
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.simulated).toBe(true);
+    expect(res.body.notice).toMatch(/eCourts/);
+    expect(res.body.cnrNumber).toMatch(/^[A-Z]{2}[A-Z0-9]{2}\d{12}$/);
+    expect(res.body.court.code).toBe('UP-GZB-CJM-01');
+
+    const found = await request(appWith(false)).get('/directory/listing/by-fir/0901/2026');
+    expect(found.body.cnrNumber).toBe(res.body.cnrNumber);
+  });
+
+  it('answers a second registration of the same FIR with the SAME listing', async () => {
+    const first = await request(appWith(true)).post('/directory/listing').send(registration('0902/2026'));
+    const again = await request(appWith(true)).post('/directory/listing').send(registration('0902/2026'));
+    expect(again.status).toBe(200);
+    expect(again.body.created).toBe(false);
+    expect(again.body.cnrNumber).toBe(first.body.cnrNumber);
+  });
+
+  it('refuses a court it does not hold', async () => {
+    const res = await request(appWith(true))
+      .post('/directory/listing')
+      .send(registration('0903/2026', 'UP-XXX-NONE-01'));
+    expect(res.status).toBe(404);
+    expect(res.body.error.code).toBe('COURT_NOT_FOUND');
+  });
+
+  it('is REFUSED when simulated filings are turned off', async () => {
+    const res = await request(appWith(false)).post('/directory/listing').send(registration('0904/2026'));
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe('SIMULATED_FILING_DISABLED');
+  });
+
+  it('lists the courts of a district for the jurisdiction router', async () => {
+    const res = await request(appWith(false)).get('/directory/courts?districtCode=UP-GZB');
+    expect(res.status).toBe(200);
+    const codes = res.body.courts.map((c) => c.code);
+    expect(codes).toEqual(expect.arrayContaining(['UP-GZB-SESS-02', 'UP-GZB-CJM-01']));
   });
 });

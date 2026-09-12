@@ -36,6 +36,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 import { Separator } from '@/components/ui/separator';
 
 import { api, ApiError, setSession, clearSession, HOME_FOR_ROLE } from '@/lib/api';
+import { queryClient } from '@/lib/queryClient';
 import { getOrCreateKeyPair, exportPublicJwk, publicKeyFingerprint } from '@/lib/crypto';
 import { sessionEstablished, deviceKeyMismatchDetected } from '@/features/auth/authSlice';
 import { Denial } from '@/components/common/Verdicts';
@@ -131,6 +132,9 @@ export default function LoginPage() {
 
   const finish = (session) => {
     setSession(session);
+    // A new identity starts from an empty cache: nothing read under a previous
+    // session (one that expired rather than signed out) may render under this one.
+    queryClient.clear();
     dispatch(sessionEstablished(session.user));
     const next = location.state?.from;
     navigate(next || HOME_FOR_ROLE[session.user?.role] || '/', { replace: true });
@@ -231,8 +235,8 @@ export default function LoginPage() {
         </div>
         <div className="space-y-4 border-l-2 border-border pl-5 text-sm leading-relaxed text-muted-foreground">
           <p className="will-reveal">
-            Lexx holds no identities of its own. Officers exist in the police directory, judges
-            and registrars in the court directory, advocates and examiners in the Bar Council and
+            Lexx holds no identities of its own. Officers exist in the police directory, judges and court staff
+            in the court directory, advocates and examiners in the Bar Council and
             FSL directory. We verify against them and can create none of them.
           </p>
           <p className="will-reveal">

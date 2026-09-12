@@ -12,7 +12,9 @@
  * how an evidence register becomes untrustworthy.
  */
 import { useState } from 'react';
-import { Check, X, Loader2, Upload, FileDigit, PenLine, ServerCog, ShieldCheck } from 'lucide-react';
+import {
+  Check, X, Loader2, Upload, FileDigit, PenLine, ServerCog, ShieldCheck, FileDown, ExternalLink,
+} from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -26,13 +28,15 @@ import {
   SelectValue,
 } from '@/components/ui/select';
 import { Badge } from '@/components/ui/badge';
+import { Checkbox } from '@/components/ui/checkbox';
 import { Separator } from '@/components/ui/separator';
 
-import { Section, KeyValue, Hash } from '@/components/common/Primitives';
-import { Denial, Note } from '@/components/common/Verdicts';
+import { Facts as KeyValue, Digest as Hash } from '@/components/common/Shell';
+import { Denial, Note, PriorityBadge, PriorityReasons } from '@/components/common/Verdicts';
 import { hashFile, signHashHex, getOrCreateKeyPair } from '@/lib/crypto';
 import { useUploadEvidence } from '@/hooks/queries';
 import { ApiError } from '@/lib/api';
+import { saveBlob } from '@/lib/download';
 import { fmtBytes, cn, humanise } from '@/lib/utils';
 
 const SOURCE_TYPES = ['MOBILE', 'COMPUTER', 'DVR', 'CD_DVD', 'FLASH_DRIVE', 'SERVER', 'CLOUD', 'OTHER'];
@@ -106,15 +110,39 @@ function StepRow({ index, meta, step }) {
         </div>
         {step.detail &&
           (isHex(step.detail) ? (
-            <div className="rounded-md bg-muted/60 p-2">
-              <Hash value={step.detail} />
-            </div>
+            <Hash value={step.detail} />
           ) : (
             <p className="text-xs text-muted-foreground">{step.detail}</p>
           ))}
       </div>
     </li>
   );
+}
+
+/**
+ * Source types that describe a physical article — the same list the certificate
+ * generator uses. For these, BSA s.63 Part A needs make, model and colour; for every
+ * source it needs a serial number or an IMEI/UID. Nothing can add them to an exhibit
+ * after upload, so a certificate refused for want of them could never be issued.
+ */
+const PHYSICAL_SOURCES = new Set(['MOBILE', 'COMPUTER', 'DVR', 'CD_DVD', 'FLASH_DRIVE', 'SERVER']);
+
+function missingParticulars(fields) {
+  const missing = [];
+  if (PHYSICAL_SOURCES.has(fields.sourceType)) {
+    for (const [key, label] of [['make', 'make'], ['model', 'model'], ['colour', 'colour']]) {
+      if (!fields[key].trim()) missing.push(label);
+    }
+  }
+  if (!fields.serialNumber.trim() && !fields.imeiOrUid.trim()) missing.push('serial number or IMEI/UID');
+  return missing;
+}
+
+/** The officer's own copy of what they submitted, as a file they keep. */
+function saveReceipt(receipt) {
+  if (!receipt) return;
+  const blob = new Blob([JSON.stringify(receipt, null, 2)], { type: 'application/json' });
+  saveBlob(blob, `receipt-${receipt.exhibitCode ?? 'exhibit'}.json`);
 }
 
 export function UploadPipeline({ caseId, disabled, disabledReason }) {
@@ -129,6 +157,10 @@ export function UploadPipeline({ caseId, disabled, disabledReason }) {
   const [result, setResult] = useState(null);
   const [error, setError] = useState(null);
   const [running, setRunning] = useState(false);
+  const [noCertificate, setNoCertificate] = useState(false);
+
+  const missing = missingParticulars(fields);
+  const particularsOk = missing.length === 0 || noCertificate;
 
   const set = (k) => (e) => setFields((f) => ({ ...f, [k]: e.target.value }));
   const mark = (i, state, detail) =>
@@ -200,6 +232,9 @@ export function UploadPipeline({ caseId, disabled, disabledReason }) {
       mark(2, 'done', `${fmtBytes(file.size)} transferred`);
       mark(3, 'done', 'digest recomputed and matched; signature verified');
       setResult(data);
+      // The receipt is the officer's independent proof of what they handed over. The
+      // screens always said it was downloaded at upload; now it is.
+      saveReceipt(data.receipt);
     } catch (err) {
       mark(2, 'failed', err.code ?? 'failed');
       mark(3, 'failed', 'refused');
@@ -210,16 +245,7 @@ export function UploadPipeline({ caseId, disabled, disabledReason }) {
   };
 
   return (
-    <Section
-      accent
-      title="Upload an exhibit"
-      description="Four steps, all of them visible. The file is hashed and signed on this machine before it is sent; the server recomputes both and refuses anything that does not agree — and records the refusal."
-      actions={
-        <span className="grid size-9 place-items-center rounded-lg bg-accent-gradient-soft text-accent-from">
-          <Upload className="size-4" />
-        </span>
-      }
-    >
+    <div className="space-y-5">
       {disabled ? (
         <Note tone="warn">{disabledReason}</Note>
       ) : (
@@ -306,8 +332,26 @@ export function UploadPipeline({ caseId, disabled, disabledReason }) {
             </div>
           </div>
 
+          {missing.length > 0 && (
+            <div className="space-y-2 rounded-md border border-warn/40 bg-warn-muted/40 p-3">
+              <p className="text-xs leading-relaxed">
+                A section 63 certificate for this exhibit needs the device&rsquo;s{' '}
+                <span className="font-medium">{missing.join(', ')}</span>. These cannot be added after
+                upload, so without them no certificate can ever be issued for it.
+              </p>
+              <label htmlFor="no-certificate" className="flex items-center gap-2 text-xs">
+                <Checkbox
+                  id="no-certificate"
+                  checked={noCertificate}
+                  onCheckedChange={(v) => setNoCertificate(v === true)}
+                />
+                The particulars are not available — upload without a certificate
+              </label>
+            </div>
+          )}
+
           <div className="flex flex-wrap items-center gap-3 pt-1">
-            <Button type="submit" disabled={running || !file || !caseId || !fields.title.trim()}>
+            <Button type="submit" disabled={running || !file || !caseId || !fields.title.trim() || !particularsOk}>
               {running ? <Loader2 className="size-4 animate-spin" /> : <Upload className="size-4" />}
               {running ? 'Working…' : 'Hash, sign and upload'}
             </Button>
@@ -348,13 +392,13 @@ export function UploadPipeline({ caseId, disabled, disabledReason }) {
               <p className="mb-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
                 Hash (client, in browser)
               </p>
-              <Hash value={result.evidence.sha256Client} />
+              <Hash value={result.evidence.sha256Client} block={false} />
             </div>
             <div className="min-w-0 rounded-md bg-muted/60 p-3">
               <p className="mb-1 text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
                 Hash (server, recomputed)
               </p>
-              <Hash value={result.evidence.sha256Server} />
+              <Hash value={result.evidence.sha256Server} block={false} />
             </div>
           </div>
 
@@ -372,8 +416,48 @@ export function UploadPipeline({ caseId, disabled, disabledReason }) {
             The two digests are computed independently — one here, one from the bytes the server
             actually received. They match, so what was stored is what was hashed and signed.
           </p>
+
+          {result.evidence.triage?.priority && (
+            <div className="space-y-2 rounded-lg border bg-muted/40 p-3.5">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="label-xs">Review priority, assigned automatically</span>
+                <PriorityBadge
+                  priority={result.evidence.triage.priority}
+                  disclaimer={result.evidence.triage.disclaimer}
+                />
+              </div>
+              <PriorityReasons triage={result.evidence.triage} limit={3} />
+              <p className="text-[12px] leading-relaxed text-muted-foreground">
+                Computed by the system the moment this exhibit was registered, from its own
+                metadata, the integrity of this upload, its media type and the gravity of the
+                case. You were not asked for it and cannot change it — which is what makes the
+                laboratory&rsquo;s queue worth ordering by.
+              </p>
+            </div>
+          )}
+          {result.receipt && (
+            <div className="flex flex-wrap items-center gap-2">
+              <Button size="sm" variant="outline" onClick={() => saveReceipt(result.receipt)}>
+                <FileDown className="size-3.5" /> Download the receipt again
+              </Button>
+              <Button size="sm" variant="outline" asChild>
+                <a
+                  href={`/verify?seq=${result.receipt.ledgerSeq}&entry=${result.receipt.entryHash}`}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                >
+                  <ExternalLink className="size-3.5" /> Check it on the public verifier
+                </a>
+              </Button>
+              <p className="w-full text-xs text-muted-foreground">
+                The receipt was saved to your downloads. It is your own copy of what you handed
+                over: anyone can check it against the register — and the anchored root — without an
+                account.
+              </p>
+            </div>
+          )}
         </div>
       )}
-    </Section>
+    </div>
   );
 }

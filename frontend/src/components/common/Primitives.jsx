@@ -9,28 +9,29 @@
  */
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Skeleton } from '@/components/ui/skeleton';
-import { BorderBeam } from '@/components/ui/border-beam';
-import { ACCENT_HEX } from '@/components/common/Premium';
 import { cn } from '@/lib/utils';
 
 /**
- * A titled panel. `description` is the one-line "why this exists" under the title.
+ * A titled panel, for the surfaces that have not moved to `Shell.Panel` — the public
+ * verifier, sign-in, and the deep custody and certificate panels that sit INSIDE the
+ * new panels rather than beside them.
  *
- * `accent` adds a travelling border beam. It marks the one panel on a screen that the
- * viewer should look at first — the upload pipeline, the pack being served — and it
- * loses all meaning if two panels carry it, so a page gets one.
+ * The travelling border beam is gone. It marked "look here first" on one panel per
+ * screen, which was a reasonable idea and a restless thing to sit in front of for a
+ * whole shift; the new screens carry that emphasis in their layout instead.
  */
-export function Section({ title, description, actions, children, accent, className }) {
+export function Section({ title, description, actions, children, className }) {
   return (
-    <Card className={cn('surface surface-lift relative overflow-hidden will-reveal', className)}>
-      {accent && (
-        <BorderBeam size={140} duration={10} colorFrom={ACCENT_HEX.from} colorTo={ACCENT_HEX.to} />
-      )}
+    <Card className={cn('surface relative overflow-hidden', className)}>
       {(title || actions) && (
-        <CardHeader className="flex flex-row items-start justify-between gap-4 space-y-0">
-          <div className="space-y-1">
-            {title && <CardTitle className="text-base">{title}</CardTitle>}
-            {description && <CardDescription className="max-w-prose">{description}</CardDescription>}
+        <CardHeader className="flex flex-row items-start justify-between gap-4 space-y-0 pb-3">
+          <div className="space-y-0.5">
+            {title && <CardTitle className="text-sm">{title}</CardTitle>}
+            {description && (
+              <CardDescription className="max-w-prose text-[13px] leading-relaxed">
+                {description}
+              </CardDescription>
+            )}
           </div>
           {actions && <div className="flex shrink-0 items-center gap-2">{actions}</div>}
         </CardHeader>
@@ -82,14 +83,14 @@ export function PageHeader({ title, lede, actions, className }) {
   return (
     <div className={cn('flex flex-wrap items-start justify-between gap-4', className)}>
       <div className="space-y-1.5">
-        <h1 className="text-2xl font-semibold tracking-tight will-reveal">{title}</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>
         {lede && (
-          <p className="max-w-3xl text-sm leading-relaxed text-muted-foreground will-reveal">
+          <p className="max-w-3xl text-sm leading-relaxed text-muted-foreground">
             {lede}
           </p>
         )}
       </div>
-      {actions && <div className="flex items-center gap-2 will-reveal">{actions}</div>}
+      {actions && <div className="flex items-center gap-2">{actions}</div>}
     </div>
   );
 }

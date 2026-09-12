@@ -58,6 +58,25 @@ export function useFileChargesheet() {
   });
 }
 
+/**
+ * The court closing the case.
+ *
+ * Closing changes what every screen may do with the case — it becomes readable and
+ * nothing more — so the case, its lists, its timeline and the ledger are all stale.
+ */
+export function useCloseCase() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ caseId, reason }) => api.cases.close(caseId, reason),
+    onSuccess: (_d, { caseId }) => {
+      qc.invalidateQueries({ queryKey: ['cases'] });
+      qc.invalidateQueries({ queryKey: qk.case(caseId) });
+      qc.invalidateQueries({ queryKey: qk.caseTimeline(caseId) });
+      qc.invalidateQueries({ queryKey: ['ledger'] });
+    },
+  });
+}
+
 export function useRecordOrder() {
   const qc = useQueryClient();
   return useMutation({
@@ -111,10 +130,15 @@ export function useReferToFsl() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ evidenceId, payload }) => api.evidence.referFsl(evidenceId, payload),
-    onSuccess: () => {
+    onSuccess: (_d, { evidenceId }) => {
       qc.invalidateQueries({ queryKey: ['evidence'] });
       qc.invalidateQueries({ queryKey: ['fsl', 'referrals'] });
       qc.invalidateQueries({ queryKey: ['ledger'] });
+      // The exhibit's own forensic status and the queue's status column both move to
+      // "Referred". Without these the station kept showing "Not referred" and invited
+      // a second referral that the server refuses as a duplicate.
+      qc.invalidateQueries({ queryKey: qk.exhibit(evidenceId) });
+      qc.invalidateQueries({ queryKey: ['triage'] });
     },
   });
 }
@@ -150,11 +174,22 @@ export function useScanCustodyLabel() {
   return useMutation({ mutationFn: (qrToken) => api.custody.scan(qrToken) });
 }
 
+export const useCustodyRecipients = (id, options) =>
+  useQuery({
+    queryKey: qk.custodyRecipients(id),
+    queryFn: () => api.custody.recipients(id),
+    enabled: Boolean(id),
+    ...options,
+  });
+
 export function useInitiateTransfer() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ id, payload }) => api.custody.initiateTransfer(id, payload),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['custody'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['custody'] });
+      qc.invalidateQueries({ queryKey: ['ledger'] });
+    },
   });
 }
 
@@ -169,7 +204,61 @@ export function useAcceptTransfer() {
   });
 }
 
+/** An SHO's recorded decision lifting a seal-exception freeze. */
+export function useLiftFreeze() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, payload }) => api.custody.liftFreeze(id, payload),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['custody'] });
+      qc.invalidateQueries({ queryKey: ['ledger'] });
+    },
+  });
+}
+
+/**
+ * Counsel reaching for a case by its CNR, or an exhibit by its code. Mutations, not
+ * queries: each is an attempt the server audits — allowed or refused — so it happens
+ * when the advocate asks and never on a background refetch.
+ */
+export function useOpenCaseByCnr() {
+  return useMutation({ mutationFn: (cnr) => api.cases.byCnr(cnr) });
+}
+
+export function useOpenExhibitByCode() {
+  return useMutation({ mutationFn: (code) => api.evidence.byCode(code) });
+}
+
 // ------------------------------------------------------------------- FSL ----
+
+/**
+ * The examiner's review queue — the screen the automatic review priority exists for.
+ * `state` is PENDING (the default, and the work), REVIEWED, or ALL.
+ */
+export const useLabQueue = (query, options) =>
+  useQuery({ queryKey: qk.labQueue(query), queryFn: () => api.fsl.queue(query), ...options });
+
+/**
+ * A laboratory recording its opinion on an exhibit.
+ *
+ * It changes the exhibit, the queue it came from, the case summaries that count
+ * opinions, the certificates whose Part B it becomes, and the ledger. All of them.
+ */
+export function useRecordVerdict() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ evidenceId, form }) => api.evidence.recordVerdict(evidenceId, form),
+    onSuccess: (_d, { evidenceId }) => {
+      qc.invalidateQueries({ queryKey: ['fsl'] });
+      qc.invalidateQueries({ queryKey: ['evidence'] });
+      qc.invalidateQueries({ queryKey: qk.exhibit(evidenceId) });
+      qc.invalidateQueries({ queryKey: ['triage'] });
+      qc.invalidateQueries({ queryKey: ['cases'] });
+      qc.invalidateQueries({ queryKey: ['certificate'] });
+      qc.invalidateQueries({ queryKey: ['ledger'] });
+    },
+  });
+}
 
 export const useReferrals = (query, options) =>
   useQuery({ queryKey: qk.referrals(query), queryFn: () => api.fsl.referrals(query), ...options });
@@ -178,7 +267,11 @@ export function useAcceptReferral() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (id) => api.fsl.accept(id),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['fsl', 'referrals'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['fsl', 'referrals'] });
+      qc.invalidateQueries({ queryKey: ['exhibit'] });
+      qc.invalidateQueries({ queryKey: ['triage'] });
+    },
   });
 }
 
@@ -189,6 +282,10 @@ export function useFileReport() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['fsl', 'referrals'] });
       qc.invalidateQueries({ queryKey: ['evidence'] });
+      qc.invalidateQueries({ queryKey: ['exhibit'] });
+      qc.invalidateQueries({ queryKey: ['triage'] });
+      // Certificates now report that a report has landed which their Part B lacks.
+      qc.invalidateQueries({ queryKey: ['certificate'] });
       qc.invalidateQueries({ queryKey: ['ledger'] });
     },
   });
@@ -212,13 +309,35 @@ export const useMyPack = (caseId, options) =>
     ...options,
   });
 
+/**
+ * The court sharing the case file: composed, ruled on and served in one act.
+ *
+ * It puts material in front of counsel for the first time, so it invalidates the
+ * disclosure views, the case (its clocks move), the case lists, and the ledger.
+ */
+export function useShareCaseFile() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ caseId, payload }) => api.disclosure.share(caseId, payload),
+    onSuccess: (_d, { caseId }) => {
+      qc.invalidateQueries({ queryKey: ['disclosure'] });
+      qc.invalidateQueries({ queryKey: ['cases'] });
+      qc.invalidateQueries({ queryKey: qk.case(caseId) });
+      qc.invalidateQueries({ queryKey: qk.caseTimeline(caseId) });
+      qc.invalidateQueries({ queryKey: ['ledger'] });
+    },
+  });
+}
+
 export function usePreparePack() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ caseId, payload }) => api.disclosure.prepare(caseId, payload),
-    onSuccess: () => {
+    onSuccess: (_d, { caseId }) => {
       qc.invalidateQueries({ queryKey: ['disclosure'] });
       qc.invalidateQueries({ queryKey: ['ledger'] });
+      // The case record now reports the pack, which the officer's screen reads.
+      qc.invalidateQueries({ queryKey: qk.case(caseId) });
     },
   });
 }
@@ -227,7 +346,11 @@ export function useSyncRepresentation() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (caseId) => api.disclosure.syncRepresentation(caseId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['disclosure'] }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['disclosure'] });
+      // The on-record list and the serve recipients read the representation query.
+      qc.invalidateQueries({ queryKey: ['vakalatnama'] });
+    },
   });
 }
 
@@ -259,6 +382,49 @@ export function useAcknowledgePack() {
   });
 }
 
+/** A lookup the court runs on demand — never on a refetch, since each one is audited. */
+export function useTraceWatermark() {
+  return useMutation({ mutationFn: (token) => api.disclosure.trace(token) });
+}
+
+// ------------------------------------------------------------ vakalatnama ----
+
+export const useMyFilings = (options) =>
+  useQuery({ queryKey: qk.vakalatnamaMine, queryFn: () => api.vakalatnama.mine(), ...options });
+
+export const useRepresentation = (caseId, options) =>
+  useQuery({
+    queryKey: qk.vakalatnamaForCase(caseId),
+    queryFn: () => api.vakalatnama.forCase(caseId),
+    enabled: Boolean(caseId),
+    ...options,
+  });
+
+export function useFileVakalatnama() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (form) => api.vakalatnama.file(form),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['vakalatnama'] }),
+  });
+}
+
+/**
+ * Accepting puts an advocate on record, which changes who a pack can be served on,
+ * who can read the case, and the ledger — so all of those are stale afterwards.
+ */
+export function useRuleOnFiling() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, decision, note }) =>
+      decision === 'ACCEPT' ? api.vakalatnama.accept(id) : api.vakalatnama.reject(id, note),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['vakalatnama'] });
+      qc.invalidateQueries({ queryKey: ['disclosure'] });
+      qc.invalidateQueries({ queryKey: ['ledger'] });
+    },
+  });
+}
+
 // ---------------------------------------------------------- certificates ----
 
 export const useCertificate = (id, options) =>
@@ -269,15 +435,35 @@ export const useCertificate = (id, options) =>
     ...options,
   });
 
+/**
+ * The certificates for one exhibit, or — for an examiner, whose read on the exhibit
+ * ends when they report — for one referral.
+ */
+export const useCertificatesFor = ({ evidenceId, referralId }, options) =>
+  useQuery({
+    queryKey: referralId ? qk.certificatesForReferral(referralId) : qk.certificatesForEvidence(evidenceId),
+    queryFn: () =>
+      referralId ? api.fsl.certificates(referralId) : api.certificates.forEvidence(evidenceId),
+    enabled: Boolean(evidenceId || referralId),
+    ...options,
+  });
+
 export function useGenerateCertificate() {
-  return useMutation({ mutationFn: (evidenceId) => api.certificates.generate(evidenceId) });
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (evidenceId) => api.certificates.generate(evidenceId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['certificate'] });
+      qc.invalidateQueries({ queryKey: ['ledger'] });
+    },
+  });
 }
 
 export function useSignPartA() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ id, payload }) => api.certificates.signPartA(id, payload),
-    onSuccess: (_d, { id }) => qc.invalidateQueries({ queryKey: qk.certificate(id) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['certificate'] }),
   });
 }
 
@@ -285,7 +471,7 @@ export function useSignPartB() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ id, payload }) => api.certificates.signPartB(id, payload),
-    onSuccess: (_d, { id }) => qc.invalidateQueries({ queryKey: qk.certificate(id) }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['certificate'] }),
   });
 }
 
@@ -301,6 +487,9 @@ export const useLedger = (caseId, options) =>
 
 export const useLatestAnchor = (options) =>
   useQuery({ queryKey: qk.anchorLatest, queryFn: () => api.publicLatestAnchor(), ...options });
+
+export const useRecentAnchors = (options) =>
+  useQuery({ queryKey: qk.anchorRecent, queryFn: () => api.publicRecentAnchors(), ...options });
 
 export const useAudit = (query, options) =>
   useQuery({ queryKey: qk.audit(query), queryFn: () => api.audit.list(query), ...options });

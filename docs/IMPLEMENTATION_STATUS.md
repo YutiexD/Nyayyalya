@@ -50,7 +50,7 @@ Verified end-to-end against a live system, not only in tests: the full 17-stage 
 | Police directory `:6001` (`dir_police`) | **DONE** — officers, stations, postings, FIRs |
 | Court directory `:6002` (`dir_court`) | **DONE** — courts, judges, roster, listings, registry staff, vakalatnamas, legal aid |
 | Legal/FSL directory `:6003` (`dir_legal`) | **DONE** — advocates, labs, examiners |
-| Read-only enforcement | **DONE** — middleware rejects every non-GET except the one registrar write |
+| Read-only enforcement | **DONE** — middleware rejects every non-GET except the two simulated court-registry writes |
 | Seeds (idempotent) | **DONE** — including suspended, expired-posting and lapsed-COP fixtures |
 
 ### 2.3 Backend (spec §4–§8)
@@ -132,7 +132,7 @@ Nothing in the specification is unimplemented. The gaps are operational, and are
 Two smaller items found during the build and left deliberately:
 
 - **Response id field names are inconsistent** across modules (`_id` / `id` / `packId` / `certificateId`). Real but cosmetic; normalising would ripple through four test suites.
-- **No pack-lookup endpoint for court users**, so a registrar must be handed a `packId` rather than listing packs for a case.
+- ~~**No pack-lookup endpoint for court users.**~~ Closed: `GET /api/disclosure/case/:caseId/packs`, and the court now shares a case file in one act rather than by pack id at all.
 
 ---
 ---

@@ -25,8 +25,10 @@ import {
   AlertTriangle,
   ExternalLink,
   FileCheck2,
+  FileSearch,
   Search,
   ShieldQuestion,
+  Upload,
 } from 'lucide-react';
 
 import { Backdrop, Eyebrow, LightTile } from '@/components/common/Premium';
@@ -41,7 +43,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 
 import { Section, KeyValue, Hash, EmptyState } from '@/components/common/Primitives';
 import { Denial, Note } from '@/components/common/Verdicts';
-import { useLatestAnchor } from '@/hooks/queries';
+import { useLatestAnchor, useRecentAnchors } from '@/hooks/queries';
 import { api } from '@/lib/api';
 import { useReveal } from '@/hooks/useGsap';
 import { humanise, fmtDate } from '@/lib/utils';
@@ -67,6 +69,43 @@ function verificationTokenFrom(raw) {
   return /^[A-Za-z0-9_-]{16,}$/.test(text) ? text : null;
 }
 
+/**
+ * The token a Lexx certificate PDF carries in its own metadata (`Keywords`), written
+ * as plain ASCII outside the compressed page streams. Reading it lets a holder check
+ * a PDF somebody handed them with nothing but the file.
+ */
+const TOKEN_IN_PDF = /lexx-verify:([A-Za-z0-9_-]{43})/;
+
+async function readCertificateFile(file) {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  const sha256 = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+  // latin1 maps every byte to one character, so an ASCII marker survives intact.
+  const text = new TextDecoder('latin1').decode(bytes);
+  const token = TOKEN_IN_PDF.exec(text)?.[1] ?? TOKEN_IN_QUERY.exec(text)?.[1] ?? null;
+  const isPdf = text.startsWith('%PDF-');
+  return { sha256, token, isPdf, name: file.name, size: file.size };
+}
+
+/** What the register said about the copy in the holder's hand. */
+const COPY_STATE = {
+  CURRENT: {
+    tone: 'ok',
+    state: 'Identical to the registered document',
+    why: 'Byte for byte, this file is the certificate as the register holds it now.',
+  },
+  EARLIER_VERSION: {
+    tone: 'warn',
+    state: 'An earlier version of this certificate',
+    why: 'This file was genuinely issued for this certificate, but it has since been re-issued — usually because a signature was added. Ask for the current copy.',
+  },
+  NO_MATCH: {
+    tone: 'bad',
+    state: 'Not the registered document',
+    why: 'The token is genuine, but this file does not match any version the register issued. Treat this copy as altered or substituted.',
+  },
+};
+
 /** What each stored-document state means, in one sentence, written for a courtroom. */
 const PDF_STATE = {
   PDF_INTACT: [
@@ -85,8 +124,9 @@ const PDF_STATE = {
 
 // ------------------------------------------------------- certificate check ----
 
-function CertificateResult({ result, reVerifyUrl }) {
+function CertificateResult({ result, reVerifyUrl, copyFile }) {
   const c = result.certificate ?? {};
+  const copyState = result.copy ? COPY_STATE[result.copy.match] : null;
   const [pdfTone, pdfWhy] = PDF_STATE[c.pdfIntegrity] ?? [
     'border-warn/40 bg-warn-muted text-warn',
     'The server returned a document state this page does not recognise.',
@@ -117,6 +157,19 @@ function CertificateResult({ result, reVerifyUrl }) {
           stored document still hashes to its published digest — that is a second. A
           single green banner would blur them, and the second can fail while the first
           holds. Neither says anything about the evidence itself, and the caption says so. */}
+      {/* The holder's own file comes first and full width when there is one: it is the
+          question they actually asked. */}
+      {copyState && (
+        <LightTile
+          index={3}
+          title="The copy you hold"
+          state={copyState.state}
+          tone={copyState.tone}
+          icon={FileSearch}
+          explanation={copyState.why}
+        />
+      )}
+
       <div className="grid gap-3 sm:grid-cols-2">
         <LightTile
           index={1}
@@ -135,6 +188,16 @@ function CertificateResult({ result, reVerifyUrl }) {
           explanation={pdfWhy}
         />
       </div>
+
+      {result.copy && (
+        <KeyValue
+          rows={[
+            ['Your file', copyFile ? `${copyFile.name}` : '—'],
+            ['Its SHA-256 (computed in this browser)', <Hash key="kv" value={result.copy.sha256} />],
+            result.copy.supersededAt ? ['Superseded on', fmtDate(result.copy.supersededAt)] : null,
+          ]}
+        />
+      )}
 
       <KeyValue
         rows={[
@@ -163,27 +226,45 @@ function CertificateResult({ result, reVerifyUrl }) {
         <>
           <Separator />
           <div className="space-y-2">
-            <p className="text-sm font-medium">Signatures</p>
-            {c.signatures.map((s) => (
-              <div key={s.part} className="flex flex-wrap items-center gap-2 text-sm">
-                <span className="text-muted-foreground">
-                  Part {s.part} — {humanise(s.role)}
-                </span>
-                <Badge
-                  variant="outline"
-                  className={
-                    s.present
-                      ? 'border-ok/40 bg-ok-muted text-ok'
-                      : 'border-warn/40 bg-warn-muted text-warn'
-                  }
-                >
-                  {s.present ? 'Signed' : 'Not signed'}
-                </Badge>
-                {s.signedAt && (
-                  <span className="text-xs text-muted-foreground">{fmtDate(s.signedAt)}</span>
-                )}
-              </div>
-            ))}
+            <p className="text-sm font-medium">Signatures — the two parties to a section 63 certificate</p>
+            {c.signatures.map((s) => {
+              // Part B exists only where a laboratory report was filed. Blank is then
+              // the correct state, not a missing signature, and must not read as one.
+              const notApplicable = s.part === 'B' && !c.partBComplete;
+              return (
+                <div key={s.part} className="space-y-0.5">
+                  <div className="flex flex-wrap items-center gap-2 text-sm">
+                    <span className="text-muted-foreground">
+                      Part {s.part} — {s.part === 'A' ? 'the deponent' : 'the forensic expert'}
+                    </span>
+                    <Badge
+                      variant="outline"
+                      className={
+                        s.present
+                          ? 'border-ok/40 bg-ok-muted text-ok'
+                          : notApplicable
+                            ? 'border-border bg-muted text-muted-foreground'
+                            : 'border-warn/40 bg-warn-muted text-warn'
+                      }
+                    >
+                      {s.present ? 'Signed' : notApplicable ? 'Not applicable — no laboratory report' : 'Not signed yet'}
+                    </Badge>
+                    {s.signedAt && (
+                      <span className="text-xs text-muted-foreground">{fmtDate(s.signedAt)}</span>
+                    )}
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {s.part === 'A'
+                      ? 'Signed by the person who produced the record (usually the investigating officer), with the key held in their own browser, on their exhibit screen.'
+                      : 'Signed by the examiner whose laboratory report Part B reproduces, on their laboratory screen. Filled only from a filed report — never written by Lexx.'}
+                  </p>
+                </div>
+              );
+            })}
+            <p className="text-xs text-muted-foreground">
+              Each signature covers the certificate body. When one is added the PDF is re-issued,
+              so a copy taken before it will show here as an earlier version.
+            </p>
           </div>
         </>
       )}
@@ -222,11 +303,17 @@ function CertificateSection() {
   const [raw, setRaw] = useState('');
   const [malformed, setMalformed] = useState(false);
   const [activeToken, setActiveToken] = useState(null);
+  const [copyFile, setCopyFile] = useState(null);
+  const [fileProblem, setFileProblem] = useState(null);
+  const [dragging, setDragging] = useState(false);
   const autoVerified = useRef(null);
+  const fileInput = useRef(null);
 
-  const check = useMutation({ mutationFn: (token) => api.publicVerifyCertificate(token) });
+  const check = useMutation({
+    mutationFn: ({ token, copy }) => api.publicVerifyCertificate(token, copy),
+  });
 
-  const run = (input) => {
+  const run = (input, copy = copyFile?.sha256) => {
     const token = verificationTokenFrom(input);
     if (!token) {
       setMalformed(true);
@@ -236,7 +323,40 @@ function CertificateSection() {
     }
     setMalformed(false);
     setActiveToken(token);
-    check.mutate(token);
+    check.mutate({ token, copy });
+  };
+
+  /**
+   * A PDF somebody was handed. Hashed here, in the browser — the document never
+   * leaves this machine, only its digest does — and its token read out of its own
+   * metadata, so the holder does not have to find the QR first.
+   */
+  const takeFile = async (file) => {
+    if (!file) return;
+    setFileProblem(null);
+    let read;
+    try {
+      read = await readCertificateFile(file);
+    } catch {
+      setFileProblem('That file could not be read.');
+      return;
+    }
+    if (!read.isPdf) {
+      setCopyFile(null);
+      setFileProblem('That is not a PDF. A section 63 certificate is issued as a PDF.');
+      return;
+    }
+    setCopyFile(read);
+    const token = read.token ?? verificationTokenFrom(raw);
+    if (!token) {
+      setFileProblem(
+        'This PDF carries no Lexx verification token in its metadata (older certificates do not). Paste the token from the QR printed on it, and the file will be compared as well.'
+      );
+      check.reset();
+      return;
+    }
+    if (read.token) setRaw(read.token);
+    run(token, read.sha256);
   };
 
   /**
@@ -277,10 +397,58 @@ function CertificateSection() {
 
   return (
     <Section
-      accent
       title="Verify a section 63 certificate"
       description="Public. No account required — which is what makes this an independent check rather than our own word for it. The answer reports whether the certificate is genuine and whether the stored document still matches its published digest. It discloses no evidence, no case narrative and no personal data."
     >
+      {/* Party A hands Party B a certificate. Party B needs nothing from either of us
+          but the file: drop it here and the answer covers THIS copy, not just the token. */}
+      <div
+        role="button"
+        tabIndex={0}
+        onClick={() => fileInput.current?.click()}
+        onKeyDown={(e) => (e.key === 'Enter' || e.key === ' ') && fileInput.current?.click()}
+        onDragOver={(e) => {
+          e.preventDefault();
+          setDragging(true);
+        }}
+        onDragLeave={() => setDragging(false)}
+        onDrop={(e) => {
+          e.preventDefault();
+          setDragging(false);
+          takeFile(e.dataTransfer.files?.[0]);
+        }}
+        className={`flex cursor-pointer flex-col items-center gap-1.5 rounded-lg border-2 border-dashed p-5 text-center transition-colors ${
+          dragging ? 'border-accent-from bg-accent-gradient-soft' : 'hover:bg-muted/50'
+        }`}
+      >
+        <Upload className="size-5 text-muted-foreground" />
+        <p className="text-sm font-medium">Were you handed a certificate? Drop the PDF here</p>
+        <p className="max-w-md text-xs leading-relaxed text-muted-foreground">
+          It is hashed in this browser and never uploaded. The answer says whether your copy is
+          the registered document, an earlier version of it, or not this certificate at all.
+        </p>
+        {copyFile && (
+          <p className="font-mono text-xs text-muted-foreground">
+            {copyFile.name} · {copyFile.sha256.slice(0, 16)}…
+          </p>
+        )}
+        <input
+          ref={fileInput}
+          type="file"
+          accept="application/pdf,.pdf"
+          className="hidden"
+          onChange={(e) => {
+            takeFile(e.target.files?.[0]);
+            e.target.value = '';
+          }}
+        />
+      </div>
+      {fileProblem && <Note tone="warn">{fileProblem}</Note>}
+
+      <div className="flex items-center gap-3 text-xs uppercase tracking-wider text-muted-foreground">
+        <Separator className="flex-1" /> or use the token <Separator className="flex-1" />
+      </div>
+
       <form
         className="space-y-4"
         onSubmit={(e) => {
@@ -334,8 +502,269 @@ function CertificateSection() {
       )}
 
       {check.isSuccess && check.data && (
-        <CertificateResult result={check.data} reVerifyUrl={reVerifyUrl} />
+        <CertificateResult result={check.data} reVerifyUrl={reVerifyUrl} copyFile={copyFile} />
       )}
+    </Section>
+  );
+}
+
+// -------------------------------------------------------- upload receipt ----
+
+/**
+ * Pull `ledgerSeq` and `entryHash` out of whatever was pasted: the receipt JSON an
+ * officer downloaded at upload, or the two values typed separately.
+ */
+function receiptFrom(text) {
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed && typeof parsed === 'object') {
+      return { seq: String(parsed.ledgerSeq ?? ''), entry: String(parsed.entryHash ?? '') };
+    }
+  } catch {
+    /* not JSON — fall through */
+  }
+  return null;
+}
+
+function ReceiptSection() {
+  const [searchParams] = useSearchParams();
+  const [seq, setSeq] = useState(searchParams.get('seq') ?? '');
+  const [entry, setEntry] = useState(searchParams.get('entry') ?? '');
+  const autoRan = useRef(false);
+  const check = useMutation({ mutationFn: ({ s, e }) => api.publicVerifyReceipt(s, e) });
+
+  const run = (s, e) => check.mutate({ s: String(s).trim(), e: String(e).trim().toLowerCase() });
+
+  useEffect(() => {
+    const s = searchParams.get('seq');
+    const e = searchParams.get('entry');
+    if (s && e && !autoRan.current) {
+      autoRan.current = true;
+      run(s, e);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
+  const r = check.data;
+  const notFound = check.isError && check.error?.status === 404;
+
+  return (
+    <Section
+      title="Verify an upload receipt"
+      description="Public. Every exhibit upload gives the officer a receipt carrying a ledger sequence number and an entry hash. Paste them (or the whole receipt JSON) to check that the register still holds exactly that entry and whether it sits under a root anchored on chain."
+    >
+      <form
+        className="space-y-3"
+        onSubmit={(e) => {
+          e.preventDefault();
+          run(seq, entry);
+        }}
+      >
+        <div className="grid gap-3 sm:grid-cols-[8rem_1fr]">
+          <div className="space-y-1.5">
+            <Label htmlFor="receipt-seq">Ledger sequence</Label>
+            <Input id="receipt-seq" value={seq} onChange={(e) => setSeq(e.target.value)} placeholder="12" />
+          </div>
+          <div className="space-y-1.5">
+            <Label htmlFor="receipt-entry">Entry hash</Label>
+            <Input
+              id="receipt-entry"
+              value={entry}
+              onChange={(e) => {
+                const pasted = receiptFrom(e.target.value);
+                if (pasted) {
+                  setSeq(pasted.seq);
+                  setEntry(pasted.entry);
+                } else setEntry(e.target.value);
+              }}
+              placeholder="64 hex characters — or paste the whole receipt JSON here"
+              className="font-mono"
+              spellCheck={false}
+            />
+          </div>
+        </div>
+        <Button type="submit" disabled={check.isPending || !seq.trim() || entry.trim().length < 64}>
+          <Search className="size-4" />
+          {check.isPending ? 'Checking…' : 'Verify receipt'}
+        </Button>
+      </form>
+
+      {notFound && (
+        <Denial
+          error={{
+            code: 'RECEIPT_NOT_FOUND',
+            message:
+              'The register holds no entry with that sequence and hash. A wrong hash and a missing entry answer identically.',
+          }}
+          heading="Receipt not verified"
+        />
+      )}
+      {check.isError && !notFound && <Denial error={check.error} heading="Receipt not checked" />}
+
+      {r && (
+        <div className="space-y-3">
+          <div className="grid gap-3 sm:grid-cols-2">
+            <LightTile
+              index={1}
+              title="Entry in the register"
+              state="Present, unaltered"
+              tone="ok"
+              icon={FileCheck2}
+              explanation={`Sequence ${r.seq} still carries exactly this entry hash (${humanise(r.eventType)}, ${fmtDate(r.recordedAt)}).`}
+            />
+            <LightTile
+              index={2}
+              title="Anchored root"
+              state={
+                !r.anchored
+                  ? 'Not batched yet'
+                  : r.includedInRoot
+                    ? r.onChainVerified
+                      ? 'Verified on chain'
+                      : r.txHash
+                        ? 'In anchored root'
+                        : 'Local root only'
+                    : 'Proof failed'
+              }
+              tone={
+                !r.anchored ? 'warn' : !r.includedInRoot ? 'bad' : r.onChainVerified || r.txHash ? 'ok' : 'warn'
+              }
+              icon={ShieldQuestion}
+              explanation={
+                !r.anchored
+                  ? 'Entries are gathered into a Merkle batch every few minutes; check again shortly.'
+                  : r.onChainVerified
+                    ? 'The LexxAnchor contract on Monad Testnet itself confirmed this entry against the root it holds.'
+                    : r.txHash
+                      ? 'The entry proves into a root that was written on chain.'
+                      : 'The root was computed here but not submitted — internal consistency only.'
+              }
+            />
+          </div>
+          <KeyValue
+            rows={[
+              ['Merkle root', <Hash key="m" value={r.merkleRoot} />],
+              ['Transaction', r.txHash ? <Hash key="t" value={r.txHash} /> : 'none'],
+            ]}
+          />
+          {r.explorerUrl && (
+            <Button asChild variant="outline" size="sm">
+              <a href={r.explorerUrl} target="_blank" rel="noreferrer noopener">
+                <ExternalLink className="size-4" /> Open the anchoring transaction
+              </a>
+            </Button>
+          )}
+          <Note>{r.disclosure}</Note>
+        </div>
+      )}
+    </Section>
+  );
+}
+
+// --------------------------------------------------------- anchor history ----
+
+function AnchorHistory() {
+  const recent = useRecentAnchors();
+  const d = recent.data;
+  if (recent.isPending) return <Skeleton className="h-24 w-full" />;
+  if (recent.isError || !d) return null;
+
+  return (
+    <Section
+      title="Anchoring history"
+      description={
+        d.submitting
+          ? `Submitting to ${d.network} (chain ${d.chainId}) every ${Math.round((d.intervalMs ?? 300000) / 60000)} minutes. Each confirmed batch links to its transaction.`
+          : 'Submission is switched off in this deployment: roots are computed and stored locally, and nothing is sent to a chain.'
+      }
+    >
+      {d.contractExplorerUrl && (
+        <Button asChild variant="outline" size="sm">
+          <a href={d.contractExplorerUrl} target="_blank" rel="noreferrer noopener">
+            <ExternalLink className="size-4" /> LexxAnchor contract on the explorer
+          </a>
+        </Button>
+      )}
+      {(d.batches ?? []).length === 0 ? (
+        <EmptyState title="No batch yet" />
+      ) : (
+        <ul className="space-y-2">
+          {d.batches.map((b) => (
+            <li key={b.batchId} className="flex flex-wrap items-center gap-2 rounded-md border p-2.5 text-sm">
+              <Badge
+                variant="outline"
+                className={
+                  b.status === 'CONFIRMED'
+                    ? 'border-ok/40 bg-ok-muted text-ok'
+                    : b.status === 'FAILED'
+                      ? 'border-bad/40 bg-bad-muted text-bad'
+                      : 'border-warn/40 bg-warn-muted text-warn'
+                }
+              >
+                {humanise(b.status)}
+              </Badge>
+              <span className="tabular-nums">
+                seq {b.fromSeq}–{b.toSeq} · {b.leafCount} entries
+              </span>
+              <span className="text-xs text-muted-foreground">{fmtDate(b.anchoredAt)}</span>
+              {b.explorerUrl && (
+                <a
+                  href={b.explorerUrl}
+                  target="_blank"
+                  rel="noreferrer noopener"
+                  className="ml-auto inline-flex items-center gap-1 text-xs font-medium underline-offset-4 hover:underline"
+                >
+                  block {b.blockNumber} <ExternalLink className="size-3" />
+                </a>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </Section>
+  );
+}
+
+// ------------------------------------------------------ where to find it ----
+
+function WhereToFind() {
+  return (
+    <Section
+      title="What to paste, and where it comes from"
+      description="Everything this page checks comes printed on a document or shown on a screen — you never need an account to check it."
+    >
+      <dl className="space-y-3 text-sm">
+        <div>
+          <dt className="font-medium">Certificate token</dt>
+          <dd className="text-muted-foreground">
+            The QR on a printed s.63 certificate opens this page with it filled in. On screen, the
+            same link has a copy button wherever the certificate is shown: the officer&rsquo;s
+            exhibit panel, the court&rsquo;s Exhibits tab, and counsel&rsquo;s served exhibits.
+          </dd>
+        </div>
+        <div>
+          <dt className="font-medium">Upload receipt</dt>
+          <dd className="text-muted-foreground">
+            Downloaded by the officer at the moment of upload (its <code>ledgerSeq</code> and{' '}
+            <code>entryHash</code>). The officer&rsquo;s exhibit panel also has a &ldquo;Check this
+            receipt&rdquo; link that opens this page with both filled in.
+          </dd>
+        </div>
+        <div>
+          <dt className="font-medium">Anchoring</dt>
+          <dd className="text-muted-foreground">
+            Nothing to paste. Roots and their transactions are listed here as they are made.
+          </dd>
+        </div>
+        <div>
+          <dt className="font-medium">Demo mode</dt>
+          <dd className="text-muted-foreground">
+            <code>npm run seed</code> prints the certificate&rsquo;s verify link, and{' '}
+            <code>node scripts/demo-lookup.js</code> prints every token, receipt and label in the
+            demo database.
+          </dd>
+        </div>
+      </dl>
     </Section>
   );
 }
@@ -483,8 +912,9 @@ export default function VerifyPage() {
             Independent <span className="text-gradient">verification</span>
           </h1>
           <p className="mt-4 max-w-2xl text-balance text-base leading-relaxed text-muted-foreground will-reveal">
-            Two checks that need nothing from us but a token: whether a section 63 certificate
-            is genuine and still matches its published digest, and what was actually anchored
+            Three checks that need nothing from us but what is printed on a document: whether
+            a section 63 certificate is genuine and unaltered, whether an upload receipt is
+            still in the register and under an anchored root, and what was actually anchored
             from the ledger.
           </p>
         </div>
@@ -492,9 +922,14 @@ export default function VerifyPage() {
 
       <div className="container space-y-8 pb-12">
       <div className="grid gap-6 lg:grid-cols-2">
-        <CertificateSection />
+        <div className="space-y-6">
+          <CertificateSection />
+          <ReceiptSection />
+          <WhereToFind />
+        </div>
         <div className="space-y-6">
           <AnchorSection />
+          <AnchorHistory />
 
           <Section
             title="What this page proves"

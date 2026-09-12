@@ -9,7 +9,13 @@ import { merkleRoot, merkleProof, verifyProof, leafOf, hashPair } from '../../se
 import { generateDek, wrapDek, unwrapDek, sealBuffer, openBuffer } from '../../services/envelope.js';
 import { triageEvidence } from '../../services/triage.js';
 import { verifyEcdsaP256, publicKeyFingerprint } from '../../config/crypto.js';
-import { COURT_TYPE, SENSITIVITY_CLASS, TRIAGE_PRIORITY, TRIAGE_DISCLAIMER } from '../../models/enums.js';
+import {
+  COURT_TYPE,
+  SENSITIVITY_CLASS,
+  TRIAGE_PRIORITY,
+  TRIAGE_PRIORITY_ORDER,
+  TRIAGE_DISCLAIMER,
+} from '../../models/enums.js';
 
 // ============================================================ jurisdiction ====
 
@@ -278,7 +284,9 @@ describe('AI triage (review prioritisation only)', () => {
     expect(r.indicators).toEqual([]);
   });
 
-  it('raises priority as indicators accumulate', () => {
+  it('raises priority as findings accumulate', () => {
+    // No timestamp, no device, no content credentials, and far too small to be a
+    // camera original: four findings on one file.
     const r = triageEvidence({ mimeType: 'image/jpeg', sizeBytes: 1000, metadata: {} });
     expect(r.priority).toBe(TRIAGE_PRIORITY.HIGH);
     expect(r.indicators.length).toBeGreaterThanOrEqual(3);
@@ -290,7 +298,7 @@ describe('AI triage (review prioritisation only)', () => {
       sizeBytes: 500_000,
       metadata: { dateTimeOriginal: 'x', make: 'A', model: 'B', hasC2PA: true, software: 'Adobe Photoshop 25.0' },
     });
-    expect(r.indicators).toContain('Editing software tag present');
+    expect(r.indicators).toContain('Editing software tag present (Adobe Photoshop 25.0)');
   });
 
   it('flags a container/stream duration mismatch', () => {
@@ -299,7 +307,95 @@ describe('AI triage (review prioritisation only)', () => {
       sizeBytes: 10_000_000,
       metadata: { dateTimeOriginal: 'x', make: 'A', model: 'B', hasC2PA: true, containerDurationSec: 30, streamDurationSec: 12 },
     });
-    expect(r.indicators).toContain('Container and stream duration mismatch');
+    expect(r.indicators).toContain('Container and stream durations disagree by 18s');
+  });
+
+  /**
+   * The weighting exists so that ONE serious finding outranks a pile of weak ones.
+   * Counting indicators made "no content credentials" worth as much as "the bytes
+   * that arrived are not the bytes the officer hashed", which is how a real signal
+   * ends up below noise in a queue.
+   */
+  it('reaches CRITICAL on an ingest integrity failure alone', () => {
+    const r = triageEvidence({
+      mimeType: 'image/jpeg',
+      sizeBytes: 2_400_000,
+      metadata: { dateTimeOriginal: 'x', make: 'A', model: 'B', hasC2PA: true },
+      hashMatched: false,
+    });
+    expect(r.priority).toBe(TRIAGE_PRIORITY.CRITICAL);
+  });
+
+  it('does not reach CRITICAL on weak provenance gaps alone', () => {
+    const r = triageEvidence({ mimeType: 'image/jpeg', sizeBytes: 2_400_000, metadata: {} });
+    expect(r.priority).not.toBe(TRIAGE_PRIORITY.CRITICAL);
+  });
+
+  /**
+   * Gravity moves an exhibit up the queue. It does not, on its own, make an exhibit
+   * worth looking at.
+   *
+   * This is the rule that keeps the bands meaning something. Being a photograph on a
+   * POCSO case is true of EVERY photograph on that case — if it counted towards the
+   * band directly, every exhibit on a serious case would arrive pre-elevated, LOW
+   * would stop existing, and an examiner would be reading an unordered queue.
+   */
+  it('does NOT lift a file nothing was observed about, however grave the case', () => {
+    const clean = { dateTimeOriginal: 'x', make: 'A', model: 'B', hasC2PA: true };
+    const ordinary = triageEvidence({ mimeType: 'image/jpeg', sizeBytes: 900_000, metadata: clean });
+    const grave = triageEvidence({
+      mimeType: 'image/jpeg',
+      sizeBytes: 900_000,
+      metadata: clean,
+      sensitivityClass: 'POCSO',
+      maxPunishmentYears: 10,
+    });
+
+    expect(ordinary.priority).toBe(TRIAGE_PRIORITY.LOW);
+    expect(grave.priority).toBe(TRIAGE_PRIORITY.LOW);
+    // Nothing was observed about the file, so nothing is claimed about it...
+    expect(grave.indicators).toEqual([]);
+    // ...but the gravity IS on the record, as context rather than as a finding.
+    expect(grave.reasons.some((x) => x.kind === 'context')).toBe(true);
+  });
+
+  it('lifts an exhibit by one band when the case is grave AND something was observed', () => {
+    // One weak provenance gap: MEDIUM on an ordinary case, HIGH on a POCSO one.
+    const gap = { dateTimeOriginal: 'x', make: 'A', model: 'B' }; // no content credentials
+    const ordinary = triageEvidence({ mimeType: 'image/jpeg', sizeBytes: 900_000, metadata: gap });
+    const grave = triageEvidence({
+      mimeType: 'image/jpeg',
+      sizeBytes: 900_000,
+      metadata: gap,
+      sensitivityClass: 'POCSO',
+      maxPunishmentYears: 10,
+    });
+
+    expect(TRIAGE_PRIORITY_ORDER.indexOf(grave.priority)).toBeLessThan(
+      TRIAGE_PRIORITY_ORDER.indexOf(ordinary.priority)
+    );
+    // Exactly one band, and the findings are identical either way.
+    expect(TRIAGE_PRIORITY_ORDER.indexOf(ordinary.priority) - TRIAGE_PRIORITY_ORDER.indexOf(grave.priority)).toBe(1);
+    expect(grave.indicators).toEqual(ordinary.indicators);
+  });
+
+  it('never promotes anything into CRITICAL on context alone', () => {
+    // A pile-up of provenance gaps on the gravest possible case still stops at HIGH.
+    const grave = triageEvidence({
+      mimeType: 'video/mp4',
+      sizeBytes: 900_000,
+      metadata: {},
+      sensitivityClass: 'POCSO',
+      maxPunishmentYears: 20,
+    });
+    expect(grave.priority).not.toBe(TRIAGE_PRIORITY.CRITICAL);
+  });
+
+  it('assigns a priority to EVERY exhibit — there is no unprioritised state', () => {
+    for (const mimeType of ['image/jpeg', 'video/mp4', 'audio/mpeg', 'application/pdf', 'text/plain']) {
+      const r = triageEvidence({ mimeType, sizeBytes: 1_000_000 });
+      expect(TRIAGE_PRIORITY_ORDER).toContain(r.priority);
+    }
   });
 
   it('always carries the statutory disclaimer', () => {
@@ -326,7 +422,7 @@ describe('AI triage (review prioritisation only)', () => {
     expect(serialised).not.toMatch(/\d+(\.\d+)?%/);
   });
 
-  it('only ever returns HIGH, MEDIUM or LOW', () => {
+  it('only ever returns one of the four defined bands', () => {
     for (const n of [0, 1, 2, 3, 6]) {
       const meta = n === 0 ? { dateTimeOriginal: 'x', make: 'A', model: 'B', hasC2PA: true } : {};
       const r = triageEvidence({ mimeType: 'image/jpeg', sizeBytes: 500_000, metadata: meta });

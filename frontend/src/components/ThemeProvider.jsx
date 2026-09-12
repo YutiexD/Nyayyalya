@@ -10,6 +10,7 @@ import { useDispatch, useSelector } from 'react-redux';
 import { selectTheme, themeSet } from '@/features/ui/uiSlice';
 import { sessionCleared } from '@/features/auth/authSlice';
 import { onSessionEnded } from '@/lib/api';
+import { queryClient } from '@/lib/queryClient';
 
 export function ThemeProvider({ children }) {
   const theme = useSelector(selectTheme);
@@ -43,7 +44,18 @@ export function ThemeProvider({ children }) {
   // signed-in user and renders a workspace where every panel is an expired-token
   // error. Listening here — once, above the router — turns that into a redirect to
   // sign in, which is what actually happened.
-  useEffect(() => onSessionEnded(() => dispatch(sessionCleared())), [dispatch]);
+  //
+  // The query cache goes with it. It is keyed by endpoint, not by user, so without this
+  // the next person to sign in on the same tab — an advocate after an officer — was
+  // shown the previous user's case list from cache until the refetch landed.
+  useEffect(
+    () =>
+      onSessionEnded(() => {
+        queryClient.clear();
+        dispatch(sessionCleared());
+      }),
+    [dispatch]
+  );
 
   return children;
 }

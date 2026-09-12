@@ -92,6 +92,26 @@ async function get(directoryKey, path, config = {}) {
   throw new DirectoryUnavailableError(client.__directoryName, lastError);
 }
 
+/**
+ * POST, once. Used for exactly one call in the codebase: relaying a registrar's
+ * acceptance of a vakalatnama to the court register (see `court.recordVakalatnama`).
+ *
+ * Not retried. A write whose response we never saw may still have landed, and the
+ * court register answers a repeat with VAKALATNAMA_ALREADY_ON_RECORD — so the caller
+ * decides what a repeat means rather than this helper guessing. Returns the status
+ * and body for any answer below 500, and fails closed on anything else.
+ */
+async function post(directoryKey, path, body) {
+  const client = clients[directoryKey];
+  try {
+    const res = await client.post(path, body, { headers: { 'Content-Type': 'application/json' } });
+    return { status: res.status, data: res.data };
+  } catch (err) {
+    log.warn({ directory: client.__directoryName, path, err: err?.message }, 'directory write failed');
+    throw new DirectoryUnavailableError(client.__directoryName, err);
+  }
+}
+
 /** Path segments must never be able to escape their route. */
 function seg(value, label) {
   if (typeof value !== 'string' || value.length === 0 || value.length > 128) {
@@ -141,8 +161,21 @@ export const court = {
 
   getCourt: (code) => get('COURT', `/directory/court/${seg(code, 'court code')}`),
 
+  /** Every court in a district — what the jurisdiction router chooses from. */
+  listCourts: (districtCode) =>
+    get('COURT', '/directory/courts', { params: { districtCode: seg(districtCode, 'district code') } }),
+
   getListingByFir: (firNumber) =>
     get('COURT', `/directory/listing/by-fir/${seg(firNumber, 'FIR number')}`),
+
+  /**
+   * Register a chargesheet with the court that the jurisdiction router chose, and get
+   * its CNR back. Stands in for the police report being registered in eCourts; the
+   * court directory refuses a court it does not hold, and answers an FIR it already
+   * lists with that listing rather than a second one.
+   */
+  registerListing: ({ firNumber, stationCode, courtCode, caseCategory }) =>
+    post('COURT', '/directory/listing', { firNumber, stationCode, courtCode, caseCategory }),
 
   /** Cases this advocate is on record for, by accepted vakalatnama. */
   getVakalatnamas: (enrolmentNo) =>
@@ -150,6 +183,25 @@ export const court = {
 
   getLegalAidAssignments: (enrolmentNo) =>
     get('COURT', '/directory/legal-aid', { params: { enrolmentNo: seg(enrolmentNo, 'enrolment number') } }),
+
+  /**
+   * Record, in the COURT register, a vakalatnama that the registrar has just accepted
+   * in Lexx. The registrar's own staff code travels with it, and the court directory
+   * checks that code against its own registry staff and the case's court before it
+   * writes — Lexx asserts nothing the court does not verify.
+   *
+   * In this deployment the court register is the directory simulator; in a real one
+   * this is the eCourts e-filing interface. Either way the order is the same: the
+   * court records the appearance, and only then does Lexx mirror it as access.
+   */
+  recordVakalatnama: ({ cnrNumber, advocateEnrolmentNo, appearingFor, partyName, acceptedBy }) =>
+    post('COURT', '/directory/vakalatnama', {
+      cnrNumber,
+      advocateEnrolmentNo,
+      appearingFor,
+      partyName,
+      acceptedBy,
+    }),
 
   getRegistryStaff: (staffCode) =>
     get('COURT', `/directory/registry-staff/${seg(staffCode, 'staff code')}`),
@@ -177,12 +229,15 @@ export const legal = {
 const POSTING_ROLE_TO_LEXX = Object.freeze({
   IO: ROLE.IO,
   SHO: ROLE.SHO,
-  MALKHANA_CUSTODIAN: ROLE.MALKHANA_CUSTODIAN,
   DISTRICT_SP: ROLE.DISTRICT_SP,
 });
 
+/**
+ * Registry roles Lexx recognises. A directory that still holds a REGISTRAR posting —
+ * an older dataset, a deployment mid-migration — resolves to nothing here, and the
+ * identity is refused at activation rather than admitted with no policy behind it.
+ */
 const REGISTRY_ROLE_TO_LEXX = Object.freeze({
-  REGISTRAR: ROLE.REGISTRAR,
   EVIDENCE_CUSTODIAN: ROLE.EVIDENCE_CUSTODIAN,
 });
 

@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import * as fsl from '../controllers/fsl.js';
+import * as certificate from '../controllers/certificate.js';
 import { requireSession } from '../middleware/authenticate.js';
 import { authorize, authorizeCollection, authorizeCreate } from '../middleware/authorize.js';
 import { requireHealthyAudit } from '../middleware/audit.js';
@@ -16,6 +17,17 @@ router.use(...requireSession);
  * list — so "only referrals to their own lab" is enforced by the policy, not by a
  * role check here.
  */
+/**
+ * The examiner's review queue — every exhibit the laboratory may need to look at,
+ * ordered by the review priority the system computed at ingest.
+ *
+ * Authorised as an EVIDENCE collection, not a REFERRAL one: the queue's whole point
+ * is that it reaches beyond what has been formally referred, and the resolver's
+ * evidence scope (referrals to this lab, plus the digital evidence registered in the
+ * state it serves) is what decides its contents.
+ */
+router.get('/queue', authorizeCollection(RESOURCE_TYPE.EVIDENCE), fsl.reviewQueue);
+
 router.get('/referrals', authorizeCollection(RESOURCE_TYPE.REFERRAL), fsl.listReferrals);
 
 router.post(
@@ -36,6 +48,13 @@ router.post(
   authorize({ action: ACTION.WRITE, resourceType: RESOURCE_TYPE.REFERRAL }),
   fsl.reportUpload,
   fsl.fileReport
+);
+
+/** Certificates for the referred exhibit — where the examiner signs Part B. */
+router.get(
+  '/referrals/:id/certificates',
+  authorize({ action: ACTION.READ, resourceType: RESOURCE_TYPE.REFERRAL }),
+  certificate.listForReferral
 );
 
 export default router;
@@ -60,4 +79,24 @@ evidenceFslRouter.post(
   authorize({ action: ACTION.WRITE, resourceType: RESOURCE_TYPE.EVIDENCE }),
   authorizeCreate(RESOURCE_TYPE.REFERRAL, fsl.referralContext),
   fsl.referToFsl
+);
+
+/**
+ * The one-step forensic verdict: an examiner records an opinion on an exhibit in
+ * their laboratory's scope, with no referral round trip first.
+ *
+ * One policy question, asked of the exhibit itself: may this session WRITE to it?
+ * Only the FSL branch of the resolver ever answers yes to that for a laboratory, and
+ * only for evidence referred to it or registered in the state it serves. The
+ * controller then insists the session actually carries a lab scope, so a police or
+ * court WRITE — which passes the same check for its own reasons — cannot reach here.
+ */
+evidenceFslRouter.post(
+  '/:id/forensic-verdict',
+  // An authenticity opinion is the strongest evidentiary claim in the system. It is
+  // not permitted to happen unrecorded.
+  requireHealthyAudit,
+  authorize({ action: ACTION.WRITE, resourceType: RESOURCE_TYPE.EVIDENCE }),
+  fsl.verdictUpload,
+  fsl.recordVerdict
 );

@@ -22,6 +22,7 @@ import custodyRoutes from './routes/custody.js';
 import fslRoutes, { evidenceFslRouter } from './routes/fsl.js';
 import disclosureRoutes from './routes/disclosure.js';
 import certificateRoutes, { publicVerifyRouter } from './routes/certificate.js';
+import vakalatnamaRoutes from './routes/vakalatnama.js';
 
 export function createApp() {
   const app = express();
@@ -125,6 +126,7 @@ export function createApp() {
   app.use('/api/custody', custodyRoutes);
   app.use('/api/fsl', fslRoutes);
   app.use('/api/disclosure', disclosureRoutes);
+  app.use('/api/vakalatnama', vakalatnamaRoutes);
   app.use('/api/certificates', certificateRoutes);
   app.use('/api/ledger', ledgerRouter);
   app.use('/api/audit', auditRouter);

@@ -67,7 +67,7 @@ const objectId = z.string().regex(/^[0-9a-fA-F]{24}$/, 'Malformed id');
 
 /**
  * An exclusion is a request to withhold material from an accused person. A bare
- * assertion is not enough: it must carry a reason a registrar can rule on, so the
+ * assertion is not enough: it must carry a reason the court can rule on, so the
  * minimum length is a real constraint rather than decoration.
  */
 const prepareSchema = z.object({
@@ -87,9 +87,19 @@ const prepareSchema = z.object({
 
 const approveSchema = z.object({
   approvedExclusions: z.array(objectId).max(200).optional().default([]),
+  /** Withholding requests the court REFUSES: those exhibits go to the defence. */
+  refusedExclusions: z.array(objectId).max(200).optional().default([]),
+  refusalNote: z.string().trim().max(1000).optional(),
   redactionVariant: z.string().trim().min(2).max(64).optional(),
   maskVictimIdentity: z.boolean().optional(),
 });
+
+/** BNSS s.230: the accused must have the material within fourteen days. */
+export const S230_DAYS = 14;
+const DAY_MS = 86_400_000;
+
+/** An exclusion the court has ruled on, either way. Only unruled ones block service. */
+const isRuled = (x) => Boolean(x.approvedByRegistrarId || x.refusedByUserId);
 
 const serveSchema = z.object({
   /**
@@ -115,7 +125,7 @@ export function packCreateContext(req) {
 }
 
 /** Live advocate grants for a case, newest first. The only source of recipients. */
-async function liveAdvocateGrants(caseId) {
+export async function liveAdvocateGrants(caseId) {
   const now = new Date();
   return CaseAccessGrant.find({
     caseId,
@@ -177,6 +187,9 @@ const packView = (p) => ({
     reason: x.reason,
     approved: Boolean(x.approvedByRegistrarId),
     approvedAt: x.approvedAt ?? null,
+    refused: Boolean(x.refusedByUserId),
+    refusedAt: x.refusedAt ?? null,
+    refusalNote: x.refusalNote ?? null,
   })),
   redactionVariant: p.redactionVariant,
   maskVictimIdentity: p.maskVictimIdentity,
@@ -202,7 +215,7 @@ const packView = (p) => ({
  * The set is COMPUTED, not submitted: every ACTIVE exhibit on the case, minus the
  * items the officer asks to withhold. An officer cannot quietly drop an exhibit by
  * omitting it from a list — omission is not a thing they can express here, only a
- * reasoned exclusion a registrar will later have to rule on.
+ * reasoned exclusion the court has to rule on.
  */
 export async function preparePack(req, res, next) {
   try {
@@ -211,7 +224,7 @@ export async function preparePack(req, res, next) {
 
     const existing = await DisclosurePack.findOne({ caseId: caseDoc._id });
     if (existing && existing.status !== DISCLOSURE_STATUS.DRAFT) {
-      // Once a registrar has ruled on a pack it is a court record. A revised set is
+      // Once the court has ruled on a pack it is a court record. A revised set is
       // a fresh judicial act, not an edit of the approved one.
       throw Conflict(
         'DISCLOSURE_PACK_LOCKED',
@@ -309,9 +322,9 @@ export async function preparePack(req, res, next) {
 // ============================================================== 2. APPROVE ====
 
 /**
- * POST /api/disclosure/:packId/approve   (REGISTRAR)
+ * POST /api/disclosure/:packId/approve   (JUDGE)
  *
- * The registrar rules on the exclusion requests and fixes the redaction variant.
+ * The court rules on the withholding requests and fixes the redaction variant.
  *
  * Approval of the PACK and adjudication of each EXCLUSION are separate acts, and
  * this endpoint records both. Whatever is approved here, `serve` re-checks that
@@ -335,37 +348,71 @@ export async function approvePack(req, res, next) {
     }
 
     const known = new Set(pack.excludedItems.map((x) => String(x.itemId)));
-    const unknown = body.approvedExclusions.filter((id) => !known.has(id));
+    const unknown = [...body.approvedExclusions, ...body.refusedExclusions].filter((id) => !known.has(id));
     if (unknown.length) {
       throw BadRequest(
         'UNKNOWN_EXCLUSION',
-        'An approval refers to an exclusion that was never requested on this pack',
+        'A ruling refers to an exclusion that was never requested on this pack',
         { itemIds: unknown }
       );
     }
 
-    const now = new Date();
     const approving = new Set(body.approvedExclusions);
+    const refusing = new Set(body.refusedExclusions);
+    const both = [...approving].filter((id) => refusing.has(id));
+    if (both.length) {
+      throw BadRequest('CONFLICTING_RULING', 'An exclusion cannot be both approved and refused', {
+        itemIds: both,
+      });
+    }
+
+    // A ruling, once made, is a court record. A second, contrary ruling on the same
+    // request is a fresh judicial act (an order), not an edit of this pack.
+    const reruled = pack.excludedItems
+      .filter((x) => isRuled(x) && (approving.has(String(x.itemId)) || refusing.has(String(x.itemId))))
+      .filter((x) =>
+        approving.has(String(x.itemId)) ? Boolean(x.refusedByUserId) : Boolean(x.approvedByRegistrarId)
+      )
+      .map((x) => String(x.itemId));
+    if (reruled.length) {
+      throw Conflict('EXCLUSION_ALREADY_RULED', 'The court has already ruled the other way on this exclusion', {
+        itemIds: reruled,
+      });
+    }
+
+    const now = new Date();
     for (const item of pack.excludedItems) {
-      if (!approving.has(String(item.itemId))) continue;
-      item.approvedByRegistrarId = req.user.userId;
-      item.approvedAt = now;
+      const id = String(item.itemId);
+      if (approving.has(id) && !item.approvedByRegistrarId) {
+        item.approvedByRegistrarId = req.user.userId;
+        item.approvedAt = now;
+      }
+      if (refusing.has(id) && !item.refusedByUserId) {
+        item.refusedByUserId = req.user.userId;
+        item.refusedAt = now;
+        item.refusalNote = body.refusalNote ?? null;
+        // Refused withholding means the accused gets it: back into the served set.
+        if (!pack.exhibitIds.some((e) => String(e) === id)) pack.exhibitIds.push(item.itemId);
+      }
     }
 
     if (body.redactionVariant) pack.redactionVariant = body.redactionVariant;
-    // Same one-way rule as at preparation: a protected victim cannot be unmasked.
-    if (typeof body.maskVictimIdentity === 'boolean') {
-      pack.maskVictimIdentity = Boolean(caseDoc?.isVictimProtected || body.maskVictimIdentity);
-    }
+    // One-way, as the screen says: masking can be switched on at approval, never off.
+    // A mask set when the pack was prepared survives an approval that does not mention
+    // it — the client used to send `false` by default and silently unmask a victim.
+    pack.maskVictimIdentity = Boolean(
+      pack.maskVictimIdentity || caseDoc?.isVictimProtected || body.maskVictimIdentity
+    );
 
     pack.status = DISCLOSURE_STATUS.APPROVED;
     pack.approvedByUserId = req.user.userId;
     pack.approvedAt = now;
+    // A pack prepared before the chargesheet carries no CNR; by the time the court
+    // rules on it the case has one.
+    pack.cnrNumber = pack.cnrNumber ?? caseDoc?.cnrNumber ?? null;
     await pack.save();
 
-    const pending = pack.excludedItems
-      .filter((x) => !x.approvedByRegistrarId)
-      .map((x) => String(x.itemId));
+    const pending = pack.excludedItems.filter((x) => !isRuled(x)).map((x) => String(x.itemId));
 
     await appendEvent({
       eventType: LEDGER_EVENT.DISCLOSURE_APPROVED,
@@ -378,6 +425,8 @@ export async function approvePack(req, res, next) {
         packId: String(pack._id),
         cnrNumber: pack.cnrNumber,
         approvedExclusions: body.approvedExclusions,
+        refusedExclusions: body.refusedExclusions,
+        refusalNote: body.refusedExclusions.length ? body.refusalNote ?? null : null,
         pendingExclusions: pending,
         redactionVariant: pack.redactionVariant,
         maskVictimIdentity: pack.maskVictimIdentity,
@@ -399,7 +448,7 @@ export async function approvePack(req, res, next) {
 // ================================================================ 3. SERVE ====
 
 /**
- * POST /api/disclosure/:packId/serve   (REGISTRAR)
+ * POST /api/disclosure/:packId/serve   (JUDGE)
  *
  * Generates a per-recipient watermark and stops the BNSS s.230 clock.
  *
@@ -411,10 +460,26 @@ export async function approvePack(req, res, next) {
 export async function servePack(req, res, next) {
   try {
     const body = parse(serveSchema, req.body ?? {});
-
     const pack = await DisclosurePack.findById(req.resource._id);
     if (!pack) throw NotFound('RESOURCE_NOT_FOUND', 'Resource not found');
+    return res.json(await serveToRecipients({ pack, req, recipientUserIds: body.recipientUserIds }));
+  } catch (err) {
+    return next(err);
+  }
+}
 
+/**
+ * Serving, as a function rather than a handler.
+ *
+ * Two routes reach it: the court serving an approved pack on its own, and the
+ * one-step "share the case file" below, which prepares, rules and serves in a single
+ * act. Both have to mint watermarks the same way, stop the same statutory clock and
+ * write the same ledger entry — so there is one implementation and neither can drift.
+ *
+ * @returns the response body both routes return verbatim.
+ */
+async function serveToRecipients({ pack, req, recipientUserIds }) {
+  {
     if (pack.status === DISCLOSURE_STATUS.DRAFT) {
       throw Conflict(
         'PACK_NOT_APPROVED',
@@ -424,7 +489,7 @@ export async function servePack(req, res, next) {
 
     // The gate that matters. Material may be withheld from an accused person only
     // on a ruling that has actually been made — never on a request still pending.
-    const unapproved = pack.excludedItems.filter((x) => !x.approvedByRegistrarId);
+    const unapproved = pack.excludedItems.filter((x) => !isRuled(x));
     if (unapproved.length) {
       throw Conflict(
         'UNAPPROVED_EXCLUSIONS',
@@ -437,8 +502,8 @@ export async function servePack(req, res, next) {
     const grantByUser = new Map(grants.map((g) => [String(g.userId), g]));
 
     let targetIds = grants.map((g) => String(g.userId));
-    if (body.recipientUserIds?.length) {
-      const notOnRecord = body.recipientUserIds.filter((id) => !grantByUser.has(id));
+    if (recipientUserIds?.length) {
+      const notOnRecord = recipientUserIds.filter((id) => !grantByUser.has(id));
       if (notOnRecord.length) {
         // Naming a recipient who is not on record is refused rather than silently
         // ignored: it is an attempt to serve confidential material on a stranger.
@@ -448,7 +513,7 @@ export async function servePack(req, res, next) {
           { userIds: notOnRecord }
         );
       }
-      targetIds = body.recipientUserIds;
+      targetIds = recipientUserIds;
     }
 
     const alreadyServed = new Set(pack.servedTo.map((s) => String(s.userId)));
@@ -492,6 +557,14 @@ export async function servePack(req, res, next) {
     pack.servedTo.push(...served);
     pack.status = DISCLOSURE_STATUS.SERVED;
     pack.servedOn = pack.servedOn ?? servedAt;
+    // The BNSS s.230 deadline. The pack is usually prepared BEFORE the chargesheet
+    // starts the clock, so the date it copied at preparation is typically empty; read
+    // it from the case at service, and fall back to fourteen days from service itself
+    // rather than leave counsel a clock that can never be shown.
+    if (!pack.dueOn) {
+      const caseClocks = (await Case.findById(pack.caseId).select('clocks').lean())?.clocks;
+      pack.dueOn = caseClocks?.disclosureDueOn ?? new Date(servedAt.getTime() + S230_DAYS * DAY_MS);
+    }
     await pack.save();
 
     // BNSS s.230 clock stops on the case, not only on the pack, because that is
@@ -530,7 +603,7 @@ export async function servePack(req, res, next) {
       },
     });
 
-    return res.json({
+    return {
       pack: packView(pack),
       servedNow: served.map((s) => ({
         userId: String(s.userId),
@@ -539,9 +612,7 @@ export async function servePack(req, res, next) {
         watermarkLabel: s.watermarkLabel,
       })),
       disclosureServedOn: pack.servedOn,
-    });
-  } catch (err) {
-    return next(err);
+    };
   }
 }
 
@@ -609,7 +680,12 @@ export async function getMyPack(req, res, next) {
       packId: String(pack._id),
       status: pack.status,
       servedOn: pack.servedOn ?? null,
-      dueOn: pack.dueOn ?? null,
+      // Packs served before the deadline was recorded at service get the statutory
+      // fourteen days from service, so no served pack shows a clock that cannot run.
+      dueOn:
+        pack.dueOn ??
+        caseDoc.clocks?.disclosureDueOn ??
+        (pack.servedOn ? new Date(new Date(pack.servedOn).getTime() + S230_DAYS * DAY_MS) : null),
       acknowledgedAt: entry?.acknowledgedAt ?? null,
       redactionVariant: pack.redactionVariant,
       maskVictimIdentity: pack.maskVictimIdentity,
@@ -625,9 +701,13 @@ export async function getMyPack(req, res, next) {
       /**
        * The party is told that material was withheld and on what ground — that is
        * their entitlement — but not WHICH exhibit it was. Naming the item would
-       * disclose the very thing the registrar ruled should be withheld.
+       * disclose the very thing the court ruled should be withheld.
        */
-      withheld: (pack.excludedItems ?? []).map((x) => ({ reason: x.reason })),
+      // Only exclusions the court APPROVED are withheld. One it refused was put back
+      // into the set and is among the exhibits above.
+      withheld: (pack.excludedItems ?? [])
+        .filter((x) => x.approvedByRegistrarId && !x.refusedByUserId)
+        .map((x) => ({ reason: x.reason })),
     });
   } catch (err) {
     return next(err);
@@ -654,7 +734,7 @@ export async function getMyPack(req, res, next) {
  *
  * Lists the disclosure packs on a case, for the court users who have to act on them.
  *
- * Added because the registrar previously had no way to DISCOVER a pack: approve and
+ * Added because the court previously had no way to DISCOVER a pack: approve and
  * serve both take a packId, and the only way to learn one was to be told it out of
  * band by the investigating officer. That made a core statutory workflow depend on
  * copying an identifier by hand.
@@ -675,10 +755,18 @@ export async function listPacksForCase(req, res, next) {
 
     const packs = await DisclosurePack.find(filter).sort({ createdAt: -1 }).lean();
 
+    // The exhibits named in exclusion requests, so the court rules on "EX-…-003, the
+    // witness statement" rather than on a 24-character database id it has to be told.
+    const excludedIds = packs.flatMap((p) => (p.excludedItems ?? []).map((x) => x.itemId));
+    const excludedDocs = excludedIds.length
+      ? await Evidence.find({ _id: { $in: excludedIds } }).select('_id exhibitCode title').lean()
+      : [];
+    const exhibitById = new Map(excludedDocs.map((e) => [String(e._id), e]));
+
     // A summary, not `packView`. This is a discovery list, so it carries what the
-    // registrar needs to choose a pack and act on it — and deliberately not the
+    // court needs to choose a pack and act on it — and deliberately not the
     // per-recipient `watermarkToken`, which identifies the copy a specific advocate
-    // holds. That belongs in the serve response to the registrar who minted it, not
+    // holds. That belongs in the serve response to the court that minted it, not
     // in a list anyone with court scope can page through.
     return res.json({
       caseId: String(req.resource._id),
@@ -688,9 +776,23 @@ export async function listPacksForCase(req, res, next) {
         status: p.status,
         exhibitCount: (p.exhibitIds ?? []).length,
         exclusionCount: (p.excludedItems ?? []).length,
-        unruledExclusionCount: (p.excludedItems ?? []).filter((x) => !x.approvedByRegistrarId)
-          .length,
+        unruledExclusionCount: (p.excludedItems ?? []).filter((x) => !isRuled(x)).length,
+        exclusions: (p.excludedItems ?? []).map((x) => ({
+          itemId: String(x.itemId),
+          exhibitCode: exhibitById.get(String(x.itemId))?.exhibitCode ?? null,
+          title: exhibitById.get(String(x.itemId))?.title ?? null,
+          reason: x.reason,
+          approved: Boolean(x.approvedByRegistrarId),
+          approvedAt: x.approvedAt ?? null,
+          refused: Boolean(x.refusedByUserId),
+          refusedAt: x.refusedAt ?? null,
+          refusalNote: x.refusalNote ?? null,
+        })),
+        servedTo: (p.servedTo ?? []).map((s) => String(s.userId)),
         redactionVariant: p.redactionVariant,
+        // So the approve panel starts from the pack's real masking state instead of
+        // an unticked box that reads as "unmask".
+        maskVictimIdentity: Boolean(p.maskVictimIdentity),
         dueOn: p.dueOn ?? null,
         approvedAt: p.approvedAt ?? null,
         servedOn: p.servedOn ?? null,
@@ -699,6 +801,72 @@ export async function listPacksForCase(req, res, next) {
         createdAt: p.createdAt,
       })),
       total: packs.length,
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// ============================================================ 5b. TRACE ====
+
+/** `randomBase64Url(32)`: 43 base64url characters, and nothing else is a watermark. */
+const watermarkTokenSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
+
+/**
+ * Middleware for GET /api/disclosure/trace/:token.
+ *
+ * Turns a watermark token into the pack it was minted on, and stops there — exactly
+ * as a custody scan turns a label into an item id. `authorize` then runs on that pack
+ * with APPROVE, a court-only action, so only the court the case is listed before can
+ * learn whose copy a leaked page came from. An unknown and a malformed token answer
+ * identically.
+ */
+export async function resolveWatermark(req, res, next) {
+  try {
+    const parsed = watermarkTokenSchema.safeParse(req.params.token);
+    const pack = parsed.success
+      ? await DisclosurePack.findOne({ 'servedTo.watermarkToken': parsed.data }).select('_id').lean()
+      : null;
+    if (!pack) throw NotFound('WATERMARK_NOT_FOUND', 'No served copy carries that watermark token');
+    req.tracedPackId = String(pack._id);
+    return next();
+  } catch (err) {
+    return next(err);
+  }
+}
+
+/** GET /api/disclosure/trace/:token — whose served copy is this? */
+export async function traceWatermark(req, res, next) {
+  try {
+    const pack = req.resource;
+    const entry = (pack.servedTo ?? []).find((s) => s.watermarkToken === req.params.token);
+    if (!entry) throw NotFound('WATERMARK_NOT_FOUND', 'No served copy carries that watermark token');
+
+    const recipient = await User.findById(entry.userId).select('name authorityId role').lean();
+
+    await writeAudit(req, {
+      action: ACTION.READ,
+      resourceType: RESOURCE_TYPE.DISCLOSURE_PACK,
+      resourceId: pack._id,
+      caseId: pack.caseId,
+      decision: DECISION.ALLOW,
+      reason: 'WATERMARK_TRACED',
+    });
+
+    return res.json({
+      packId: String(pack._id),
+      cnrNumber: pack.cnrNumber ?? req.caseDoc?.cnrNumber ?? null,
+      firNumber: req.caseDoc?.firNumber ?? null,
+      recipient: {
+        userId: String(entry.userId),
+        name: recipient?.name ?? null,
+        authorityId: recipient?.authorityId ?? null,
+        role: recipient?.role ?? null,
+      },
+      watermarkLabel: entry.watermarkLabel,
+      servedAt: entry.servedAt,
+      acknowledgedAt: entry.acknowledgedAt ?? null,
+      note: 'This copy was served on the recipient named above. The token and the time of service are in the append-only ledger.',
     });
   } catch (err) {
     return next(err);
@@ -768,7 +936,7 @@ export async function acknowledgePack(req, res, next) {
 // ================================================= 6. SYNC REPRESENTATION ====
 
 /** Which Lexx grant role an accepted vakalatnama confers. */
-const APPEARING_FOR_TO_ROLE = Object.freeze({
+export const APPEARING_FOR_TO_ROLE = Object.freeze({
   ACCUSED: ROLE.DEFENCE_COUNSEL,
   VICTIM: ROLE.VICTIM_COUNSEL,
 });
@@ -916,7 +1084,7 @@ export async function syncRepresentation(req, res, next) {
  * Create a grant if there is not already a live one for this (case, user, role).
  * Returns a summary when something was created, `null` when it already existed.
  */
-async function ensureGrant(spec) {
+export async function ensureGrant(spec) {
   const existing = await CaseAccessGrant.findOne({
     caseId: spec.caseId,
     userId: spec.userId,
@@ -953,11 +1121,212 @@ async function revokeGrant(caseId, userId, role, reason) {
   return { grantId: String(result._id), userId: String(result.userId), role, reason };
 }
 
+// ======================================================= SHARE (one step) ====
+
+/**
+ * What the court sends counsel, as one decision.
+ *
+ * `withheldItems` is the exception, not the form: the set is COMPUTED — every exhibit
+ * on the case, minus anything the court decides to withhold, with a reason recorded
+ * for each. Sending nothing withholds nothing, which is the common case and takes no
+ * input at all.
+ */
+const shareSchema = z.object({
+  withheldItems: z
+    .array(
+      z.object({
+        itemId: objectId,
+        reason: z.string().trim().min(10, 'Withholding an exhibit must state a reason').max(1000),
+      })
+    )
+    .max(200)
+    .optional()
+    .default([]),
+  recipientUserIds: z.array(objectId).max(50).optional(),
+  redactionVariant: z.string().trim().min(2).max(64).optional(),
+  maskVictimIdentity: z.boolean().optional(),
+});
+
+/**
+ * POST /api/disclosure/:caseId/share   (JUDGE)
+ *
+ * Give the advocates on record the case file.
+ *
+ * ## Why this exists
+ *
+ * Disclosure used to take three acts by two authorities: the investigating officer
+ * proposed a set and asked to withhold parts of it, the registrar ruled on each
+ * request, and the registrar then served. Every one of those was a separate screen,
+ * and an advocate saw nothing at all until the last of them happened. In practice the
+ * chain broke at the first step that nobody remembered, and what was lost was the
+ * accused's statutory entitlement under BNSS s.230.
+ *
+ * The court holds the case file once the chargesheet is filed. Deciding what the
+ * defence gets from it is the court's decision, it is one decision, and this is it.
+ *
+ * ## What is NOT lost
+ *
+ * Everything the three-step version recorded is still recorded, because it is the
+ * record a court may later have to revisit:
+ *   - the exhibit set served, and every exhibit withheld with the ground given
+ *   - three ledger entries (PREPARED, APPROVED, SERVED) rather than one, so the
+ *     history reads as the sequence of acts it legally is
+ *   - one unguessable watermark per recipient, so a leaked page names its source
+ *   - the s.230 clock, started at filing and stopped at acknowledgement
+ *
+ * The separate prepare / approve / serve routes are still there and still work. This
+ * is the route the product leads with.
+ */
+export async function shareCaseFile(req, res, next) {
+  try {
+    const caseDoc = req.resource;
+    const body = parse(shareSchema, req.body ?? {});
+
+    const existing = await DisclosurePack.findOne({ caseId: caseDoc._id });
+    if (existing && existing.status === DISCLOSURE_STATUS.SERVED) {
+      // A served pack is a court record. Serving the same pack on somebody NEW is
+      // `serve` with a recipient list; re-deciding what is in it is a fresh order.
+      throw Conflict(
+        'PACK_ALREADY_SERVED',
+        'This case file has already been shared. To serve a newly appointed advocate, use the pack that was served; to change what is in it, a fresh order is needed.',
+        { packId: String(existing._id), status: existing.status }
+      );
+    }
+
+    const evidence = await Evidence.find({ caseId: caseDoc._id })
+      .select('_id exhibitCode')
+      .sort({ createdAt: 1 })
+      .lean();
+    const byId = new Map(evidence.map((e) => [String(e._id), e]));
+
+    // A withheld exhibit must belong to this case — otherwise the request body could
+    // be used to probe which exhibit ids exist elsewhere in the register.
+    const foreign = body.withheldItems.filter((x) => !byId.has(x.itemId));
+    if (foreign.length) {
+      throw BadRequest(
+        'EXCLUDED_ITEM_NOT_IN_CASE',
+        'An exhibit you asked to withhold does not belong to this case',
+        { itemIds: foreign.map((x) => x.itemId) }
+      );
+    }
+
+    const now = new Date();
+    const withheldIds = new Set(body.withheldItems.map((x) => x.itemId));
+    const exhibitIds = evidence.filter((e) => !withheldIds.has(String(e._id))).map((e) => e._id);
+
+    // The court both requests and rules on each withholding here, because the court
+    // is the one deciding. There is no pending state to leave behind — an exclusion
+    // that nobody has ruled on is exactly what used to block service.
+    const excludedItems = body.withheldItems.map((x) => ({
+      itemId: x.itemId,
+      itemType: 'EVIDENCE',
+      reason: x.reason,
+      requestedBy: req.user.userId,
+      approvedByRegistrarId: req.user.userId,
+      approvedAt: now,
+    }));
+
+    // A protected victim stays masked whatever the request says. Masking is one-way.
+    const maskVictimIdentity = Boolean(
+      caseDoc.isVictimProtected || body.maskVictimIdentity || existing?.maskVictimIdentity
+    );
+
+    const fields = {
+      cnrNumber: caseDoc.cnrNumber ?? null,
+      exhibitIds,
+      excludedItems,
+      redactionVariant: body.redactionVariant ?? existing?.redactionVariant ?? 'DEFENCE_V1',
+      maskVictimIdentity,
+      dueOn: caseDoc.clocks?.disclosureDueOn ?? null,
+      status: DISCLOSURE_STATUS.APPROVED,
+      approvedByUserId: req.user.userId,
+      approvedAt: now,
+    };
+
+    let pack;
+    if (existing) {
+      existing.set(fields);
+      pack = await existing.save();
+    } else {
+      pack = await DisclosurePack.create({
+        caseId: caseDoc._id,
+        preparedBy: req.user.userId,
+        ...fields,
+      });
+    }
+
+    const disclosedCodes = evidence
+      .filter((e) => !withheldIds.has(String(e._id)))
+      .map((e) => e.exhibitCode);
+
+    // Three entries, not one. The ledger is the account a court reads, and "the set
+    // was settled, the withholdings were ruled on, the pack was served" is three
+    // facts with three timestamps even when one person did all three in one click.
+    await appendEvent({
+      eventType: LEDGER_EVENT.DISCLOSURE_PREPARED,
+      caseId: caseDoc._id,
+      subjectId: pack._id,
+      subjectType: SUBJECT_TYPE.DISCLOSURE_PACK,
+      actorUserId: req.user.userId,
+      actorRole: req.user.role,
+      payload: {
+        packId: String(pack._id),
+        cnrNumber: pack.cnrNumber,
+        exhibitCount: exhibitIds.length,
+        exhibitCodes: disclosedCodes,
+        exclusions: excludedItems.map((x) => ({ itemId: String(x.itemId), reason: x.reason })),
+        redactionVariant: pack.redactionVariant,
+        maskVictimIdentity: pack.maskVictimIdentity,
+        preparedByAuthorityId: req.user.authorityId,
+        revision: Boolean(existing),
+      },
+    });
+
+    await appendEvent({
+      eventType: LEDGER_EVENT.DISCLOSURE_APPROVED,
+      caseId: caseDoc._id,
+      subjectId: pack._id,
+      subjectType: SUBJECT_TYPE.DISCLOSURE_PACK,
+      actorUserId: req.user.userId,
+      actorRole: req.user.role,
+      payload: {
+        packId: String(pack._id),
+        cnrNumber: pack.cnrNumber,
+        exhibitCount: exhibitIds.length,
+        withheld: excludedItems.map((x) => ({
+          exhibitCode: byId.get(String(x.itemId))?.exhibitCode ?? null,
+          reason: x.reason,
+        })),
+        redactionVariant: pack.redactionVariant,
+        maskVictimIdentity: pack.maskVictimIdentity,
+        approvedByAuthorityId: req.user.authorityId,
+      },
+    });
+
+    const result = await serveToRecipients({
+      pack,
+      req,
+      recipientUserIds: body.recipientUserIds,
+    });
+
+    return res.status(existing ? 200 : 201).json({
+      ...result,
+      withheld: excludedItems.map((x) => ({
+        exhibitCode: byId.get(String(x.itemId))?.exhibitCode ?? null,
+        reason: x.reason,
+      })),
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 export default {
   packCreateContext,
   preparePack,
   approvePack,
   servePack,
+  shareCaseFile,
   getMyPack,
   acknowledgePack,
   syncRepresentation,

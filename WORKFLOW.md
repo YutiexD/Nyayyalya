@@ -33,14 +33,14 @@
 | Dimension | Status |
 |---|---|
 | Maturity | **Working prototype**, feature-complete against its design specification |
-| Backend tests | **455 passing**, 15 suites, 0 skipped, 0 failing |
+| Backend tests | **525 passing**, 18 suites, 0 skipped, 0 failing |
 | Contract tests | **36 passing** |
-| Lint | 0 errors (10 documented false-positive warnings) |
-| API surface | **56 routes**, all documented in `docs/API.md` |
-| Architecture decisions | **29 ADRs** recorded in `docs/AGENT_DECISIONS.md` |
+| Lint | 0 errors (26 `require-atomic-updates` warnings — the documented false-positive pattern in the anchor service and in sequential test setup) |
+| API surface | **71 routes**, all documented in `docs/API.md` |
+| Architecture decisions | **39 ADRs** recorded in `docs/AGENT_DECISIONS.md` |
 | Security findings | **6 found, 6 fixed**, each with a regression test (`docs/SECURITY_FINDINGS.md`) |
 | Smart contract | **Deployed and live** on Monad Testnet — see §8 |
-| Live anchoring | **Not active** — runs in `DRY_RUN`; see §8 for the exact nuance |
+| Live anchoring | **Active in the local deployment** (`ANCHOR_ENABLED=true` in `.env`): Merkle roots are submitted and confirmed on Monad Testnet — see §8 |
 | Cloud deployment | **Not deployed.** Runs locally / on a single machine |
 | Independent security audit | **Never performed.** Do not imply otherwise |
 
@@ -53,37 +53,45 @@
 State the *mechanism*, not just the feature name. The mechanism is what makes each claim credible.
 
 - **F1 — Provisioned authentication.** No self-registration; `POST /api/auth/register` returns **410 Gone**. Accounts exist only if the person is already ACTIVE in an authority directory. Role and jurisdiction are read from that directory, never from the request body.
-- **F2 — Case creation + jurisdiction router.** Cases are created only from an FIR that already exists in the police directory. A pure function computes the correct court (Magistrate / Sessions / Special) and **shows its reasoning on screen** — e.g. *"Maximum punishment 20 years — triable by a Court of Session"*, *"Victim is a minor — POCSO designated court required"*.
+- **F2 — Case creation + jurisdiction router.** Cases are created only from an FIR that already exists in the police directory. A pure function computes the correct court (Magistrate / Sessions / Special), picks it from the district's courts as the court directory lists them, and **shows its reasoning on screen** — e.g. *"Maximum punishment 20 years — triable by a Court of Session"*, *"Victim is a minor — POCSO designated court required"*. **Filing the chargesheet registers the case with that court**, which allots the CNR (a simulated eCourts registration, ADR-035); a designation no local court holds is refused, never routed to an ordinary court. Filing starts the fourteen-day BNSS s.230 disclosure clock.
 - **F3 — Evidence upload with client-side hash + signature.** The browser computes SHA-256 and signs it with an **ECDSA P-256 key that is non-extractable and never leaves the device**. The server recomputes the hash from the bytes it received and verifies the signature against the key registered at activation. Failure of either check is refused *and written to the ledger*.
-- **F4 — QR-based physical custody chain.** Two-scan handshake: the sender initiates (minting a single-use token, 5-minute TTL), the receiver accepts. Broken seals freeze custody. Gap detection reports structured findings (`ILLEGAL_STATE_TRANSITION`, `SEQUENCE_DISCONTINUITY`, `STATE_DIVERGENCE`).
-- **F5 — Integrity verification (four independent lights).** File integrity, uploader signature, ledger chain, on-chain anchor — each recomputed from first principles and reported **separately, never merged into one verdict**.
-- **F6 — AI triage.** Produces a **Review Priority** (HIGH/MEDIUM/LOW) plus indicators. Never a verdict. See §6 — this boundary is the most important thing in the system.
-- **F7 — FSL review.** An examiner sees only exhibits referred to *their* laboratory. They file a signed report with an opinion of `AUTHENTIC | MANIPULATED | INCONCLUSIVE` — **the only authenticity vocabulary in the entire system**.
-- **F8 — Disclosure sets + advocate scoping.** An advocate on record sees only the served exhibit set. One outside it gets `EXHIBIT_NOT_IN_DISCLOSURE_SET`; one not on record gets `NOT_ON_RECORD_FOR_THIS_CASE`. Both denials are audited. Per-recipient watermarking makes leaks traceable.
-- **F9 — BSA s.63 certificate.** Part A auto-fills from the evidence record and ledger timeline. Part B can only come from a filed FSL report. **Generation is refused if any Part A field is missing**, returning the exact missing-field list — refusing to produce an incomplete legal document is a feature, and should be presented as one.
+- **F4 — QR-based physical custody chain.** Booking an item prints a **custody label**: a QR that opens the item in Lexx (`/scan?label=…`) plus the particulars checked against the bag by eye (item code, seal number, FIR, IMEI/serial, who seized it). Movement is a two-scan handshake done on screen: the holder picks a **named** receiver and gets a single-use code (5-minute TTL), the receiver scans the label (or opens the row in any custody register — officer, station, court, lab) and enters the code with the seal condition. Handovers continue after the chargesheet (articles still travel to court); booking a *new* article does not (ADR-036). Broken seals freeze custody until the **SHO records a decision** (optionally re-sealing); the exception stays in the chain. Gap detection reports structured findings (`ILLEGAL_STATE_TRANSITION`, `SEQUENCE_DISCONTINUITY`, `STATE_DIVERGENCE`).
+- **F5 — Integrity verification (four independent lights).** File integrity, uploader signature, ledger chain, on-chain anchor — each recomputed from first principles and reported **separately, never merged into one verdict**. Available to the officer, the court and counsel on the same exhibit. The **public verifier** (no account) checks a s.63 certificate — by its token, or by **dropping the PDF itself**, which it hashes in the browser and reports as the current registered document, an earlier version, or not the registered document (ADR-039) — an officer's **upload receipt** (ledger sequence + entry hash, against the register and the anchored root, with the contract's own `verifyEntry`), and lists anchored batches with explorer links.
+- **F6 — Automatic review priority.** **Every** exhibit is banded the moment it is registered — `CRITICAL | HIGH | MEDIUM | LOW` — from the file's own metadata, the integrity of its upload, its media type and the gravity of the case. Nobody is asked for it: there is no field on any form and no endpoint that sets one, so no role can push its own work up a laboratory's queue. Each band comes with the sentences behind it ("container and stream durations disagree by 19s"). What was *observed about the file* sets the band; how grave the case is can move it up one place and never into `CRITICAL`. Never a verdict. See §6 — this boundary is the most important thing in the system.
+- **F7 — FSL review.** An examiner's queue is the digital evidence registered in the state their laboratory serves, plus anything formally referred to it, **in review-priority order** (ADR-042). They record a signed opinion of `AUTHENTIC | MANIPULATED | INCONCLUSIVE` — **the only authenticity vocabulary in the entire system** — in one step, with a report document optional; the record says which route produced it. The formal referral pipeline (refer → accept → report) is unchanged and is how a station puts *named questions* to a *named* laboratory about a sealed article it has sent.
+- **F8 — Vakalatnama e-filing, disclosure sets + advocate scoping.** An advocate comes on record **only** by filing a signed vakalatnama through Lexx (PDF hashed and signed in the browser); filing grants nothing. The **presiding judge** accepts or refuses it; on acceptance the appearance is written to the **court register first** — which verifies the judge against the roster order placing them in that court today — and only then mirrored as access (ADR-030, ADR-040). **Disclosure is the court's, start to finish** (ADR-043): the police have no route to a disclosure pack at all, and `POST /api/disclosure/:caseId/share` composes the set, rules on every withholding and serves it in one act, writing all three ledger entries. The court rules on each withholding request **both ways** — withhold, or refuse and disclose (ADR-037); an unruled request blocks service. An advocate on record sees only the served exhibit set, and never machine triage on any read path (ADR-038). One outside the set gets `EXHIBIT_NOT_IN_DISCLOSURE_SET`; one not on record gets `NOT_ON_RECORD_FOR_THIS_CASE` — both reachable from counsel's **Open by reference** (case by CNR, exhibit by code), both audited. Per-recipient watermarking makes leaks traceable, and the court can **trace** a leaked page's watermark token back to its recipient.
+- **F9 — BSA s.63 certificate.** Part A auto-fills from the evidence record and ledger timeline. Part B can only come from a filed FSL report. **Generation is refused if any Part A field is missing**, returning the exact missing-field list — refusing to produce an incomplete legal document is a feature, and should be presented as one. Issued, signed by **both parties** (the deponent signs Part A on the officer's exhibit screen; the examiner signs Part B on the Lab screen) and downloaded from the exhibit screens; each certificate shows its verification link, QR and copy buttons for the public verifier. A certificate issued before the laboratory reported is flagged: a fresh one is needed to carry Part B.
 - **F10 — Audit log.** Every authorization decision, **allow and deny**, is recorded. Audit rows are append-only.
 - **F11 — Merkle anchoring.** Ledger entries are batched into a Merkle tree; only the **root** goes on chain. See §8.
 - **F12 — Search.** Scope filter is applied **before** the query, never as a post-filter on results.
 
 ---
 
-## 5. Roles — twelve, across four authorities
+## 5. Roles — ten, across four authorities
 
 Roles are **derived from external directories**, never assigned inside LEXX.
 
 - **POLICE authority**
-  - `IO` — Investigating Officer. Owns their own cases only; cannot write once the case leaves investigation.
-  - `SHO` — Station House Officer. Sees all cases at their station; refers exhibits to FSL.
-  - `MALKHANA_CUSTODIAN` — Evidence store keeper. Custody items only; **no case access at all**.
+  - `IO` — Investigating Officer. Owns their own cases; cannot write once the case leaves investigation. Opens cases from FIRs, registers evidence, books articles into custody, files the chargesheet.
+  - `SHO` — Station House Officer. Sees every case and every exhibit at their station in review-priority order, and the chains of custody that do not add up. **No workflow waits on an SHO.** What only they can do is lift a custody freeze after a broken seal, and put named questions to a named laboratory.
   - `DISTRICT_SP` — District Superintendent. District-wide **read-only** oversight.
 - **COURT authority**
-  - `JUDGE` — Reached via the court **roster**, never assigned by LEXX. Sees only cases listed in their court.
-  - `REGISTRAR` — Court registry. Approves and serves disclosure; puts advocates on record.
-  - `EVIDENCE_CUSTODIAN` — Court-side evidence handling.
+  - `JUDGE` — Reached via the court **roster**, never assigned by LEXX. Holds the whole of the court's authority over the cases listed in their court: the exhibits, the physical articles, the ledger, judicial orders (only a judge can), ruling on vakalatnamas, sharing the case file with counsel, issuing s.63 certificates, tracing a leaked copy, and **closing the case**. What they cannot do is write the investigation: a `WRITE` against a case or an exhibit is refused.
+  - `EVIDENCE_CUSTODIAN` — Court-side evidence room. Receives and keeps the physical articles produced in court, and reads the cases it holds them for. It rules on nothing.
+  - Seeded courts: Sessions Court No. 2 (POCSO and SC/ST designated — judge `UP-JUD-2291`, evidence room `UP-GZB-EVC-01`) and the Court of the CJM (judge `UP-JUD-1180`, evidence room `UP-GZB-EVC-02`).
 - **FSL authority**
-  - `FSL_EXAMINER` — Sees only exhibits referred to their own laboratory. The only role that can state an authenticity opinion.
+  - `FSL_EXAMINER` — Sees the digital evidence registered in the state their laboratory serves, plus anything referred to it, ordered by review priority. The only role that can state an authenticity opinion. Signs Part B of the certificate; receives a sealed article while their lab holds a referral in its case, and hands it back after reporting.
 - **LEGAL authority**
-  - `DEFENCE_COUNSEL`, `VICTIM_COUNSEL`, `LEGAL_AID_COUNSEL`, `PUBLIC_PROSECUTOR` — Case-scoped, read-only, and only via an accepted vakalatnama or legal-aid order.
+  - `DEFENCE_COUNSEL`, `VICTIM_COUNSEL`, `LEGAL_AID_COUNSEL`, `PUBLIC_PROSECUTOR` — Case-scoped and read-only. An advocate **files a vakalatnama through Lexx**; access exists only once the court accepts it and the court register records it (or via a legal-aid order). Counsel can open, verify and read the certificate of each exhibit served on them — nothing else.
+
+### Two roles this product deliberately does not have
+
+`MALKHANA_CUSTODIAN` and `REGISTRAR` were removed (ADR-040), and the reason is the same for both: **neither made a decision.** Each was an account the workflow had to wait for.
+
+- The custodian's real contribution was a rule — *the officer on a case must not keep that case's evidence* — and that rule is unchanged, now enforced against whoever would actually end up holding the article. The station store is still a place, every movement is still a two-scan ledgered handover, and the custody register is station-wide because an article in the store is kept by the station.
+- The registrar was a second court login standing between a judge's decision and its effect. It is where rehearsals stalled: an advocate filed a vakalatnama, the judge could see it and could not act on it, and the defence saw nothing.
+
+If asked, say it plainly: *we removed the two steps that added a login and no decision.*
 
 **Key architectural point to convey:** advocates get **no jurisdictional scope at all**. Their access is purely per-case, granted by a court-asserted fact.
 
@@ -91,7 +99,7 @@ Roles are **derived from external directories**, never assigned inside LEXX.
 
 ## 6. The compliance boundary — the most important section in this file
 
-- **AI triage produces ONLY:** a `Review Priority` of `HIGH | MEDIUM | LOW`, a list of indicators, a model name/version, and a fixed statutory disclaimer.
+- **AI triage produces ONLY:** a `Review Priority` of `CRITICAL | HIGH | MEDIUM | LOW`, a list of indicators, a model name/version, and a fixed statutory disclaimer.
 - **AI triage NEVER produces:** an authenticity verdict, a confidence score, a percentage, or the words `AUTHENTIC`, `MANIPULATED`, `VERIFIED`.
 - **Only an `FSL_EXAMINER` produces** `AUTHENTIC | MANIPULATED | INCONCLUSIVE`, and only after examining an exhibit referred to their laboratory.
 - **The disclaimer text, verbatim, always attached:**
@@ -109,7 +117,7 @@ Roles are **derived from external directories**, never assigned inside LEXX.
 
 - **Runtime & language**
   - Node.js **22.x** (requires ≥20.10), ES Modules throughout (`"type": "module"`)
-  - Vanilla JavaScript — no TypeScript, no frontend framework
+  - JavaScript, no TypeScript
 - **Backend**
   - **Express 4.22** — core API on port `5000`
   - **Mongoose 8** — ODM over MongoDB
@@ -124,9 +132,9 @@ Roles are **derived from external directories**, never assigned inside LEXX.
   - **qrcode** — custody label and certificate QR generation
   - **ethers 6** — blockchain interaction
 - **Frontend**
-  - **Vite** multi-page application, 8 HTML entry points
-  - Vanilla JS, no framework, no CDN dependencies (works offline)
-  - **Web Crypto API** — SHA-256 hashing and ECDSA P-256 signing in-browser
+  - **React 18** single-page app on **Vite 7**, **React Router 7**, **TanStack Query 5**, **Redux Toolkit 2**
+  - **Tailwind CSS 3** + shadcn/Radix components, GSAP for motion, `qrcode` for labels and certificate QRs; no CDN dependencies (works offline)
+  - **Web Crypto API** — SHA-256 hashing and ECDSA P-256 signing in-browser (evidence, FSL reports, vakalatnamas, certificate signatures)
   - **IndexedDB** — stores the non-extractable private key
 - **Blockchain**
   - **Solidity 0.8.24**, EVM target `paris`
@@ -134,7 +142,7 @@ Roles are **derived from external directories**, never assigned inside LEXX.
   - **OpenZeppelin Contracts v5** — `AccessControl`, `MerkleProof`
   - **Monad Testnet** — chain ID **10143**
 - **Testing**
-  - **Vitest 5** — 455 backend tests across unit / integration / authz / redteam
+  - **Vitest 5** — 525 backend tests across unit / integration / authz / redteam
   - **supertest** — HTTP-level integration testing
   - **mongodb-memory-server** — real `mongod` binary per test suite (not a mock)
   - **Hardhat/Mocha/Chai** — 36 contract tests
@@ -151,10 +159,13 @@ Roles are **derived from external directories**, never assigned inside LEXX.
 - **Deployment block:** 59571226 — **verified live on chain** (bytecode present, deploy transaction `status = 1`)
 - **What goes on chain:** a batch ID, a **Merkle root**, and the sequence range it covers. Nothing else.
 - **What NEVER goes on chain:** evidence, file contents, hashes of PII, names, case identifiers, AI triage output.
-- **Current anchoring state — do not misrepresent this:**
-  - `ANCHOR_ENABLED=false`, so the batcher runs in **`DRY_RUN`**: Merkle roots *are* computed, stored, and locally verifiable, but **no transaction is submitted** to the deployed contract.
-  - Correct phrasing: *"The anchoring contract is deployed and live on Monad Testnet; the batching pipeline is implemented and verified end-to-end, and runs in dry-run mode pending a funded signer key."*
-  - Incorrect phrasing: *"Evidence is anchored on the blockchain"* (present tense, as if transactions are flowing).
+- **When things go on chain:** every ledger write (upload, custody move, referral, report, vakalatnama ruling, disclosure step, order, certificate) is appended to the hash-chained ledger. Every `ANCHOR_INTERVAL_MS` (5 min), and once at the end of `npm run seed`, the new entries are batched into a Merkle tree and **one root** is submitted to `LexxAnchor.anchorBatch`. A batch is `CONFIRMED` only after its receipt is read back with `status === 1`.
+- **Current anchoring state — state it exactly:**
+  - The local `.env` runs with `ANCHOR_ENABLED=true` and a signer holding `ANCHOR_ROLE` (funded with testnet MON). Roots **are submitted and confirmed** on Monad Testnet — first live batches confirmed in blocks 61687401–61687421, and the contract's `verifyEntry` confirmed a ledger entry's Merkle proof. `.env.example` still defaults to `false` (DRY_RUN) for a fresh checkout without a funded key.
+  - Switching submission on also promotes earlier `DRY_RUN` batches to the chain, oldest first (ADR-033). Batch ids commit to their root, so a reset ledger never collides with batches already on chain (ADR-032).
+  - Correct phrasing: *"Merkle roots of the ledger are anchored on Monad Testnet every five minutes; each confirmed batch has a transaction anyone can open on the explorer."*
+  - Incorrect phrasing: *"Evidence is stored on the blockchain"* — only roots go on chain. If a deployment runs with `ANCHOR_ENABLED=false`, the verifier shows roots amber as "recorded locally, nothing submitted" and it must be described as dry-run.
+- **Outcomes are read from receipts.** Once a transaction is sent, an RPC error while waiting is settled from the transaction receipt; an unanswered batch stays `SUBMITTED` and nothing new is batched over it; one recorded `FAILED` despite a mined transaction is corrected on the next cycle (ADR-039 — found live: batch 27–28 was mined in block 61704167 but recorded `FAILED`).
 - **What anchoring proves:** that a set of ledger entries existed in exactly that form at that time.
 - **What anchoring does NOT prove:** that the entries are true, that evidence is authentic, or that nothing was omitted.
 - **Verified integration:** the backend's Merkle implementation is cross-checked against the deployed contract at **nine tree sizes** — every backend-generated proof verifies on-chain, and forged leaves are rejected on-chain (`contracts/scripts/cross-check-backend-merkle.js`).
@@ -164,14 +175,14 @@ Roles are **derived from external directories**, never assigned inside LEXX.
 ## 9. Architecture
 
 ```
-CLIENT (Vite, :5173) — 7 role views + public verifier
+CLIENT (React SPA on Vite, :5173) — role views + /scan + public verifier
   · SHA-256 hash + ECDSA P-256 sign in-browser, key non-extractable in IndexedDB
         │  JWT (15 min) + rotating refresh token
 LEXX CORE API (Express :5000, db lexx_core)
   · authenticate → resolveContext → authorize → audit
   · services/accessResolver.js  ← THE single policy point
   · modules: auth · case · evidence · custody · fsl · disclosure
-             certificate · ledger · audit · search · anchor
+             vakalatnama · certificate · ledger · audit · search · anchor
         │                    │                      │
    MongoDB            Object vault            Anchor service
    lexx_core          ./vault                 Merkle batcher →
@@ -182,7 +193,7 @@ EXTERNAL AUTHORITY DIRECTORIES (mock government systems, read-only to LEXX)
   POLICE :6001 (CCTNS)   COURT :6002 (eCourts)   LEGAL/FSL :6003 (BCI + FSL LIMS)
 ```
 
-- **Three authority directories** are **deliberate mocks** standing in for CCTNS, eCourts and FSL LIMS. They are separate services with separate databases, and **every route except one registrar endpoint is a GET, enforced by middleware** — LEXX has no write path into them at all.
+- **Three authority directories** are **deliberate mocks** standing in for CCTNS, eCourts and FSL LIMS. They are separate services with separate databases, and **every route is a GET, enforced by middleware, except two simulated court-registry acts** in the court directory. LEXX's only writes into any directory are relaying **the presiding judge's acceptance of a vakalatnama** (carrying the judge's own code, which the directory verifies against its judges *and* against the roster order placing them in that court today, before recording anything — ADR-030, ADR-040) and **registering a filed chargesheet** with the court the jurisdiction router chose, which allots the CNR (the directory refuses a court it does not hold — ADR-035). It cannot create identities, postings or rosters, and cannot choose a court the statute does not point at.
 - **Repository layout:**
   - `backend/` — core API (config, middleware, models, services, controllers, routes, tests)
   - `directories/` — the three authority services (`common/`, `police/`, `court/`, `legal/`)
@@ -221,14 +232,29 @@ Each maps to a problem-statement requirement. Full script in `docs/DEMO_SCRIPT.m
 - **Beat 1** — A fake authority identity (`UP-GZB-9999`) is rejected and the attempt is audited.
 - **Beat 2** — Case created from FIR; the jurisdiction router shows its reasoning on screen.
 - **Beat 3** — Evidence upload: hash and signature computed in-browser, verified server-side, receipt downloaded.
-- **Beat 4** — QR custody timeline; a deliberately broken chain reports structured gap findings.
+- **Beat 4** — Print a custody label (QR + seal particulars), scan it, hand the item over to a named receiver with a one-time code; a deliberately broken chain reports structured gap findings.
 - **Beat 5** — ★ **The winning beat.** Tamper the stored file from a terminal; click Verify; the **file light goes red while the ledger light stays green** — proving the file was touched, not the log.
 - **Beat 6** — AI triage shows *Review Priority: HIGH* with its disclaimer, never a verdict.
 - **Beat 7** — An FSL examiner sees only their own laboratory's referrals; files a signed opinion.
-- **Beat 8** — An advocate on record sees the served set; one not on record is **denied and logged live**.
-- **Beat 9** — One-click s.63 certificate → PDF → scan its QR → public verifier confirms it, with no login.
+- **Beat 8** — An advocate on record sees the served set; one not on record is **denied and logged live** — then files a vakalatnama through Lexx, the presiding judge accepts it, the court register records it, and the case file is shared with them, with their own watermark.
+- **Beat 9** — One-click s.63 certificate → PDF → scan its QR → public verifier confirms it, with no login. The officer's upload receipt is checked there too.
 - **Beat 10** — The audit feed shows the denial that just happened.
-- **Beat 11** — The Merkle anchor batch and its Monad Testnet record; root only.
+- **Beat 11** — The Merkle anchor batch and its **confirmed Monad Testnet transaction** on the explorer; root only.
+
+### Where to get what you paste (demo mode)
+
+| What | Where it appears in the app | In demo mode |
+|---|---|---|
+| Certificate verification link / token | QR on the certificate PDF; copy buttons on every certificate panel (officer exhibit, court Exhibits tab, counsel's served exhibit, lab Part B) | printed at the end of `npm run seed` (EX-…-001, and EX-…-002 awaiting the examiner's Part B); `node scripts/demo-lookup.js` |
+| A certificate PDF someone handed you | nothing to paste — drop the file on `/verify` ("Were you handed a certificate?"); its token is read from the file | Download PDF on any certificate panel |
+| A case or exhibit counsel is not entitled to | Counsel → Open by reference: CNR `UPGB010012342026` (as `UP/9876/2019`), exhibit `EX-01232026-003` (as `UP/1234/2015`) | — |
+| Upload receipt (ledger seq + entry hash) | receipt JSON downloaded at upload; "Check this receipt" link on the officer's exhibit panel | `node scripts/demo-lookup.js` prints ready `/verify?seq=…&entry=…` links |
+| Custody label | QR + text on the printed label; "Print label" / "Copy label text" on every custody register | `node scripts/demo-lookup.js` prints each label and its `/scan` link |
+| Handover code | shown once to the sender after "Start handover" (copy button + QR) | — (one-time, 5 minutes) |
+| Pack / exclusions / recipients | picked on screen ("Use this pack", tick boxes by exhibit code and advocate name) | — |
+| Watermark token (leak trace) | the recipient's watermark banner and every served page; the serve result | `node scripts/demo-lookup.js` |
+| Vakalatnama CNR | case's CNR on the court cause list | `UPGB010012342026` |
+| Anchor transactions | public verifier → "Anchoring history" | `node scripts/demo-lookup.js` prints explorer links |
 
 ---
 
@@ -263,7 +289,8 @@ Full plan in `docs/PRODUCTION_ROADMAP.md`. Five phases, seven workstreams, no cl
 - ❌ "Integrated with CCTNS / eCourts / FSL LIMS." → ✅ *"Integrates with three authority directory services that model CCTNS, eCourts and the FSL LIMS; the integration contract is designed so real systems can be substituted."*
 - ❌ "AI detects fake/forged evidence" or "AI verifies authenticity." → ✅ *"AI prioritises which exhibits a human examiner reviews first; only a notified laboratory determines authenticity."*
 - ❌ "Evidence is stored on the blockchain." → ✅ *"Only a Merkle root is written on chain; evidence never leaves encrypted off-chain storage."*
-- ❌ "Evidence is currently being anchored on-chain." → ✅ *"The anchoring contract is deployed and live on Monad Testnet; the pipeline runs in dry-run mode pending a funded signer key."*
+- ❌ "Evidence is being anchored on-chain." → ✅ *"Merkle roots of the ledger — never evidence — are anchored on Monad Testnet every five minutes."* (True of the local deployment with `ANCHOR_ENABLED=true`; for a deployment without a funded key, say it runs in dry-run.)
+- ❌ "Lexx assigns / approves lawyers." → ✅ *"An advocate files a vakalatnama through Lexx; the presiding judge accepts it and the court register records it; Lexx then mirrors that record as access."*
 - ❌ "Security audited" / "certified" / "compliant." → ✅ *"Adversarially tested with a 40-attack red-team suite; no independent third-party audit has been performed."*
 - ❌ "Production-deployed" / "live in the cloud." → ✅ *"Runs locally; deployment is a configuration change, not a rewrite."*
 - ❌ Any accuracy percentage for the AI (e.g. "95% accurate deepfake detection"). **No such figure exists or ever will** — the system deliberately never emits a percentage.
@@ -308,14 +335,19 @@ Verify before asserting. Key files:
 | Current triage behaviour | `backend/services/triage.js` |
 | Ledger hash chain + immutability | `backend/services/ledger.js`, `backend/models/Ledger.js` |
 | Cryptographic primitives | `backend/config/crypto.js` |
-| Browser hashing/signing | `frontend/lib/crypto.js` |
+| Browser hashing/signing | `frontend/src/lib/crypto.js` |
+| Vakalatnama e-filing (lawyer on record) | `backend/controllers/vakalatnama.js`, `frontend/src/features/vakalatnama/Vakalatnama.jsx` |
+| Custody labels, scan, hand-over | `backend/controllers/custody.js`, `frontend/src/features/custody/CustodyKit.jsx` |
+| Certificate panel (link, QR, signing) | `frontend/src/features/certificates/CertificatePanel.jsx` |
+| Public receipt check, anchor history | `backend/controllers/ledger.js`, `frontend/src/features/verify/VerifyPage.jsx` |
+| Every value to paste in a demo | `scripts/demo-lookup.js` |
 | Smart contract | `contracts/contracts/LexxAnchor.sol` |
 | Deployment record | `contracts/deployments/monad-testnet.json` |
-| All architectural decisions (21) | `docs/AGENT_DECISIONS.md` |
+| All architectural decisions (34) | `docs/AGENT_DECISIONS.md` |
 | Security findings (6) | `docs/SECURITY_FINDINGS.md` |
 | Honest limitations | `docs/PRODUCTION_READINESS.md` |
-| Full API reference (56 routes) | `docs/API.md` |
+| Full API reference (71 routes) | `docs/API.md` |
 | Demo script | `docs/DEMO_SCRIPT.md` |
 | Production plan | `docs/PRODUCTION_ROADMAP.md` |
 
-- **Commands to confirm status:** `npm test` (455 tests) · `npm run contracts:test` (36) · `npm run routes` (56) · `npm run health` (6 checks)
+- **Commands to confirm status:** `npm test` (525 tests) · `npm run contracts:test` (36) · `npm run routes` (71) · `npm run health` (6 checks)

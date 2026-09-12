@@ -1,1028 +1,982 @@
 /**
- * Court — judge, registrar, evidence custodian.
+ * The court.
  *
- *   Cause list  — the cases listed in the court this session is rostered to. The
- *                 roster is read from the court directory at sign-in; Lexx never
- *                 assigns a judge to a case and cannot.
- *   Ledger      — the case's hash-chained history, entry by entry. Nothing is ever
- *                 removed, so this is the whole record rather than a current state.
- *   Orders      — the judicial write path, and the reason there is no delete endpoint
- *                 anywhere in this system.
- *   Disclosure  — the registry rules on the exclusions the investigating officer
- *                 requested, then serves, minting one watermark per recipient so a
- *                 leaked copy points back to the person it was served on.
+ * ## The question this screen answers
  *
- * The case selected in the cause list is held in Redux rather than in each tab, so
- * switching tabs does not lose it and switching cases moves every tab at once.
+ * "What does this case need from me?"
+ *
+ * There were seven tabs here — cause list, exhibits, custody, ledger, orders,
+ * representation, disclosure — and the three acts that actually move a case forward
+ * were spread across four of them, behind a pack id that had to be pasted into a text
+ * field. A judge could not tell, from the screen, that an advocate was waiting to be
+ * taken on record.
+ *
+ * Now: the cause list is a list, the case is a panel, and everything the court can do
+ * to the case is on that panel, in the order it happens.
+ *
+ *   1. Take counsel on record      — a vakalatnama is waiting, or it is not
+ *   2. Share the case file         — one decision, composed, ruled and served
+ *   3. Close the case              — protected, and explicit about what it preserves
+ *
+ * ## What the court can see, and when
+ *
+ * Everything, immediately, whether or not a laboratory has reported. Nothing about
+ * the court's access to a case or its evidence is gated on a forensic verdict — and
+ * because that is a question anyone watching will ask, the exhibit list says so out
+ * loud rather than leaving it to be inferred from an empty column.
  */
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { toast } from 'sonner';
-import { Gavel, Hourglass, Link2, ListTree, Scale, Send, ShieldCheck, FileStack } from 'lucide-react';
+import {
+  Check, FileStack, Gavel, Link2, Loader2, Lock, Scale, Send, ShieldCheck, UserCheck, X,
+} from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
+import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
-import { Badge } from '@/components/ui/badge';
 import { Checkbox } from '@/components/ui/checkbox';
-import { Skeleton } from '@/components/ui/skeleton';
-import { Separator } from '@/components/ui/separator';
-import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
+  Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger,
+} from '@/components/ui/dialog';
 
 import {
-  Section,
-  KeyValue,
-  Hash,
-  PageHeader,
-  TableSkeleton,
-  EmptyState,
-} from '@/components/common/Primitives';
-import { Eyebrow, StatCard } from '@/components/common/Premium';
-import { Denial, Note } from '@/components/common/Verdicts';
+  Counter, CounterRow, DetailSkeleton, Disclosure, Empty, Facts, Digest, Panel, Row, Rows,
+  RowsSkeleton, SplitView, Workspace,
+} from '@/components/common/Shell';
+import { CaseLifecycle, StageBadge } from '@/components/common/Lifecycle';
+import { Denial, ForensicBadge, Note } from '@/components/common/Verdicts';
+import { ExhibitDialog, useExhibitDialog } from '@/features/evidence/ExhibitDialog';
+import { CustodyRegisterPanel } from '@/features/custody/CustodyKit';
 import {
-  useCases,
-  useLedger,
+  useCase, useCases, useCloseCase, useEvidence, useLedger, usePacksForCase, useRecordOrder,
+  useRepresentation, useRuleOnFiling, useShareCaseFile, useSyncRepresentation, useTraceWatermark,
   useVerifyChain,
-  useRecordOrder,
-  usePacksForCase,
-  useApprovePack,
-  useServePack,
 } from '@/hooks/queries';
-import { explain } from '@/lib/api';
 import { workingCaseSet, selectWorkingCaseId } from '@/features/ui/uiSlice';
-import { useReveal } from '@/hooks/useGsap';
-import { cn, humanise, fmtDate } from '@/lib/utils';
+import { explain } from '@/lib/api';
+import { api } from '@/lib/api';
+import { openBlob } from '@/lib/download';
+import { cn, fmtDate, humanise } from '@/lib/utils';
 
-/** Column headings read as labels over the data, not as a first row of it. */
-const HEADINGS = '[&_th]:text-xs [&_th]:uppercase [&_th]:tracking-wider hover:bg-transparent';
+// ====================================================== 1. counsel on record ====
 
 /**
- * The working case, marked by the accent on its leading edge. It is the one active
- * state on the cause list, and the accent is reserved for exactly that kind of thing.
+ * The lawyer-assignment workflow, which is now one screen and two buttons.
+ *
+ * An advocate files a vakalatnama; it arrives here as a pending filing with the
+ * document attached. The court reads the document and either takes them on record or
+ * refuses with a reason. Acceptance is written to the COURT REGISTER first — Lexx
+ * mirrors that record and never invents an advocate's authority — and only then does
+ * the case open to them.
  */
-const SELECTABLE_ROW =
-  'cursor-pointer data-[state=selected]:[box-shadow:inset_3px_0_0_0_hsl(var(--accent-from))]';
+function CounselPanel({ caseId, caseDoc }) {
+  const representation = useRepresentation(caseId);
+  const rule = useRuleOnFiling();
+  const sync = useSyncRepresentation();
+  const [rejecting, setRejecting] = useState(null);
+  const [note, setNote] = useState('');
 
-/** A verdict pill. Colour comes from the semantic tokens so dark mode follows. */
-function Verdict({ tone = 'neutral', children }) {
-  const styles = {
-    ok: 'border-ok/40 bg-ok-muted text-ok',
-    warn: 'border-warn/40 bg-warn-muted text-warn',
-    bad: 'border-bad/40 bg-bad-muted text-bad',
-    neutral: 'border-border bg-muted text-muted-foreground',
+  // `pending` on the response is a COUNT; the filings themselves are in `filings`.
+  const pending = (representation.data?.filings ?? []).filter((f) => f.status === 'PENDING');
+  const onRecord = representation.data?.onRecord ?? [];
+
+  const openDocument = async (filing) => {
+    try {
+      const blob = await api.vakalatnama.documentBlob(filing.id);
+      openBlob(blob, `vakalatnama-${filing.advocateAuthorityId}`);
+    } catch (err) {
+      toast.error('The document could not be opened', { description: err.message });
+    }
   };
-  return (
-    <Badge variant="outline" className={cn('rounded-full', styles[tone] ?? styles.neutral)}>
-      {children}
-    </Badge>
-  );
-}
 
-/** The case the whole workspace is pointed at, resolved against the cause list. */
-function useWorkingCase() {
-  const caseId = useSelector(selectWorkingCaseId);
-  const cases = useCases();
-  const workingCase =
-    (cases.data?.cases ?? []).find((c) => String(c._id) === String(caseId)) ?? null;
-  return { caseId, workingCase, cases };
-}
+  const decide = (filing, decision) =>
+    rule.mutate(
+      { id: filing.id, decision, note: decision === 'REJECT' ? note.trim() : undefined },
+      {
+        onSuccess: () => {
+          toast.success(
+            decision === 'ACCEPT'
+              ? `${filing.advocateName ?? filing.advocateAuthorityId} is on record`
+              : 'Filing refused'
+          );
+          setRejecting(null);
+          setNote('');
+        },
+        onError: (err) =>
+          toast.error('Not recorded', { description: explain(err.code, err.message) }),
+      }
+    );
 
-/** Shown by every tab that needs a case before it can say anything at all. */
-function NoCaseSelected({ children }) {
-  return (
-    <EmptyState title="No case selected" icon={Scale}>
-      {children ?? 'Open a case from the cause list. Every other tab follows that choice.'}
-    </EmptyState>
-  );
-}
-
-/** Splits a comma-separated list of identifiers typed by hand. */
-const splitIds = (value) =>
-  value
-    .split(',')
-    .map((s) => s.trim())
-    .filter(Boolean);
-
-// =============================================================== FIGURES ====
-
-/**
- * The figures above the tabs. Each is a count the page already fetches for a tab, so
- * nothing here is a second source of truth — and until a query has answered the card
- * shows a dash, because a 0 that means "not loaded yet" is indistinguishable from a
- * 0 that means "none", and the second is a finding.
- */
-function CourtFigures({ caseId, workingCase, cases }) {
-  const ledger = useLedger(caseId);
-  const packs = usePacksForCase(caseId);
-
-  const listed = cases.data?.cases ?? [];
-  const entries = ledger.data?.entries ?? [];
-  const packList = packs.data?.packs ?? [];
-  const awaiting = packList.filter((p) => p.unruledExclusionCount > 0).length;
-  const served = packList.filter((p) => p.status === 'SERVED').length;
-
-  const onCase = Boolean(caseId);
-  const caseCaption = workingCase
-    ? `On FIR ${workingCase.firNumber}.`
-    : 'Open a case from the cause list.';
-
-  return (
-    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-      <StatCard
-        className="will-reveal"
-        label="Cases listed"
-        value={cases.isSuccess ? listed.length : '—'}
-        icon={Scale}
-        tone="accent"
-        caption="In the court your roster entry puts you in today."
-      />
-      <StatCard
-        className="will-reveal"
-        label="Ledger entries"
-        value={onCase && ledger.isSuccess ? entries.length : '—'}
-        icon={ListTree}
-        caption={caseCaption}
-        delay={0.1}
-      />
-      <StatCard
-        className="will-reveal"
-        label="Awaiting a ruling"
-        value={onCase && packs.isSuccess ? awaiting : '—'}
-        icon={Hourglass}
-        tone={awaiting > 0 ? 'warn' : undefined}
-        caption="Packs with an exclusion the registry has not decided. A pending exclusion blocks service."
-        delay={0.2}
-      />
-      <StatCard
-        className="will-reveal"
-        label="Packs served"
-        value={onCase && packs.isSuccess ? served : '—'}
-        icon={Send}
-        tone="ok"
-        caption="One watermark per recipient, each recorded in the ledger at the moment of service."
-        delay={0.3}
-      />
-    </div>
-  );
-}
-
-// ========================================================== 1. CAUSE LIST ====
-
-function CauseListTab() {
-  const dispatch = useDispatch();
-  const selectedId = useSelector(selectWorkingCaseId);
-  const query = useCases();
-  const cases = query.data?.cases ?? [];
-
-  return (
-    <Section
-      title="Cases listed in your court"
-      description="You see the cases listed in the court your roster entry puts you in today. That roster is read from the court directory at sign-in, and Lexx cannot write to it."
-    >
-      <Note>
-        Opening a case here points the ledger, orders and disclosure tabs at it. A case with
-        no CNR has not been committed to a court yet, which is why it may be readable in one
-        role&rsquo;s view and absent from another&rsquo;s.
-      </Note>
-
-      {query.isPending && <TableSkeleton rows={5} cols={6} />}
-      {query.isError && <Denial error={query.error} heading="Cause list not readable" />}
-
-      {!query.isPending && !query.isError && cases.length === 0 && (
-        <EmptyState title="No case is listed in your court" icon={Scale}>
-          A case reaches a court when the chargesheet is filed and a court is recorded
-          against it. Until then there is nothing here — which is a statement about listing,
-          not about whether cases exist.
-        </EmptyState>
-      )}
-
-      {!query.isPending && !query.isError && cases.length > 0 && (
-        <Table>
-          <TableHeader>
-            <TableRow className={HEADINGS}>
-              <TableHead>FIR</TableHead>
-              <TableHead>Title</TableHead>
-              <TableHead>Station</TableHead>
-              <TableHead>Stage</TableHead>
-              <TableHead>Sensitivity</TableHead>
-              <TableHead>Maximum punishment</TableHead>
-              <TableHead>CNR</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {cases.map((c) => {
-              const id = String(c._id);
-              return (
-                <TableRow
-                  key={id}
-                  data-state={id === String(selectedId) ? 'selected' : undefined}
-                  className={SELECTABLE_ROW}
-                  onClick={() => dispatch(workingCaseSet(id))}
-                >
-                  <TableCell>
-                    <code className="font-mono text-xs">{c.firNumber}</code>
-                  </TableCell>
-                  <TableCell className="max-w-[18rem] font-medium">{c.title ?? '—'}</TableCell>
-                  <TableCell>
-                    <code className="font-mono text-xs">{c.stationCode ?? '—'}</code>
-                  </TableCell>
-                  <TableCell>
-                    <Verdict>{humanise(c.stage)}</Verdict>
-                  </TableCell>
-                  <TableCell>
-                    <Verdict tone={c.sensitivityClass === 'ROUTINE' ? 'neutral' : 'warn'}>
-                      {humanise(c.sensitivityClass)}
-                    </Verdict>
-                  </TableCell>
-                  <TableCell className="tabular-nums">
-                    {c.maxPunishmentYears ? `${c.maxPunishmentYears} years` : '—'}
-                  </TableCell>
-                  <TableCell>
-                    <code className="font-mono text-xs">
-                      {c.cnrNumber ?? 'not committed'}
-                    </code>
-                  </TableCell>
-                </TableRow>
-              );
-            })}
-          </TableBody>
-        </Table>
-      )}
-    </Section>
-  );
-}
-
-// ============================================================== 2. LEDGER ====
-
-function ChainVerification() {
-  const verify = useVerifyChain();
-
-  const onVerify = () =>
-    verify.mutate(undefined, {
-      onSuccess: (result) =>
-        result.intact
-          ? toast.success('Chain intact', {
-              description: `${result.entriesChecked} entries recomputed.`,
-            })
-          : toast.error('Chain broken', {
-              description: `First break at sequence ${result.brokenAtSeq}.`,
-            }),
-      onError: (error) =>
-        toast.error('Chain not verified', { description: explain(error.code, error.message) }),
-    });
+  if (representation.isPending) return <RowsSkeleton rows={2} />;
+  if (representation.isError) {
+    return <Denial error={representation.error} heading="Representation not readable" />;
+  }
 
   return (
     <div className="space-y-4">
-      <Button onClick={onVerify} disabled={verify.isPending}>
-        <ShieldCheck className="size-4" />
-        {verify.isPending ? 'Recomputing every entry…' : 'Verify the chain'}
-      </Button>
+      {pending.length > 0 && (
+        <div className="space-y-2">
+          <p className="label-xs">Waiting for you</p>
+          {pending.map((f) => (
+            <div key={f.id} className="space-y-3 rounded-lg border border-warn/35 bg-warn-muted/40 p-3.5">
+              <div className="flex flex-wrap items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <p className="text-sm font-medium">{f.advocateName ?? f.advocateAuthorityId}</p>
+                  <p className="text-[12px] text-muted-foreground">
+                    <code className="font-mono">{f.advocateAuthorityId}</code> · appearing for the{' '}
+                    {humanise(f.appearingFor).toLowerCase()} ({f.partyName}) · filed{' '}
+                    {fmtDate(f.filedAt)}
+                  </p>
+                </div>
+                <Button size="sm" variant="outline" onClick={() => openDocument(f)}>
+                  Read the vakalatnama
+                </Button>
+              </div>
 
-      {verify.isError && <Denial error={verify.error} heading="Chain not verified" />}
+              {rejecting === f.id ? (
+                <div className="space-y-2">
+                  <Label htmlFor={`note-${f.id}`}>Why it is refused</Label>
+                  <Textarea
+                    id={`note-${f.id}`}
+                    rows={2}
+                    value={note}
+                    onChange={(e) => setNote(e.target.value)}
+                    placeholder="The document is not executed by the party it names."
+                  />
+                  <p className="text-[12px] text-muted-foreground">
+                    An advocate is entitled to know why they were not taken on record, so a
+                    refusal carries a reason and both go into the ledger.
+                  </p>
+                  <div className="flex gap-2">
+                    <Button size="sm" variant="ghost" onClick={() => setRejecting(null)}>
+                      Cancel
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="destructive"
+                      disabled={rule.isPending || note.trim().length < 3}
+                      onClick={() => decide(f, 'REJECT')}
+                    >
+                      Refuse the filing
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  <Button size="sm" disabled={rule.isPending} onClick={() => decide(f, 'ACCEPT')}>
+                    {rule.isPending ? (
+                      <Loader2 className="size-3.5 animate-spin" />
+                    ) : (
+                      <UserCheck className="size-3.5" />
+                    )}
+                    Take on record
+                  </Button>
+                  <Button size="sm" variant="ghost" onClick={() => setRejecting(f.id)}>
+                    <X className="size-3.5" />
+                    Refuse
+                  </Button>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
 
-      {verify.data && (
-        <>
-          <KeyValue
-            rows={[
-              [
-                'Result',
-                <Verdict key="i" tone={verify.data.intact ? 'ok' : 'bad'}>
-                  {verify.data.intact ? 'Intact' : 'Broken'}
-                </Verdict>,
-              ],
-              [
-                'Entries checked',
-                <span key="c" className="tabular-nums">
-                  {verify.data.entriesChecked ?? 0}
-                </span>,
-              ],
-              [
-                'Broken at sequence',
-                verify.data.brokenAtSeq === null || verify.data.brokenAtSeq === undefined ? (
-                  <span key="b" className="text-muted-foreground">
-                    no break found
-                  </span>
-                ) : (
-                  <span key="b" className="tabular-nums text-bad">
-                    {verify.data.brokenAtSeq}
-                  </span>
-                ),
-              ],
-              ['Reason', verify.data.reason ? humanise(verify.data.reason) : '—'],
-              ['Verified at', fmtDate(verify.data.verifiedAt)],
-            ]}
-          />
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            Verification recomputes each entry hash from its own contents and the hash before
-            it. It is a statement about the chain the server holds, and it is scoped: it says
-            whether the chain is intact and where it broke, never the contents of entries you
-            are not entitled to read.
+      {onRecord.length > 0 ? (
+        <div className="space-y-2">
+          <p className="label-xs">On record</p>
+          <ul className="divide-y rounded-lg border">
+            {onRecord.map((g) => (
+              <li key={g.grantId} className="flex items-center justify-between gap-3 px-3.5 py-2.5">
+                <div className="min-w-0">
+                  <p className="truncate text-[13px] font-medium">{g.name ?? g.authorityId}</p>
+                  <p className="truncate text-[12px] text-muted-foreground">
+                    {humanise(g.role)} · {humanise(g.grantBasis)}
+                  </p>
+                </div>
+                <Check aria-hidden className="size-4 shrink-0 text-ok" />
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : (
+        pending.length === 0 && (
+          <Empty title="Nobody is on record yet" icon={UserCheck}>
+            An advocate comes on record by filing a vakalatnama in this case. Until one does,
+            there is nobody the case file can be shared with.
+          </Empty>
+        )
+      )}
+
+      <Disclosure
+        label="Check the court register"
+        hint="Legal-aid orders and appearances filed outside Lexx are mirrored from the court directory."
+      >
+        <p className="text-[13px] leading-relaxed text-muted-foreground">
+          Lexx never grants a lawyer access on its own authority. This re-reads the court
+          directory and mirrors what it says — an accepted vakalatnama, or a BNSS s.341 legal
+          aid order — adding grants the register shows and revoking those it no longer does.
+        </p>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={sync.isPending}
+          onClick={() =>
+            sync.mutate(caseId, {
+              onSuccess: (r) =>
+                toast.success('Register checked', {
+                  description: `${r.added?.length ?? 0} added, ${r.revoked?.length ?? 0} revoked.`,
+                }),
+              onError: (err) => toast.error(explain(err.code, err.message)),
+            })
+          }
+        >
+          {sync.isPending && <Loader2 className="size-3.5 animate-spin" />}
+          Check the register now
+        </Button>
+        {sync.isError && <Denial error={sync.error} heading="Register not read" />}
+        {caseDoc?.cnrNumber && (
+          <p className="text-[12px] text-muted-foreground">
+            CNR <code className="font-mono">{caseDoc.cnrNumber}</code>
           </p>
-        </>
+        )}
+      </Disclosure>
+    </div>
+  );
+}
+
+// ========================================================= 2. the case file ====
+
+/**
+ * Sharing the case file: one decision by the court that holds it.
+ *
+ * The set is COMPUTED — every exhibit on the case, minus anything the court withholds
+ * with a ground on the record. Withholding is the exception and lives behind a
+ * disclosure; sharing everything takes no input at all.
+ */
+function ShareCaseFile({ caseId, exhibits, counselCount, disclosure }) {
+  const share = useShareCaseFile();
+  const [open, setOpen] = useState(false);
+  const [withheld, setWithheld] = useState({});
+  const [reason, setReason] = useState('');
+  const [result, setResult] = useState(null);
+
+  const chosen = Object.keys(withheld).filter((k) => withheld[k]);
+  const reasonTooShort = chosen.length > 0 && reason.trim().length < 10;
+  const alreadyShared = disclosure?.status === 'SERVED';
+
+  const onShare = () =>
+    share.mutate(
+      {
+        caseId,
+        payload: {
+          withheldItems: chosen.map((itemId) => ({ itemId, reason: reason.trim() })),
+        },
+      },
+      {
+        onSuccess: (r) => {
+          setResult(r);
+          toast.success('Case file shared', {
+            description: `${r.servedNow?.length ?? 0} recipient(s), each with their own watermark.`,
+          });
+        },
+        onError: (err) =>
+          toast.error('Not shared', { description: explain(err.code, err.message) }),
+      }
+    );
+
+  if (alreadyShared) {
+    return (
+      <div className="space-y-3">
+        <Note>
+          The case file was shared on {fmtDate(disclosure.servedOn)}. Each recipient&rsquo;s copy
+          carries its own watermark, so a leaked page points back to the person it was served
+          on. Changing what is in the file needs a fresh order.
+        </Note>
+      </div>
+    );
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button size="sm" disabled={counselCount === 0}>
+          <Send className="size-4" />
+          Share the case file
+        </Button>
+      </DialogTrigger>
+
+      <DialogContent className="max-h-[88vh] max-w-lg overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Share the case file with counsel</DialogTitle>
+          <DialogDescription>
+            Every exhibit on this case goes to the {counselCount} advocate
+            {counselCount === 1 ? '' : 's'} on record, each with their own watermark. This is
+            composed, ruled on and served in one act, and all three are written to the ledger.
+          </DialogDescription>
+        </DialogHeader>
+
+        {result ? (
+          <div className="space-y-3">
+            <Note>
+              Served. The fourteen-day BNSS s.230 clock stops for each recipient when they
+              acknowledge receipt, not when the file leaves the court.
+            </Note>
+            <ul className="space-y-2">
+              {(result.servedNow ?? []).map((r) => (
+                <li key={r.userId} className="rounded-lg border p-3">
+                  <p className="font-mono text-[12px]">{r.authorityId ?? r.userId}</p>
+                  <p className="mt-0.5 text-[12px] text-muted-foreground">{r.watermarkLabel}</p>
+                  <Digest value={r.watermarkToken} className="mt-1.5" />
+                </li>
+              ))}
+            </ul>
+            <Button className="w-full" onClick={() => setOpen(false)}>
+              Done
+            </Button>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <Disclosure
+              label="Withhold an exhibit"
+              hint="The exception. Anything ticked here is kept from the defence, on the ground you give."
+            >
+              <div className="space-y-1.5">
+                {exhibits.map((e) => (
+                  <label
+                    key={e._id}
+                    htmlFor={`w-${e._id}`}
+                    className="flex cursor-pointer items-start gap-3 rounded-lg border p-2.5 transition-colors hover:bg-muted/50 has-[[data-state=checked]]:border-warn/40 has-[[data-state=checked]]:bg-warn-muted/40"
+                  >
+                    <Checkbox
+                      id={`w-${e._id}`}
+                      className="mt-0.5"
+                      checked={Boolean(withheld[e._id])}
+                      onCheckedChange={(v) => setWithheld((x) => ({ ...x, [e._id]: v === true }))}
+                    />
+                    <span className="min-w-0">
+                      <span className="block text-[13px] font-medium">{e.title}</span>
+                      <span className="font-mono text-[11px] text-muted-foreground">
+                        {e.exhibitCode}
+                      </span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+
+              <div className="space-y-1.5">
+                <Label htmlFor="withhold-reason">Ground for withholding</Label>
+                <Textarea
+                  id="withhold-reason"
+                  rows={2}
+                  value={reason}
+                  onChange={(e) => setReason(e.target.value)}
+                  placeholder="Identifies a protected witness; withheld pending an order under BNSS s.398."
+                />
+                <p
+                  className={cn(
+                    'text-[12px]',
+                    reasonTooShort ? 'text-warn' : 'text-muted-foreground'
+                  )}
+                >
+                  Recorded against each withheld exhibit and written to the ledger, so what was
+                  kept back — and why — can be revisited.
+                </p>
+              </div>
+            </Disclosure>
+
+            {share.isError && <Denial error={share.error} heading="Not shared" />}
+
+            <Button
+              className="w-full"
+              disabled={share.isPending || reasonTooShort}
+              onClick={onShare}
+            >
+              {share.isPending ? <Loader2 className="size-4 animate-spin" /> : <Send className="size-4" />}
+              Share {exhibits.length - chosen.length} of {exhibits.length} exhibit
+              {exhibits.length === 1 ? '' : 's'}
+            </Button>
+          </div>
+        )}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ============================================================ 3. closing it ====
+
+/**
+ * Closing the case.
+ *
+ * Protected by a reason and a typed confirmation, because it is irreversible — and
+ * explicit about what it does NOT do, because "close" is a word that reads as
+ * "delete" and here it means very nearly the opposite.
+ */
+function CloseCase({ caseId, caseDoc }) {
+  const close = useCloseCase();
+  const [open, setOpen] = useState(false);
+  const [reason, setReason] = useState('');
+  const [confirm, setConfirm] = useState('');
+
+  const closed = caseDoc?.stage === 'CLOSED' || caseDoc?.stage === 'DISPOSED';
+  if (closed || !caseDoc?.cnrNumber) return null;
+
+  return (
+    <Dialog open={open} onOpenChange={setOpen}>
+      <DialogTrigger asChild>
+        <Button size="sm" variant="outline">
+          <Lock className="size-4" />
+          Close the case
+        </Button>
+      </DialogTrigger>
+
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Close FIR {caseDoc.firNumber}</DialogTitle>
+          <DialogDescription>
+            The case moves to Closed and stops accepting anything further, from every role
+            including this court.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          <Note>
+            <span className="font-medium text-foreground">Nothing is deleted.</span> Every
+            exhibit, custody record, forensic opinion, certificate, ledger entry and anchored
+            root stays exactly where it is and stays readable by everyone who can read it
+            today. Closing stops the record; it does not remove it.
+          </Note>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="close-reason">Why the case is being closed</Label>
+            <Textarea
+              id="close-reason"
+              rows={2}
+              value={reason}
+              onChange={(e) => setReason(e.target.value)}
+              placeholder="Judgment pronounced; the accused is convicted under BNS s.103(1)."
+            />
+            <p className="text-[12px] text-muted-foreground">
+              Recorded in the ledger with your authority identifier and the court.
+            </p>
+          </div>
+
+          <div className="space-y-1.5">
+            <Label htmlFor="close-confirm">
+              Type <span className="font-mono">CLOSE</span> to confirm
+            </Label>
+            <Input
+              id="close-confirm"
+              value={confirm}
+              onChange={(e) => setConfirm(e.target.value)}
+              autoComplete="off"
+            />
+          </div>
+
+          {close.isError && <Denial error={close.error} heading="Case not closed" />}
+
+          <div className="flex gap-2">
+            <Button variant="ghost" className="flex-1" onClick={() => setOpen(false)}>
+              Cancel
+            </Button>
+            <Button
+              className="flex-1"
+              disabled={close.isPending || confirm !== 'CLOSE' || reason.trim().length < 3}
+              onClick={() =>
+                close.mutate(
+                  { caseId, reason: reason.trim() },
+                  {
+                    onSuccess: () => {
+                      toast.success('Case closed', {
+                        description: 'The whole record is preserved and stays readable.',
+                      });
+                      setOpen(false);
+                      setConfirm('');
+                      setReason('');
+                    },
+                    onError: (err) =>
+                      toast.error('Not closed', { description: explain(err.code, err.message) }),
+                  }
+                )
+              }
+            >
+              {close.isPending && <Loader2 className="size-4 animate-spin" />}
+              Close the case
+            </Button>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+// ================================================================== orders ====
+
+function RecordOrder({ caseId }) {
+  const record = useRecordOrder();
+  const [orderType, setOrderType] = useState('');
+  const [text, setText] = useState('');
+
+  return (
+    <form
+      className="space-y-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        record.mutate(
+          { caseId, payload: { orderType: orderType.trim(), text: text.trim() } },
+          {
+            onSuccess: (r) => {
+              toast.success('Order recorded', { description: `Ledger sequence ${r.ledgerSeq}.` });
+              setOrderType('');
+              setText('');
+            },
+            onError: (err) => toast.error(explain(err.code, err.message)),
+          }
+        );
+      }}
+    >
+      <p className="text-[13px] leading-relaxed text-muted-foreground">
+        An order is appended to the case ledger under your authority identifier, and can never
+        be edited or withdrawn — only followed by another order. That is why there is no delete
+        button anywhere in this system: where another design would remove a record, this one
+        records an order and changes a status.
+      </p>
+      <div className="space-y-1.5">
+        <Label htmlFor="order-type">Order type</Label>
+        <Input
+          id="order-type"
+          value={orderType}
+          onChange={(e) => setOrderType(e.target.value)}
+          placeholder="COMMITTAL / EXHIBIT_MARKED / DISCLOSURE_DIRECTION"
+          required
+        />
+      </div>
+      <div className="space-y-1.5">
+        <Label htmlFor="order-text">The order</Label>
+        <Textarea
+          id="order-text"
+          rows={4}
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="In the words it is to be recorded in."
+          required
+        />
+      </div>
+      <Button type="submit" size="sm" disabled={record.isPending || !orderType.trim() || !text.trim()}>
+        {record.isPending ? <Loader2 className="size-4 animate-spin" /> : <Gavel className="size-4" />}
+        Record the order
+      </Button>
+      {record.isError && <Denial error={record.error} heading="Order not recorded" />}
+      {record.data && (
+        <Facts
+          dense
+          rows={[
+            ['Ledger sequence', <span key="s" className="tabular">{record.data.ledgerSeq}</span>],
+            ['Entry hash', <Digest key="h" value={record.data.entryHash} />],
+          ]}
+        />
+      )}
+    </form>
+  );
+}
+
+// ================================================================== ledger ====
+
+function LedgerTimeline({ caseId }) {
+  const ledger = useLedger(caseId);
+  const verify = useVerifyChain();
+  const entries = ledger.data?.entries ?? [];
+  const latest = entries.length ? Math.max(...entries.map((e) => e.seq)) : null;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center gap-3">
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={verify.isPending}
+          onClick={() =>
+            verify.mutate(undefined, {
+              onSuccess: (r) =>
+                r.intact
+                  ? toast.success('Chain intact', {
+                      description: `${r.entriesChecked} entries recomputed.`,
+                    })
+                  : toast.error('Chain broken', {
+                      description: `First break at sequence ${r.brokenAtSeq}.`,
+                    }),
+              onError: (err) => toast.error(explain(err.code, err.message)),
+            })
+          }
+        >
+          {verify.isPending ? <Loader2 className="size-3.5 animate-spin" /> : <ShieldCheck className="size-3.5" />}
+          Verify the chain
+        </Button>
+        {verify.data && (
+          <Badge
+            variant="outline"
+            className={cn(
+              'rounded-full text-[11px]',
+              verify.data.intact
+                ? 'border-ok/35 bg-ok-muted text-ok'
+                : 'border-bad/35 bg-bad-muted text-bad'
+            )}
+          >
+            {verify.data.intact
+              ? `Intact · ${verify.data.entriesChecked} entries`
+              : `Broken at ${verify.data.brokenAtSeq}`}
+          </Badge>
+        )}
+      </div>
+
+      {ledger.isPending && <RowsSkeleton rows={3} />}
+      {ledger.isError && <Denial error={ledger.error} heading="Ledger not readable" />}
+      {ledger.isSuccess && entries.length === 0 && (
+        <Empty title="No entries against this case" icon={Link2} />
+      )}
+
+      {entries.length > 0 && (
+        <ol className="border-l-2 pl-5">
+          {entries.map((entry) => {
+            const broken = entry.eventType === 'INTEGRITY_EXCEPTION';
+            return (
+              <li key={entry.seq} className="relative pb-5 last:pb-0">
+                <span
+                  aria-hidden
+                  className={cn(
+                    'absolute left-[calc(-1.25rem_-_5px)] top-1.5 size-2 rounded-full ring-4 ring-card',
+                    broken ? 'bg-bad' : entry.seq === latest ? 'bg-ring' : 'bg-border'
+                  )}
+                />
+                <p className={cn('text-[13px] font-medium', broken && 'text-bad')}>
+                  {humanise(entry.eventType)}
+                </p>
+                <p className="mt-0.5 text-[12px] text-muted-foreground">
+                  <span className="font-mono tabular">seq {entry.seq}</span> ·{' '}
+                  {fmtDate(entry.occurredAt)} · {humanise(entry.actorRole) || '—'}
+                  {entry.payload?.exhibitCode ? ` · ${entry.payload.exhibitCode}` : ''}
+                </p>
+                <p className="mt-1 text-[12px] text-muted-foreground">
+                  {entry.anchorBatchId
+                    ? `In anchor batch ${entry.anchorBatchId}`
+                    : 'Not yet batched'}
+                </p>
+              </li>
+            );
+          })}
+        </ol>
       )}
     </div>
   );
 }
 
-/**
- * The ledger as a timeline: one rail, one dot per entry, the most recent lit. "Most
- * recent" is the highest sequence number rather than the last item, so the marker is
- * right whichever order the server chose to list them in.
- */
-function LedgerTimeline({ entries }) {
-  const latestSeq = Math.max(...entries.map((e) => e.seq));
+// ================================================================ the case ====
 
-  return (
-    <ol className="border-l-2 border-border pl-6">
-      {entries.map((entry) => {
-        const latest = entry.seq === latestSeq;
-        const broken = entry.eventType === 'INTEGRITY_EXCEPTION';
-        return (
-          <li key={entry.seq} className="relative pb-6 last:pb-0">
-            <span
-              aria-hidden
-              className={cn(
-                'absolute top-1.5 size-2.5 rounded-full ring-4 ring-card left-[calc(-1.5rem_-_6px)]',
-                latest ? 'bg-accent-from' : 'bg-border',
-                // An integrity exception keeps its warning colour whatever its position
-                // on the rail. It is the one entry a judge must not scroll past.
-                broken && 'bg-bad'
-              )}
-            />
-            <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
-              <p className={cn('text-sm font-medium', broken && 'text-bad')}>
-                {humanise(entry.eventType)}
-              </p>
-              {latest && (
-                <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-                  Most recent
-                </span>
-              )}
-            </div>
-            <p className="mt-0.5 text-xs text-muted-foreground">
-              <span className="font-mono tabular">seq {entry.seq}</span> ·{' '}
-              {fmtDate(entry.occurredAt)} · {humanise(entry.actorRole) || '—'}
-            </p>
-            {entry.payload?.exhibitCode && (
-              <p className="mt-1 text-xs text-muted-foreground">
-                Exhibit <span className="font-mono">{entry.payload.exhibitCode}</span>
-              </p>
-            )}
-            {entry.payload?.orderType && (
-              <p className="mt-1 text-xs text-muted-foreground">
-                Order: {entry.payload.orderType}
-              </p>
-            )}
-            <div className="mt-1.5">
-              <Hash value={entry.entryHash} label="Entry hash" />
-            </div>
-            {/* "In anchor batch", never "anchored in batch". The entry carries the
-                id of the batch it was gathered into — it does not carry whether that
-                batch was ever submitted to a chain, and only the anchoring record can
-                say that. */}
-            <p className="mt-1 text-xs text-muted-foreground">
-              {entry.anchorBatchId
-                ? `In anchor batch ${entry.anchorBatchId}`
-                : 'Not yet batched'}
-            </p>
-          </li>
-        );
-      })}
-    </ol>
-  );
-}
-
-function LedgerTab() {
-  const { caseId, workingCase } = useWorkingCase();
-  const query = useLedger(caseId);
-  const entries = query.data?.entries ?? [];
-
-  return (
-    <div className="grid items-start gap-6 xl:grid-cols-[1.6fr_1fr]">
-      <Section
-        title={workingCase ? `Ledger — FIR ${workingCase.firNumber}` : 'Ledger'}
-        description="Every entry carries the hash of the one before it. There is no update and no delete code path against this collection, so what you are reading is the whole history rather than a state somebody arrived at."
-      >
-        {!caseId && <NoCaseSelected />}
-
-        {caseId && query.isPending && <Skeleton className="h-72 w-full" />}
-        {caseId && query.isError && <Denial error={query.error} heading="Ledger not readable" />}
-
-        {caseId && !query.isPending && !query.isError && entries.length === 0 && (
-          <EmptyState title="No entries recorded against this case" icon={Link2}>
-            The ledger is written by the acts the system records — a seizure, an upload, a
-            referral, an order. A case with none has had none.
-          </EmptyState>
-        )}
-
-        {caseId && entries.length > 0 && <LedgerTimeline entries={entries} />}
-      </Section>
-
-      <Section
-        title="Verify the chain"
-        description="Recomputes the hash chain end to end. A tampered or missing entry shows up as the sequence number where the recomputed hash stops matching the recorded one."
-      >
-        <ChainVerification />
-      </Section>
-    </div>
-  );
-}
-
-// ============================================================== 3. ORDERS ====
-
-function OrdersTab() {
-  const { caseId, workingCase } = useWorkingCase();
-  const record = useRecordOrder();
-
-  const [orderType, setOrderType] = useState('');
-  const [text, setText] = useState('');
-  const [effectiveOn, setEffectiveOn] = useState('');
-
-  const onSubmit = (e) => {
-    e.preventDefault();
-    if (!caseId) return;
-
-    const payload = { orderType: orderType.trim(), text: text.trim() };
-    // A date typed here is the court's asserted date and travels as evidence. The
-    // ledger's own sequence and timestamps are the server's, and a client-asserted
-    // time is never chain input.
-    if (effectiveOn) payload.effectiveOn = new Date(effectiveOn).toISOString();
-
-    record.mutate(
-      { caseId, payload },
-      {
-        onSuccess: (result) => {
-          toast.success('Order recorded in the ledger', {
-            description: `Sequence ${result.ledgerSeq}.`,
-          });
-          setOrderType('');
-          setText('');
-          setEffectiveOn('');
-        },
-        onError: (error) =>
-          toast.error('Order not recorded', { description: explain(error.code, error.message) }),
-      }
-    );
-  };
-
-  return (
-    <div className="grid items-start gap-6 xl:grid-cols-[1.4fr_1fr]">
-      <Section
-        title={workingCase ? `Judicial order — FIR ${workingCase.firNumber}` : 'Judicial order'}
-        description="The order is appended to the case ledger under the authority identifier of whoever entered it, and it can never be edited or withdrawn — only followed by another order."
-      >
-        {!caseId ? (
-          <NoCaseSelected>
-            An order names one case. Open it in the cause list first.
-          </NoCaseSelected>
-        ) : (
-          <form onSubmit={onSubmit} className="space-y-4">
-            <div className="space-y-2">
-              <Label htmlFor="order-type">Order type</Label>
-              <Input
-                id="order-type"
-                value={orderType}
-                onChange={(e) => setOrderType(e.target.value)}
-                placeholder="COMMITTAL / EXHIBIT_MARKED / DISCLOSURE_DIRECTION"
-                required
-              />
-              <p className="text-xs text-muted-foreground">
-                A short classifier for the register. The order itself is the text below.
-              </p>
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="order-text">Order</Label>
-              <Textarea
-                id="order-text"
-                rows={6}
-                value={text}
-                onChange={(e) => setText(e.target.value)}
-                placeholder="The order, in the words it is to be recorded in."
-                required
-              />
-            </div>
-
-            <div className="space-y-2">
-              <Label htmlFor="effective-on">Effective on</Label>
-              <Input
-                id="effective-on"
-                type="datetime-local"
-                value={effectiveOn}
-                onChange={(e) => setEffectiveOn(e.target.value)}
-              />
-              <p className="text-xs text-muted-foreground">
-                Recorded as the court&rsquo;s asserted date. The ledger&rsquo;s own sequence
-                and timestamps are the server&rsquo;s, and a time asserted by a browser is
-                never chain input.
-              </p>
-            </div>
-
-            <Button type="submit" disabled={record.isPending || !orderType.trim() || !text.trim()}>
-              <Gavel className="size-4" />
-              {record.isPending ? 'Recording…' : 'Record the order'}
-            </Button>
-
-            {record.isError && <Denial error={record.error} heading="Order not recorded" />}
-
-            {record.data && (
-              <KeyValue
-                rows={[
-                  [
-                    'Ledger sequence',
-                    <span key="s" className="tabular-nums">
-                      {record.data.ledgerSeq}
-                    </span>,
-                  ],
-                  ['Entry hash', <Hash key="h" value={record.data.entryHash} />],
-                ]}
-              />
-            )}
-          </form>
-        )}
-      </Section>
-
-      <Section
-        title="Why there is no delete button"
-        description="Standing note. It applies to this form and to every other write path in the system."
-      >
-        <span className="grid size-10 place-items-center rounded-lg bg-accent-gradient-soft text-accent-from">
-          <Gavel className="size-5" />
-        </span>
-        <Note>
-          There is no delete endpoint anywhere in this system — not for a case, an exhibit, a
-          custody item, a disclosure pack or a ledger entry. Where another design would remove
-          a record, this one records an order and changes a status, signed by whoever ordered
-          it. An exhibit withdrawn from the trial is still in the register, marked withdrawn,
-          with the order that withdrew it beside it.
-        </Note>
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          That is what makes the ledger worth verifying. A hash chain over records that can
-          quietly disappear proves nothing about the ones that are gone.
-        </p>
-      </Section>
-    </div>
-  );
-}
-
-// ========================================================== 4. DISCLOSURE ====
-
-function PackDiscovery({ caseId, onUsePack }) {
-  const query = usePacksForCase(caseId);
-  const packs = query.data?.packs ?? [];
+function CaseDetail({ caseId }) {
+  const query = useCase(caseId);
+  const evidence = useEvidence({ caseId }, { enabled: Boolean(caseId) });
+  const packs = usePacksForCase(caseId);
+  const representation = useRepresentation(caseId);
+  const exhibitDialog = useExhibitDialog();
 
   if (!caseId) {
     return (
-      <NoCaseSelected>
-        Packs are listed against a case. Open one in the cause list first.
-      </NoCaseSelected>
+      <Panel title="No case selected">
+        <Empty title="Choose a case" icon={Scale}>
+          Open one from the cause list. Everything the court can do to it is on one panel.
+        </Empty>
+      </Panel>
     );
   }
-  if (query.isPending) return <TableSkeleton rows={3} cols={5} />;
-  if (query.isError) return <Denial error={query.error} heading="Packs not listed" />;
-  if (!packs.length) {
+  if (query.isPending) {
     return (
-      <EmptyState title="No disclosure pack has been prepared on this case" icon={FileStack}>
-        The investigating officer prepares the pack and states a reason for anything withheld.
-        Until they do, there is nothing for the registry to rule on.
-      </EmptyState>
+      <Panel title="Case">
+        <DetailSkeleton />
+      </Panel>
+    );
+  }
+  if (query.isError) {
+    return (
+      <Panel title="Case">
+        <Denial error={query.error} heading="Case not readable" />
+      </Panel>
     );
   }
 
+  const c = query.data?.case;
+  if (!c) return null;
+
+  const exhibits = evidence.data?.evidence ?? [];
+  const summary = c.summary ?? {};
+  const disclosure = query.data?.disclosure ?? null;
+  const counselCount = representation.data?.onRecord?.length ?? 0;
+  const pendingCounsel = representation.data?.pending ?? 0;
+  const closed = c.stage === 'CLOSED' || c.stage === 'DISPOSED';
+  const awaiting = summary.awaitingForensics ?? 0;
+
   return (
-    <Table>
-      <TableHeader>
-        <TableRow className={HEADINGS}>
-          <TableHead>Pack</TableHead>
-          <TableHead>Status</TableHead>
-          <TableHead>Exhibits</TableHead>
-          <TableHead>Exclusions</TableHead>
-          <TableHead>Served</TableHead>
-          <TableHead />
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {packs.map((p) => (
-          <TableRow key={p.packId}>
-            <TableCell>
-              <code className="font-mono text-xs">{p.packId}</code>
-            </TableCell>
-            <TableCell>
-              <Verdict tone={p.status === 'SERVED' ? 'ok' : 'neutral'}>
-                {humanise(p.status)}
-              </Verdict>
-            </TableCell>
-            <TableCell className="tabular-nums">{p.exhibitCount ?? 0}</TableCell>
-            <TableCell>
-              {/* An unruled exclusion is the one number that blocks service, so it is the
-                  one that gets a colour. */}
-              {p.unruledExclusionCount ? (
-                <Verdict tone="warn">
-                  {p.unruledExclusionCount} of {p.exclusionCount} awaiting a ruling
-                </Verdict>
-              ) : (
-                <span className="tabular-nums">{p.exclusionCount ?? 0}</span>
+    <div className="space-y-5">
+      <Panel
+        title={`FIR ${c.firNumber}`}
+        actions={
+          !closed && (
+            <div className="flex flex-wrap gap-2">
+              <ShareCaseFile
+                caseId={caseId}
+                exhibits={exhibits}
+                counselCount={counselCount}
+                disclosure={disclosure}
+              />
+              <CloseCase caseId={caseId} caseDoc={c} />
+            </div>
+          )
+        }
+      >
+        <div className="space-y-5">
+          <div className="space-y-1">
+            <h3 className="text-lg font-semibold leading-tight">{c.title}</h3>
+            <div className="flex flex-wrap items-center gap-2">
+              <StageBadge stage={c.stage} />
+              <Badge variant="outline" className="rounded-full text-[11px] font-normal">
+                {humanise(c.sensitivityClass)}
+              </Badge>
+              {c.cnrNumber && (
+                <code className="font-mono text-[11px] text-muted-foreground">
+                  CNR {c.cnrNumber}
+                </code>
               )}
-            </TableCell>
-            <TableCell className="whitespace-nowrap text-muted-foreground">
-              {fmtDate(p.servedOn)}
-            </TableCell>
-            <TableCell className="text-right">
-              <Button variant="ghost" size="sm" onClick={() => onUsePack(p.packId)}>
-                Use this pack
-              </Button>
-            </TableCell>
-          </TableRow>
-        ))}
-      </TableBody>
-    </Table>
-  );
-}
+            </div>
+          </div>
 
-function ApprovePanel({ packId }) {
-  const approve = useApprovePack();
-  const [redactionVariant, setRedactionVariant] = useState('');
-  const [exclusions, setExclusions] = useState('');
-  const [maskVictimIdentity, setMaskVictimIdentity] = useState(false);
+          <CaseLifecycle stage={c.stage} summary={summary} />
 
-  const onApprove = () => {
-    if (!packId) return;
-    const payload = {
-      approvedExclusions: splitIds(exclusions),
-      maskVictimIdentity,
-    };
-    if (redactionVariant.trim()) payload.redactionVariant = redactionVariant.trim();
+          {closed && (
+            <Note>
+              This case is closed. It stays readable in full — every exhibit, opinion,
+              certificate and ledger entry is exactly where it was — and nothing further can be
+              recorded against it.
+              {c.closedOn ? ` Closed ${fmtDate(c.closedOn)}.` : ''}
+            </Note>
+          )}
 
-    approve.mutate(
-      { packId, payload },
-      {
-        onSuccess: (result) =>
-          result.servable
-            ? toast.success('Pack approved and ready to serve')
-            : toast.warning('Pack approved, exclusions still pending', {
-                description: 'It cannot be served until every requested exclusion is decided.',
-              }),
-        onError: (error) =>
-          toast.error('Pack not approved', { description: explain(error.code, error.message) }),
-      }
-    );
-  };
-
-  const result = approve.data;
-
-  return (
-    <div className="space-y-4">
-      <div className="space-y-2">
-        <Label htmlFor="redaction-variant">Redaction variant</Label>
-        <Input
-          id="redaction-variant"
-          value={redactionVariant}
-          onChange={(e) => setRedactionVariant(e.target.value)}
-          placeholder="DEFENCE_V1"
-        />
-      </div>
-
-      <div className="space-y-2">
-        <Label htmlFor="exclusions">Approve these exclusions</Label>
-        <Input
-          id="exclusions"
-          value={exclusions}
-          onChange={(e) => setExclusions(e.target.value)}
-          placeholder="exhibit ids to withhold, comma separated"
-          className="font-mono"
-        />
-        <p className="text-xs text-muted-foreground">
-          Each id listed here is an exhibit the registry agrees to withhold. Anything the
-          officer requested and you do not rule on stays pending, and a pending exclusion
-          blocks service.
-        </p>
-      </div>
-
-      <div className="flex items-center gap-2.5">
-        <Checkbox
-          id="mask-victim"
-          checked={maskVictimIdentity}
-          onCheckedChange={(value) => setMaskVictimIdentity(value === true)}
-        />
-        <Label htmlFor="mask-victim" className="font-normal">
-          Mask victim identity
-        </Label>
-      </div>
-      <p className="text-xs leading-relaxed text-muted-foreground">
-        One-way. A case already marked victim-protected stays masked whatever is set here.
-      </p>
-
-      <Button onClick={onApprove} disabled={!packId || approve.isPending}>
-        {approve.isPending ? 'Approving…' : 'Approve the pack'}
-      </Button>
-
-      {approve.isError && <Denial error={approve.error} heading="Pack not approved" />}
-
-      {result && (
-        <div className="space-y-4">
-          <Note tone={result.servable ? 'info' : 'warn'}>
-            {result.servable
-              ? 'Pack approved and ready to serve.'
-              : 'Pack approved, but exclusions are still pending a ruling — it cannot be served until every one is decided.'}
-          </Note>
-
-          <KeyValue
+          <Facts
             rows={[
-              ['Pack', <code key="p" className="font-mono text-xs">{result.pack?.packId}</code>],
-              ['Status', <Verdict key="s">{humanise(result.pack?.status)}</Verdict>],
+              ['Station', <code key="s" className="font-mono text-xs">{c.stationCode}</code>],
+              ['Sections', (c.bnsSections ?? []).join(', ') || '—'],
+              ['Maximum punishment', `${c.maxPunishmentYears} years`],
+              ['Chargesheet filed', fmtDate(c.chargesheetFiledOn)],
               [
-                'Exhibits',
-                <span key="e" className="tabular-nums">
-                  {result.pack?.exhibitCount ?? 0}
-                </span>,
+                'Case file shared',
+                disclosure?.servedOn ? fmtDate(disclosure.servedOn) : 'Not yet',
               ],
-              [
-                'Redaction variant',
-                <code key="r" className="font-mono text-xs">
-                  {result.pack?.redactionVariant ?? '—'}
-                </code>,
-              ],
-              ['Victim identity masked', result.pack?.maskVictimIdentity ? 'Yes' : 'No'],
             ]}
           />
-
-          {result.pendingExclusions?.length > 0 && (
-            <div className="space-y-1">
-              <p className="text-xs uppercase tracking-wider text-muted-foreground">
-                Pending exclusions
-              </p>
-              <ul className="space-y-1">
-                {result.pendingExclusions.map((id) => (
-                  <li key={String(id)} className="font-mono text-xs">
-                    {String(id)}
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
-
-          {result.pack?.excludedItems?.length > 0 && (
-            <div className="space-y-1">
-              <p className="text-xs uppercase tracking-wider text-muted-foreground">
-                Exclusions on record
-              </p>
-              <ul className="space-y-2">
-                {result.pack.excludedItems.map((x) => (
-                  <li key={x.itemId} className="flex flex-wrap items-center gap-2">
-                    <code className="font-mono text-xs">{x.itemId}</code>
-                    <span className="text-xs text-muted-foreground">{x.reason}</span>
-                    <Verdict tone={x.approved ? 'ok' : 'warn'}>
-                      {x.approved ? 'Approved' : 'Pending'}
-                    </Verdict>
-                  </li>
-                ))}
-              </ul>
-            </div>
-          )}
         </div>
+      </Panel>
+
+      <Panel
+        title="Counsel"
+        description={
+          pendingCounsel > 0
+            ? `${pendingCounsel} vakalatnama waiting for the court to rule on it.`
+            : undefined
+        }
+      >
+        <CounselPanel caseId={caseId} caseDoc={c} />
+      </Panel>
+
+      <Panel
+        title="Evidence"
+        description={
+          awaiting > 0
+            ? `${awaiting} of ${summary.exhibits} exhibits have no laboratory opinion yet. Nothing here waits on one.`
+            : 'Every exhibit on this case carries a laboratory opinion.'
+        }
+      >
+        {evidence.isPending && <RowsSkeleton rows={3} />}
+        {evidence.isError && <Denial error={evidence.error} heading="Evidence not readable" />}
+        {evidence.isSuccess && exhibits.length === 0 && (
+          <Empty title="No exhibits on this case" icon={FileStack} />
+        )}
+        {exhibits.length > 0 && (
+          <ul className="-mx-5 -my-5 divide-y">
+            {exhibits.map((e) => (
+              <Row
+                key={e._id}
+                title={e.title}
+                meta={<code className="font-mono">{e.exhibitCode}</code>}
+                badge={<ForensicBadge forensic={e.forensic} />}
+                onSelect={() => exhibitDialog.open(e._id)}
+              />
+            ))}
+          </ul>
+        )}
+      </Panel>
+
+      {!closed && (
+        <Disclosure label="Record a judicial order" hint="The only way anything in this system changes.">
+          <RecordOrder caseId={caseId} />
+        </Disclosure>
       )}
+
+      <Disclosure label="Case history" hint="Every act on this case, hash-chained and anchored.">
+        <LedgerTimeline caseId={caseId} />
+      </Disclosure>
+
+      <Disclosure label="Physical articles" hint="What the court's evidence room holds, and what is on its way.">
+        <CustodyRegisterPanel
+          query={{ caseId }}
+          emptyText="No physical article has been booked on this case."
+        />
+      </Disclosure>
+
+      <Disclosure label="Trace a leaked copy" hint="Every served page carries its recipient's watermark.">
+        <TraceWatermark />
+      </Disclosure>
+
+      {packs.isError && <Denial error={packs.error} heading="Disclosure not readable" />}
+
+      <ExhibitDialog
+        evidenceId={exhibitDialog.evidenceId}
+        onClose={exhibitDialog.close}
+        canIssueCertificate
+        canSignPartA
+      />
     </div>
   );
 }
 
-function ServePanel({ packId }) {
-  const serve = useServePack();
-  const [recipients, setRecipients] = useState('');
-
-  const onServe = () => {
-    if (!packId) return;
-    const ids = splitIds(recipients);
-    serve.mutate(
-      { packId, payload: ids.length ? { recipientUserIds: ids } : {} },
-      {
-        onSuccess: (result) =>
-          toast.success('Pack served', {
-            description: `${result.servedNow?.length ?? 0} watermarked copy or copies minted.`,
-          }),
-        onError: (error) =>
-          toast.error('Pack not served', { description: explain(error.code, error.message) }),
-      }
-    );
-  };
-
-  const served = serve.data?.servedNow ?? [];
+function TraceWatermark() {
+  const trace = useTraceWatermark();
+  const [token, setToken] = useState('');
+  const r = trace.data;
 
   return (
-    <div className="space-y-4">
-      <div className="space-y-2">
-        <Label htmlFor="recipients">Recipients</Label>
+    <div className="space-y-3">
+      <p className="text-[13px] leading-relaxed text-muted-foreground">
+        Paste the watermark token printed on a leaked page to learn whose copy it was. The
+        lookup is court-only, and it is itself audited.
+      </p>
+      <form
+        className="flex gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          trace.mutate(token.trim());
+        }}
+      >
         <Input
-          id="recipients"
-          value={recipients}
-          onChange={(e) => setRecipients(e.target.value)}
-          placeholder="optional: recipient user ids, comma separated"
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
+          placeholder="watermark token"
           className="font-mono"
         />
-        <p className="text-xs text-muted-foreground">
-          Leave blank to serve every advocate holding a live grant on this case. A grant comes
-          from a vakalatnama the registrar accepted or a legal aid order, never from this form.
-        </p>
-      </div>
-
-      <Button onClick={onServe} disabled={!packId || serve.isPending}>
-        <Send className="size-4" />
-        {serve.isPending ? 'Serving…' : 'Serve the pack'}
-      </Button>
-
-      {serve.isError && <Denial error={serve.error} heading="Pack not served" />}
-
-      {serve.data && (
-        <div className="space-y-4">
-          <Note>
-            Served. The BNSS s.230 clock stops for each recipient when they acknowledge, not
-            when the pack leaves the registry.
-          </Note>
-
-          {served.length === 0 ? (
-            <EmptyState title="No recipient was served">
-              Nobody on this case holds a live grant, so there was nobody to serve. Check the
-              representation record before trying again.
-            </EmptyState>
-          ) : (
-            <Table>
-              <TableHeader>
-                <TableRow className={HEADINGS}>
-                  <TableHead>Recipient</TableHead>
-                  <TableHead>Watermark identity</TableHead>
-                  <TableHead>Token</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {served.map((row) => (
-                  <TableRow key={row.userId} className="align-top">
-                    <TableCell>
-                      <code className="font-mono text-xs">{row.authorityId ?? row.userId}</code>
-                    </TableCell>
-                    <TableCell className="max-w-[20rem] text-xs">
-                      {row.watermarkLabel ?? '—'}
-                    </TableCell>
-                    <TableCell className="max-w-[20rem]">
-                      {/* The token is what ties a leaked copy back to one recipient, so it
-                          is never shortened. */}
-                      <Hash value={row.watermarkToken} label="Watermark token" />
-                    </TableCell>
-                  </TableRow>
-                ))}
-              </TableBody>
-            </Table>
-          )}
-
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            Each recipient gets their own watermark token, recorded in the ledger at the moment
-            of service. A copy that leaks therefore points back to the person it was served on.
-          </p>
-        </div>
+        <Button type="submit" size="sm" variant="outline" disabled={trace.isPending || token.trim().length < 20}>
+          Trace
+        </Button>
+      </form>
+      {trace.isError && <Denial error={trace.error} heading="Not traced" />}
+      {r && (
+        <Facts
+          rows={[
+            ['Served on', `${r.recipient?.name ?? '—'} · ${r.recipient?.authorityId ?? ''}`],
+            ['Role', humanise(r.recipient?.role)],
+            ['Served at', fmtDate(r.servedAt)],
+            ['Acknowledged', r.acknowledgedAt ? fmtDate(r.acknowledgedAt) : 'not yet'],
+          ]}
+        />
       )}
     </div>
   );
 }
 
-function DisclosureTab() {
-  const { caseId, workingCase } = useWorkingCase();
-  const [packId, setPackId] = useState('');
-
-  return (
-    <div className="space-y-6">
-      <Section
-        title="Find the pack"
-        description="Packs prepared on the case you have open. The endpoint behind this is gated on approval authority over the case, so it shows the packs on cases listed in this court and nothing else."
-      >
-        <Note>
-          A case appears here only once it is listed before this court. Court scope is read
-          from the case&rsquo;s own court, which is written when the chargesheet is filed —
-          so an investigation still with the station is invisible to the registry by
-          construction, not by a filter somebody remembered to apply.
-        </Note>
-        <PackDiscovery caseId={caseId} onUsePack={setPackId} />
-      </Section>
-
-      <Section
-        title="Pack"
-        description="Filled in by “Use this pack” above, or pasted by hand. Both panels below act on whatever is in this field."
-      >
-        <div className="space-y-2">
-          <Label htmlFor="pack-id">Pack id</Label>
-          <Input
-            id="pack-id"
-            value={packId}
-            onChange={(e) => setPackId(e.target.value)}
-            placeholder="select a pack above, or paste a 24-character pack id"
-            className="font-mono"
-          />
-          {workingCase && (
-            <p className="text-xs text-muted-foreground">
-              Working case: FIR {workingCase.firNumber}
-              {workingCase.cnrNumber ? ` · CNR ${workingCase.cnrNumber}` : ''}
-            </p>
-          )}
-        </div>
-        <Separator />
-        <p className="text-xs leading-relaxed text-muted-foreground">
-          The investigating officer proposes a set and states a reason for anything withheld.
-          The registry rules on those reasons, then serves — and only then does defence counsel
-          see anything at all.
-        </p>
-      </Section>
-
-      <div className="grid items-start gap-6 xl:grid-cols-2">
-        <Section
-          title="Approve"
-          description="Rule on each requested exclusion and fix the redaction variant. A pack with an undecided exclusion cannot be served, which is what stops material being withheld by silence."
-        >
-          <ApprovePanel packId={packId.trim()} />
-        </Section>
-
-        {/* Serving is the act the whole tab leads to, so it is the panel that carries
-            the beam. */}
-        <Section
-          accent
-          title="Serve"
-          description="Mints one watermark per recipient and records each one in the ledger. This is the act that starts the disclosure obligation running against the court's own record."
-        >
-          <ServePanel packId={packId.trim()} />
-        </Section>
-      </div>
-    </div>
-  );
-}
-
-// =============================================================== the page ====
+// ==================================================================== page ====
 
 export default function CourtPage() {
-  const [tab, setTab] = useState('cause-list');
-  const scope = useReveal();
+  const dispatch = useDispatch();
+  const caseId = useSelector(selectWorkingCaseId);
+  const cases = useCases();
+  const listed = useMemo(() => cases.data?.cases ?? [], [cases.data]);
 
-  const { caseId, workingCase, cases } = useWorkingCase();
+  useEffect(() => {
+    if (!listed.length) return;
+    if (!caseId || !listed.some((c) => String(c._id) === String(caseId))) {
+      dispatch(workingCaseSet(String(listed[0]._id)));
+    }
+  }, [listed, caseId, dispatch]);
+
+  const ready = cases.isSuccess;
+  const totals = listed.reduce(
+    (acc, c) => ({
+      unshared: acc.unshared + (c.summary?.disclosure?.status === 'SERVED' ? 0 : 1),
+      noCounsel: acc.noCounsel + ((c.summary?.counselOnRecord ?? 0) === 0 ? 1 : 0),
+      closed: acc.closed + (c.stage === 'CLOSED' || c.stage === 'DISPOSED' ? 1 : 0),
+    }),
+    { unshared: 0, noCounsel: 0, closed: 0 }
+  );
 
   return (
-    <div ref={scope} className="container space-y-8 py-10">
-      <div className="space-y-4">
-        <div className="will-reveal">
-          <Eyebrow>Court · cause list, ledger, orders, disclosure</Eyebrow>
-        </div>
-        <PageHeader
-          title="Court"
-          lede="The cause list your roster puts you in, the ledger behind each case, the orders that are the only way anything in this system changes, and the disclosure the registry rules on before defence counsel sees a single exhibit."
-          actions={
-            caseId && workingCase ? (
-              <Badge variant="secondary" className="rounded-full px-3 py-1 font-normal">
-                FIR {workingCase.firNumber}
-                {workingCase.cnrNumber ? ` · ${workingCase.cnrNumber}` : ''}
-              </Badge>
-            ) : null
-          }
-        />
-      </div>
-
-      {/* A refusal on the cause list is the one error that would otherwise be invisible
-          on the tabs that depend on it. */}
+    <Workspace
+      eyebrow="Court · cause list"
+      title="Cases before you"
+      lede="Read from the roster your authority directory holds. You see the whole case file — the court is never waiting on a laboratory to read it."
+    >
       {cases.isError && <Denial error={cases.error} heading="Cause list not readable" />}
 
-      <CourtFigures caseId={caseId} workingCase={workingCase} cases={cases} />
+      <CounterRow>
+        <Counter label="Cases listed" value={ready ? listed.length : '—'} />
+        <Counter
+          label="File not yet shared"
+          value={ready ? totals.unshared : '—'}
+          tone={totals.unshared > 0 ? 'warn' : 'neutral'}
+        />
+        <Counter
+          label="No counsel on record"
+          value={ready ? totals.noCounsel : '—'}
+          tone={totals.noCounsel > 0 ? 'warn' : 'neutral'}
+        />
+        <Counter label="Closed" value={ready ? totals.closed : '—'} />
+      </CounterRow>
 
-      <Tabs value={tab} onValueChange={setTab} className="space-y-6">
-        <TabsList className="h-auto rounded-full p-1 will-reveal">
-          <TabsTrigger value="cause-list" className="rounded-full px-4 py-1.5">
-            Cause list
-          </TabsTrigger>
-          <TabsTrigger value="ledger" className="rounded-full px-4 py-1.5">
-            Ledger
-          </TabsTrigger>
-          <TabsTrigger value="orders" className="rounded-full px-4 py-1.5">
-            Orders
-          </TabsTrigger>
-          <TabsTrigger value="disclosure" className="rounded-full px-4 py-1.5">
-            Disclosure
-          </TabsTrigger>
-        </TabsList>
-
-        <TabsContent value="cause-list" className="mt-0">
-          <CauseListTab />
-        </TabsContent>
-        <TabsContent value="ledger" className="mt-0">
-          <LedgerTab />
-        </TabsContent>
-        <TabsContent value="orders" className="mt-0">
-          <OrdersTab />
-        </TabsContent>
-        <TabsContent value="disclosure" className="mt-0">
-          <DisclosureTab />
-        </TabsContent>
-      </Tabs>
-    </div>
+      <SplitView
+        list={
+          <Panel title="Cause list" bodyClassName="p-0">
+            {cases.isPending && <RowsSkeleton />}
+            {ready && listed.length === 0 && (
+              <div className="p-5">
+                <Empty title="No case is listed in your court" icon={Scale}>
+                  A case reaches a court when the chargesheet is filed. Until then there is
+                  nothing here — which is a statement about listing, not about whether cases
+                  exist.
+                </Empty>
+              </div>
+            )}
+            {listed.length > 0 && (
+              <Rows>
+                {listed.map((c) => (
+                  <Row
+                    key={c._id}
+                    title={c.title}
+                    meta={`FIR ${c.firNumber}`}
+                    badge={<StageBadge stage={c.stage} />}
+                    selected={String(c._id) === String(caseId)}
+                    onSelect={() => dispatch(workingCaseSet(String(c._id)))}
+                  >
+                    <span className="mt-1 block text-[12px] text-muted-foreground">
+                      {c.summary?.exhibits ?? 0} exhibits ·{' '}
+                      {c.summary?.counselOnRecord ?? 0} counsel ·{' '}
+                      {c.summary?.disclosure?.status === 'SERVED' ? 'file shared' : 'file not shared'}
+                    </span>
+                  </Row>
+                ))}
+              </Rows>
+            )}
+          </Panel>
+        }
+        detail={<CaseDetail caseId={caseId} />}
+      />
+    </Workspace>
   );
 }

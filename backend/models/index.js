@@ -17,6 +17,7 @@ export { Referral } from './Referral.js';
 export { OtpChallenge, OTP_PURPOSE } from './OtpChallenge.js';
 export { RefreshToken } from './RefreshToken.js';
 export { StreamToken, STREAM_PURPOSE } from './StreamToken.js';
+export { VakalatnamaFiling } from './VakalatnamaFiling.js';
 
 import { User } from './User.js';
 import { Case } from './Case.js';
@@ -33,6 +34,7 @@ import { Referral } from './Referral.js';
 import { OtpChallenge } from './OtpChallenge.js';
 import { RefreshToken } from './RefreshToken.js';
 import { StreamToken } from './StreamToken.js';
+import { VakalatnamaFiling } from './VakalatnamaFiling.js';
 
 /** Every model, for explicit index creation at boot. */
 export const allModels = [
@@ -51,4 +53,5 @@ export const allModels = [
   OtpChallenge,
   RefreshToken,
   StreamToken,
+  VakalatnamaFiling,
 ];

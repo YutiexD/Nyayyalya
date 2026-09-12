@@ -5,10 +5,11 @@
  * Stands in for eCourts. Source of truth for judges, the sitting roster, case
  * listings, registry staff and who is on record for whom.
  *
- * This is the only one of the three with a write endpoint —
- * POST /directory/vakalatnama, the registrar filing a vakalatnama. It is declared
- * once, here, as the sole exception to the read-only guard; every other method on
- * /directory/* is refused with 405 before it reaches a route.
+ * This is the only one of the three with write endpoints, and both are simulated
+ * registry acts: POST /directory/vakalatnama (the registrar accepting a vakalatnama)
+ * and POST /directory/listing (the registry registering a chargesheet and allotting a
+ * CNR). They are declared once, here, as the only exceptions to the read-only guard;
+ * every other method on /directory/* is refused with 405 before it reaches a route.
  *
  *   node directories/court/server.js
  */
@@ -38,6 +39,9 @@ await startService({
       config,
       logger,
       router: directoryRouter(config),
-      writeExceptions: [{ method: 'POST', path: '/directory/vakalatnama' }],
+      writeExceptions: [
+        { method: 'POST', path: '/directory/vakalatnama' },
+        { method: 'POST', path: '/directory/listing' },
+      ],
     }),
 });

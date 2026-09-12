@@ -142,7 +142,7 @@ Every branch of `evaluate()` returns an explicit decision. Falling off the end r
 | `DOWNLOAD` | Retrieve bytes. A read action, but audited distinctly. |
 | `VERIFY` | Recompute integrity. A read action. |
 | `ORDER` | A judicial order. Judges alone. |
-| `APPROVE` | Ruling on something another party prepared. Registrar **or** judge (ADR-019). |
+| `APPROVE` | Ruling on something another party prepared — disclosure, representation. The presiding judge (ADR-019, ADR-040). Court-only, so the investigation can never reach it. |
 | `ACKNOWLEDGE` | A party confirming receipt — mutates exactly one field that party owns. Counsel only. |
 
 `COURT_ONLY_ACTIONS = { ORDER, APPROVE }` is denied to every police and FSL branch, closing the path where an investigator could reach approval by falling through to a general `allow()`.
@@ -154,25 +154,27 @@ Read from `evaluate()` and `CREATE_CAPABILITY` in `services/accessResolver.js`. 
 | Authority · Role | Scope condition | READ | WRITE | VERIFY / DOWNLOAD | ORDER | APPROVE | ACKNOWLEDGE |
 |---|---|---|---|---|---|---|---|
 | POLICE · `IO` | `case.ioUserId == me` **and** `case.stationCode == scope.stationCode` | ✓ | ✓ *only while stage ∈ {UNDER_INVESTIGATION, FURTHER_INVESTIGATION}* | ✓ | `READ_ONLY_ROLE` | `READ_ONLY_ROLE` | `READ_ONLY_ROLE` |
-| POLICE · `SHO` | `case.stationCode == scope.stationCode` | ✓ | ✓ *(no stage restriction)* | ✓ | `READ_ONLY_ROLE` | `READ_ONLY_ROLE` | `READ_ONLY_ROLE` |
+| POLICE · `SHO` | `case.stationCode == scope.stationCode` | ✓ | ✓ *only while the case is open to writes* | ✓ | `READ_ONLY_ROLE` | `READ_ONLY_ROLE` | `READ_ONLY_ROLE` |
 | POLICE · `DISTRICT_SP` | `case.districtCode == scope.districtCode` | ✓ | `READ_ONLY_ROLE` | ✓ | `READ_ONLY_ROLE` | `READ_ONLY_ROLE` | `READ_ONLY_ROLE` |
-| POLICE · `MALKHANA_CUSTODIAN` | resource **must be** a `CUSTODY_ITEM` **and** `item.stationCode == scope.stationCode` | ✓ | ✓ | ✓ | ✓ *(see note)* | ✓ *(see note)* | ✓ *(see note)* |
-| COURT · `JUDGE` | `case.courtId` set **and** `== scope.courtId` | ✓ | `READ_ONLY_ROLE` | ✓ | ✓ | ✓ | `READ_ONLY_ROLE` |
-| COURT · `REGISTRAR` | `case.courtId` set **and** `== scope.courtId` | ✓ | ✓ | ✓ | `READ_ONLY_ROLE` | ✓ | ✓ |
-| COURT · `EVIDENCE_CUSTODIAN` | as registrar | ✓ | ✓ | ✓ | `READ_ONLY_ROLE` | ✓ | ✓ |
-| FSL · `FSL_EXAMINER` | `scope.labId` set **and** a referral links the resource to that lab — see below | ✓ | ✓ *(referral & certificate only)* | ✓ | `READ_ONLY_ROLE` | `READ_ONLY_ROLE` | ✗ |
+| POLICE · any, on a `CUSTODY_ITEM` | `item.stationCode == scope.stationCode` (district for the SP, read-only) | ✓ | ✓ *(survives the chargesheet and a closed case — an article still has to travel)* | ✓ | `READ_ONLY_ROLE` | `READ_ONLY_ROLE` | — |
+| COURT · `JUDGE` | `case.courtId` set **and** `== scope.courtId` | ✓ | ✓ *only on `COURT_WRITABLE` records; `READ_ONLY_ROLE` against a case or an exhibit* | ✓ | ✓ | ✓ | `READ_ONLY_ROLE` |
+| COURT · `EVIDENCE_CUSTODIAN` | `case.courtId` set **and** `== scope.courtId` | ✓ | ✓ *custodial only* | ✓ | `READ_ONLY_ROLE` | `READ_ONLY_ROLE` | ✓ |
+| FSL · `FSL_EXAMINER` | `scope.labId` set **and** a referral links the resource to that lab, **or** the case is in `scope.stateCode` — see below | ✓ | ✓ *(referral, certificate, and the forensic verdict on an exhibit)* | ✓ | `READ_ONLY_ROLE` | `READ_ONLY_ROLE` | ✗ |
 | LEGAL · all counsel | a live `CaseAccessGrant` on the case | ✓ *(gated per resource — see below)* | `READ_ONLY_ROLE` | ✓ | `READ_ONLY_ROLE` | `READ_ONLY_ROLE` | ✓ *on a pack served to them* |
 
-*Note on the malkhana custodian:* the branch returns a bare `allow()` for any action once the station matches, so `ORDER` and `APPROVE` are not explicitly denied there. In practice no route pairs those actions with `CUSTODY_ITEM`, so it is unreachable — but it is the one place in the matrix where an action is not narrowed.
+**A case the court has CLOSED** is read-only to every authority, including the court that closed it (`CASE_IS_CLOSED`). The one exception is a custodial write: a sealed article still has to be returned or destroyed after a case ends, and each of those is a two-scan ledgered handover rather than an edit of the record. Nothing is deleted by closing.
 
-**FSL, per resource type** — an examiner's world is defined entirely by referrals to their lab:
+**`COURT_WRITABLE`** — the records a court may `WRITE`: `DISCLOSURE_PACK`, `CERTIFICATE`, `VAKALATNAMA`, `CUSTODY_ITEM`, `CASE_ACCESS_GRANT`. Not a case and not an exhibit: those are the investigation's, and a court that could edit them would be a party to the case rather than the tribunal over it. Everything else a court does to a case it does with `ORDER` or `APPROVE`.
+
+**FSL, per resource type** — two routes in, and they are different in kind. `REFERRAL` is a named question about one exhibit, with the sealed article to go with it. `stateCode` is the state the laboratory serves, read from the FSL directory at sign-in; a session carrying no state falls back to referrals alone rather than to everything.
 
 | Resource | Condition |
 |---|---|
 | `REFERRAL` | `referral.labId == scope.labId`. All actions except court-only. |
-| `EVIDENCE` | a referral for this exhibit to this lab with status `OPEN` or `ACCEPTED`. |
-| `CASE` | a referral in this case to this lab with status `OPEN` or `ACCEPTED`. Read-only. |
-| `CERTIFICATE` | a referral for the certificate's exhibit to this lab, **any status** — so Part B stays signable after the referral closes. |
+| `EVIDENCE` | a referral for this exhibit to this lab with status `OPEN`/`ACCEPTED`, **or** `case.stateCode == scope.stateCode`. `WRITE` is the forensic verdict and nothing else — no other route pairs an FSL session with a `WRITE` on an exhibit. |
+| `CASE` | a live referral in this case, **or** `case.stateCode == scope.stateCode`. Read-only. |
+| `CERTIFICATE` | a referral for the certificate's exhibit to this lab (**any status**, so Part B stays signable after the referral closes), or the same state rule. |
+| `CUSTODY_ITEM` | a referral in the item's case only — **the state rule does not extend to custody.** A laboratory examines exhibits; it does not handle articles nobody sent it. |
 | anything else | `NO_OPEN_REFERRAL_TO_YOUR_LAB`. |
 
 **LEGAL, per resource type** — being on record gets you the case, not every exhibit in it:
@@ -196,11 +198,15 @@ Creation is checked twice: a role capability, then the case-level action.
 | `EVIDENCE` | POLICE `IO` or `SHO` | `WRITE` on the case |
 | `CUSTODY_ITEM` | POLICE `IO` or `SHO` | `WRITE` on the case |
 | `REFERRAL` | POLICE `SHO` only | `WRITE` on the case |
-| `DISCLOSURE_PACK` | POLICE `IO` only | `WRITE` on the case |
-| `CERTIFICATE` | POLICE `IO` **or** COURT `REGISTRAR` | **`READ`** on the case — a certificate attests to the record rather than amending it, and is normally prepared after the chargesheet closes the case to writes |
-| `CASE_ACCESS_GRANT` | COURT `REGISTRAR` only | `WRITE` on the case |
+| `DISCLOSURE_PACK` | COURT `JUDGE` only | **`APPROVE`** on the case — the court ruling on a case it is seized of. `APPROVE` is court-only, so **no police role can reach a disclosure pack at all** |
+| `CERTIFICATE` | POLICE `IO` **or** COURT `JUDGE` | **`READ`** on the case — a certificate attests to the record rather than amending it, and is normally prepared after the chargesheet closes the case to writes |
+| `CASE_ACCESS_GRANT` | COURT `JUDGE` only | **`APPROVE`** on the case |
+| `CUSTODY_RELEASE` | POLICE `SHO` only | `READ` on the case — lifting a seal-exception freeze must stay available after the chargesheet |
+| `VAKALATNAMA` | LEGAL, advocate roles only (not a prosecutor) | a case actually listed before a court — not a case `WRITE`, since the filer is by definition not on record |
 
-Putting an advocate on record is a registry act. An investigating officer must never be able to decide who represents the accused (ADR-019).
+`APPROVE` rather than `WRITE` for the last three is load-bearing, not cosmetic. `WRITE` is authorship, which against a case belongs to the police; and it is refused once the case leaves investigation, which is precisely when disclosure and representation happen. Both would have been refused at exactly the moment they occur.
+
+Putting an advocate on record, and deciding what the defence sees, are the court's acts. An investigating officer must never be able to make either (ADR-019, ADR-040, ADR-043).
 
 ### Collection scoping
 
@@ -208,13 +214,12 @@ List and search endpoints get a Mongo filter from `scopeFilterFor` / `materialis
 
 | Authority · Role | Filter |
 |---|---|
-| POLICE `IO` | `{ ioUserId, stationCode }` |
+| POLICE `IO` | `{ ioUserId, stationCode }` — but `{ stationCode }` for `CUSTODY_ITEM`: the store is the station's |
 | POLICE `SHO` | `{ stationCode }` |
 | POLICE `DISTRICT_SP` | `{ districtCode }` |
-| POLICE `MALKHANA_CUSTODIAN` | `{ stationCode }` for `CUSTODY_ITEM`, otherwise `null` |
 | COURT (all) | `{ courtId }`, or `null` when the session has no `courtId` |
-| FSL | case ids with an `OPEN`/`ACCEPTED` referral to `scope.labId` |
-| LEGAL | case ids with a live, in-window, unrevoked `CaseAccessGrant` |
+| FSL | exhibits referred to `scope.labId`, **unioned with** the evidence of cases in `scope.stateCode`; custody and cases stay referral-bound |
+| LEGAL | case ids with a live, in-window, unrevoked `CaseAccessGrant`; for `EVIDENCE`, narrowed further to the exhibits of packs actually served on them |
 
 ### Two scope checks layered on top of the resolver
 
@@ -476,18 +481,18 @@ What follows is what remains open, plus what was found while writing this docume
 |---|---|---|
 | **W1** | **Suspension does not revoke an outstanding access token unless the local `User.status` changes.** Directory-side suspension is caught on the next login or refresh; `resolveContext` checks `User.status`, which only login/refresh update. A user suspended in the directory keeps their current access token for up to 15 minutes and, since `logout` also does not invalidate access tokens, so does anyone who signed out. | `middleware/authenticate.js:66`, `controllers/auth.js:558` |
 | **W2** | **Evidence *list* endpoints are scoped by case, not by disclosure set or referral.** `GET /api/evidence`, `GET /api/evidence/queue/triage` and `GET /api/search` filter on `materialiseScopeFilter(user, CASE)` and then query `Evidence` by those case ids, without re-applying the per-exhibit tests that `GET /api/evidence/:id` enforces. An advocate on record therefore sees every exhibit in the case in a list — including exhibits *excluded from their disclosure pack* — and `triageQueue`/`search` additionally expose `triage.priority`, which `exhibitView` deliberately withholds from `my-pack` precisely so a machine review-priority is never handed to a party as if it were a finding. The same widening applies to an FSL examiner with one referral in a case. **This is the most significant open finding.** No test covers a `LEGAL` or `FSL` caller on these routes. | `controllers/evidence.js:408,687`, `controllers/search.js:69` |
-| **W3** | **`POST /api/disclosure/:packId/serve` is not registrar-restricted.** The only guard is `authorize({ WRITE, DISCLOSURE_PACK })`, and `WRITE` is not court-only, so the station SHO — and the assigned IO while the case is still open to writes — can mint watermarks and serve the pack. Every sibling route (`prepare`, `approve`, `acknowledge`, `sync-representation`) carries a second capability or action-level guard; `serve` does not. | `routes/disclosure.js:74` |
+| **W3** | ~~**`POST /api/disclosure/:packId/serve` is not registrar-restricted.**~~ **CLOSED by ADR-040/043.** No police role can reach a `DISCLOSURE_PACK` at all — the resolver's police branch has no policy that admits one, and `DISCLOSURE_PACK` is in `COURT_WRITABLE`. The authz matrix asserts it. | `services/accessResolver.js` |
 | **W4** | **`GET /api/audit/security` is not scope-filtered.** Gated on role only, it then returns every `LOGIN` audit row in the deployment — `authorityId`, decision, reason and source IP — regardless of station, district or court. An SHO at one station sees failed login attempts against officers everywhere. `GET /api/audit` is properly scoped; this feed is not, and the code says so. | `controllers/audit.js:98` |
 | **W5** | **`POST /api/auth/verify-identity` is an unauthenticated identity oracle.** For any valid identifier it returns the person's real name, authority, Lexx role, full jurisdictional scope, masked phone, and whether they hold a Lexx account. Rate-limited at 60 per 15 minutes per IP and audited — but the limiter is skipped for loopback whenever `NODE_ENV !== production`, and behind a reverse proxy every request arrives from loopback. | `controllers/auth.js:170`, `routes/auth.js:30` |
 | **W6** | **`GET /api/ledger/verify-chain` discloses ledger volume to any authenticated session.** ADR-012 describes it as scope-filtered; in fact no scoping happens. Any active session — including an advocate with a single grant — learns `entriesChecked`, `firstSeq`, `lastSeq` and `brokenAtSeq` for the whole deployment. No entry content is returned, so the leak is metadata (total size and growth rate), not case data. | `routes/system.js:25`, `controllers/ledger.js:65` |
 | **W7** | **`GET /api/custody/gaps` silently returns nothing for an IO and for every court role.** `scopeFilterFor(user, CUSTODY_ITEM)` returns `{ ioUserId, stationCode }` for an IO and `{ courtId }` for court roles, but `CustodyItem` has neither field. The endpoint is not insecure — it fails closed — but a supervisor could reasonably read an empty gap report as "no gaps". | `services/accessResolver.js:456`, `models/CustodyItem.js:33-57` |
 | **W8** | **Every `LEGAL` user is provisioned as `DEFENCE_COUNSEL`.** `resolveAdvocate` hardcodes `ROLE.DEFENCE_COUNSEL` regardless of how the advocate appears, and `login` overwrites `user.role` from the directory on every sign-in — so `VICTIM_COUNSEL`, `LEGAL_AID_COUNSEL` and `PUBLIC_PROSECUTOR` can never be a `User.role`. The resolver's grant lookup matches on the **grant's** role (which `sync-representation` does set correctly), so entitlement is still right in practice; but the public-prosecutor branch at `accessResolver.js:284-286` is dead code, and any future check on `user.role` for a legal user would be wrong. | `services/directoryClient.js:378`, `controllers/auth.js:399` |
 | **W9** | **`putEncryptedFile` failure leaks a DEK into the heap.** In `uploadEvidence` the `try { stored = await putEncryptedFile(...) } finally { }` block has an empty `finally`, and `dek.fill(0)` runs only on the success path after `wrapDek`. A storage write failure therefore leaves the 32-byte DEK unzeroed. Low impact — the write failed, so there is no ciphertext to decrypt — but it is the one place the zeroing discipline is not followed. | `controllers/evidence.js:260-268` |
-| **W10** | **A malkhana custodian's branch returns a bare `allow()`.** Once `item.stationCode === scope.stationCode` matches, no action is narrowed — `ORDER` and `APPROVE` are not denied. Unreachable today because no route pairs those actions with `CUSTODY_ITEM`, but it is the only place in the matrix where the action is not checked, and it would silently become live if such a route were added. | `services/accessResolver.js:167-172` |
+| **W10** | ~~**A malkhana custodian's branch returns a bare `allow()`.**~~ **CLOSED by ADR-040.** The role is gone, and the custody branch that replaced it denies `ORDER` and `APPROVE` explicitly before it checks the station. | `services/accessResolver.js` |
 | **W11** | **Rate limiting protects only `/api/auth/*`.** No limiter is applied to evidence upload, search, verification or any other authenticated route. A single authenticated session can drive an unbounded number of full-ledger `verifyChain` walks, full-vault decryptions via `/verify`, or 256 MB uploads. | `routes/auth.js` is the only file importing `express-rate-limit` |
 | **W12** | **`DENY_REASON.GRANT_REVOKED` is unreachable.** `liveGrantFor` filters on `revokedAt: null`, so a revoked grant surfaces as `NOT_ON_RECORD_FOR_THIS_CASE`. Cosmetic, but it means an audit trail cannot distinguish "never on record" from "taken off record". | `services/accessResolver.js:117` |
 | **W13** | **`sign-part-a` requires `WRITE` where `generate` deliberately requires only `READ`.** `CREATE_IMPLIES_ACTION[CERTIFICATE] = READ` exists precisely because a s.63 certificate is prepared at or after the chargesheet, when the case has closed to investigative writes. Signing was not given the same treatment, so an IO who can generate a certificate on a `CHARGESHEET_FILED` case is then refused `CASE_STAGE_CLOSED_TO_WRITES` when they try to sign it. A correctness/usability defect rather than a security hole — it fails closed. | `routes/certificate.js:58`, `services/accessResolver.js:182` |
-| **W14** | **Three controller doc-comments describe a superseded authorization design.** `controllers/disclosure.js:321-324`, `:646-651` and `:741-747` state that approval is registrar-only, that acknowledgement is authorised as `VERIFY`, and that `sync-representation` "admits the station's IO/SHO as well". All three were fixed by ADR-019 and the routes are now correct. Stale security comments are their own hazard: a reviewer who trusts them will mis-assess the system. | `controllers/disclosure.js` |
+| **W14** | **Two controller doc-comments describe a superseded authorization design.** In `controllers/disclosure.js`, acknowledgement is described as authorised with `VERIFY`, and `sync-representation` as a case `WRITE` that "admits the station's IO/SHO as well". Both were fixed by ADR-019 and the routes are now correct. Stale security comments are their own hazard: a reviewer who trusts them will mis-assess the system. | `controllers/disclosure.js` |
 | **W16** | **A certificate is readable by any advocate on record, regardless of the disclosure set.** The `LEGAL` branch of `evaluate()` handles `EVIDENCE`, `DISCLOSURE_PACK` and `CUSTODY_ITEM` explicitly, then falls through to a bare `allowReadOnly(action)` for everything else — including `CERTIFICATE`. So `GET /api/certificates/:id` and `GET /api/certificates/:id/pdf` (`DOWNLOAD` is a read action) succeed for counsel holding only a live `CaseAccessGrant`, even for an exhibit deliberately excluded from the pack served on them. The certificate discloses considerably more than `my-pack` does: the full `mannerOfProduction` ledger narrative, the conditions statement, device make/model/colour/serial/IMEI, the deponent's name and designation, and the Part B expert opinion. The same fall-through covers `REFERRAL`, which no read route currently exposes. | `services/accessResolver.js:325-331`, `routes/certificate.js:49,74` |
 | **W15** | **`scripts/check-network-references.js` does not check Markdown.** Its own comment says Markdown "is checked separately below", but no such check exists — `CODE_EXTENSIONS` covers only `.js/.mjs/.cjs/.json/.sol/.html/.yml/.yaml` plus `.env.example`. A stale network reference in documentation would pass the gate. | `scripts/check-network-references.js:31` |
 

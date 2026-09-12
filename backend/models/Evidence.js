@@ -52,10 +52,38 @@ const SourceDeviceSchema = new Schema(
   { _id: false }
 );
 
+/**
+ * The machine's review priority. Written once, at ingest, by the system itself.
+ *
+ * There is no route that sets this and no role that could reach one if there were:
+ * a priority a station can raise is a priority that reflects who asked loudest. The
+ * only way it changes is a re-ingest, which is a new exhibit.
+ */
 const TriageSchema = new Schema(
   {
-    priority: { type: String, enum: values(TRIAGE_PRIORITY) },
+    priority: { type: String, enum: values(TRIAGE_PRIORITY), index: true },
+    /** What was observed about the file. Plain sentences, safe to read aloud in court. */
     indicators: { type: [String], default: [] },
+    /**
+     * The same list with the weight each reason contributed, and whether it is a
+     * finding about this file or context about the case. This is the working behind
+     * the band — not a confidence, not a probability, and never rendered as one.
+     */
+    reasons: {
+      type: [
+        new Schema(
+          {
+            label: { type: String, required: true },
+            weight: { type: Number, required: true },
+            kind: { type: String, enum: ['finding', 'context'], default: 'finding' },
+          },
+          { _id: false }
+        ),
+      ],
+      default: [],
+    },
+    /** Whether a laboratory could say anything useful about this kind of exhibit. */
+    examinationRecommended: { type: Boolean, default: false },
     modelName: { type: String },
     modelVersion: { type: String },
     generatedAt: { type: Date },
@@ -83,6 +111,23 @@ const ForensicSchema = new Schema(
     opinion: { type: String, enum: [...values(FORENSIC_OPINION), null], default: null },
     examinationSummary: { type: String, default: null },
     reportedAt: { type: Date, default: null },
+    /**
+     * How the opinion reached the register.
+     *
+     * `REFERRAL` — an exhibit formally referred to this laboratory, accepted, and
+     *   reported on, with a signed report document behind it.
+     * `DIRECT_REVIEW` — an examiner picked the exhibit off their own review queue,
+     *   examined it and recorded a verdict. Same vocabulary, same examiner identity,
+     *   same ledger entry; a report document is optional rather than required.
+     *
+     * The distinction is recorded because a court is entitled to know which one it
+     * is reading, and shown on screen for the same reason.
+     */
+    basis: {
+      type: String,
+      enum: ['REFERRAL', 'DIRECT_REVIEW', null],
+      default: null,
+    },
   },
   { _id: false }
 );

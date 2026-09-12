@@ -62,4 +62,23 @@ router.get(
   custody.getChain
 );
 
+/**
+ * The supervisor's decision on a frozen item. Two gates, as with representation: a
+ * WRITE on the item (station scope), then the CUSTODY_RELEASE capability, which only
+ * an SHO holds. The holder of the article cannot unfreeze their own exception.
+ */
+router.post(
+  '/items/:id/lift-freeze',
+  authorize({ action: ACTION.WRITE, resourceType: RESOURCE_TYPE.CUSTODY_ITEM }),
+  authorizeCreate(RESOURCE_TYPE.CUSTODY_RELEASE, custody.releaseContext),
+  custody.liftFreeze
+);
+
+/** Who this item could be handed to next — named people, not database ids. */
+router.get(
+  '/items/:id/recipients',
+  authorize({ action: ACTION.READ, resourceType: RESOURCE_TYPE.CUSTODY_ITEM }),
+  custody.listRecipients
+);
+
 export default router;

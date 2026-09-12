@@ -77,10 +77,20 @@ function getContract({ readOnly = false } = {}) {
   return contract;
 }
 
-/** Deterministic 32-byte batch id from the sequence range it covers. */
-export function computeBatchId(fromSeq, toSeq) {
+/**
+ * Deterministic 32-byte batch id: the sequence range it covers AND the root it commits.
+ *
+ * The range alone is not unique. A ledger that is reset — every demo rehearsal does
+ * it — starts again at sequence 1, and its first batch would have asked the contract
+ * to anchor an id the contract already holds under a different root. The contract
+ * correctly refuses (and the batcher reports ON_CHAIN_ROOT_MISMATCH), so the new
+ * ledger could never be anchored at all. Committing the root keeps the id stable for
+ * a retry of the same batch — same entries, same root, same id — while two different
+ * ledgers can no longer collide.
+ */
+export function computeBatchId(fromSeq, toSeq, merkleRootHex) {
   return ethers.keccak256(
-    ethers.toUtf8Bytes(`lexx-batch:${ANCHOR_NETWORK}:${fromSeq}-${toSeq}`)
+    ethers.toUtf8Bytes(`lexx-batch:${ANCHOR_NETWORK}:${fromSeq}-${toSeq}:${String(merkleRootHex).toLowerCase()}`)
   );
 }
 
@@ -93,14 +103,29 @@ export function computeBatchId(fromSeq, toSeq) {
  * @returns {Promise<{batched:boolean, batch?:object, reason?:string}>}
  */
 export async function runAnchorCycle({ limit = env.ANCHOR_BATCH_MAX } = {}) {
+  // Settle anything whose transaction went out but whose outcome we never read back.
+  // Until that is known its entries are neither anchored nor free to re-batch, so a
+  // new batch over them would put the same entries on chain twice.
+  const reconciled = anchorCanSubmit ? await reconcileSubmittedBatches() : [];
+  if (reconciled.some((r) => r.status === ANCHOR_STATUS.SUBMITTED)) {
+    return { batched: false, reason: 'AWAITING_RECEIPT', reconciled, promoted: [] };
+  }
+
+  // History first. Roots computed while submission was off are still only local; now
+  // that it is on, they go to the chain before anything newer does, so the on-chain
+  // record has no hole where the dry-run period was.
+  const promoted = anchorCanSubmit ? await promoteDryRunBatches() : [];
+
   const entries = await getUnanchored(limit);
-  if (entries.length === 0) return { batched: false, reason: 'NOTHING_TO_ANCHOR' };
+  if (entries.length === 0) {
+    return { batched: false, reason: 'NOTHING_TO_ANCHOR', promoted, reconciled };
+  }
 
   const fromSeq = entries[0].seq;
   const toSeq = entries.at(-1).seq;
-  const batchId = computeBatchId(fromSeq, toSeq);
   const leafHashes = entries.map((e) => e.entryHash);
   const root = merkleRoot(leafHashes);
+  const batchId = computeBatchId(fromSeq, toSeq, root);
 
   // Guard 1: this exact range must not already have a batch. The unique index on
   // (fromSeq, toSeq) turns a concurrent second batcher into a duplicate-key error
@@ -120,11 +145,26 @@ export async function runAnchorCycle({ limit = env.ANCHOR_BATCH_MAX } = {}) {
       status: ANCHOR_STATUS.PENDING,
     });
   } catch (err) {
-    if (err?.code === 11000) {
-      log.warn({ fromSeq, toSeq }, 'batch for this range already exists; skipping');
-      return { batched: false, reason: 'BATCH_ALREADY_EXISTS' };
+    if (err?.code !== 11000) throw err;
+
+    // The range already has a batch. If it is one that definitively failed — nothing
+    // sent, or sent and reverted — the same entries are retried under the same id.
+    // Anything else (a concurrent batcher, a batch awaiting its receipt) is left alone.
+    const existing = await AnchorBatch.findOne({ fromSeq, toSeq }).lean();
+    const retryable =
+      anchorCanSubmit &&
+      existing?.status === ANCHOR_STATUS.FAILED &&
+      existing.batchId === batchId &&
+      (!existing.txHash ||
+        existing.failureReason === 'TRANSACTION_REVERTED' ||
+        existing.failureReason === 'TRANSACTION_DROPPED');
+    if (!retryable) {
+      log.warn({ fromSeq, toSeq, status: existing?.status }, 'batch for this range already exists; skipping');
+      return { batched: false, reason: 'BATCH_ALREADY_EXISTS', promoted, reconciled };
     }
-    throw err;
+    log.info({ fromSeq, toSeq }, 'retrying a failed batch for this range');
+    const result = await submitBatch(batchHandle({ ...existing, txHash: null, failureReason: null }), entries);
+    return { ...result, promoted, reconciled };
   }
 
   // Dry run: the pipeline is fully exercised and the root is verifiable locally.
@@ -141,7 +181,176 @@ export async function runAnchorCycle({ limit = env.ANCHOR_BATCH_MAX } = {}) {
     return { batched: true, batch: batch.toObject(), reason: 'DRY_RUN' };
   }
 
-  return submitBatch(batch, entries);
+  const result = await submitBatch(batch, entries);
+  return { ...result, promoted, reconciled };
+}
+
+/** The read-only chain connection, for receipts. */
+function getProvider() {
+  if (!getContract({ readOnly: true })) return null;
+  return provider;
+}
+
+/**
+ * Read a transaction's receipt and record what it says.
+ *
+ * `tx.wait()` is not the only way to learn an outcome, and on this RPC it is not a
+ * reliable one: a malformed reply while waiting ("could not coalesce error") used to
+ * mark a batch FAILED even when its transaction had been mined successfully — leaving
+ * its entries unstamped, its range blocked, and a real anchor on chain that our own
+ * record denied. The receipt is the fact; this reads it.
+ *
+ * @returns {Promise<'CONFIRMED'|'REVERTED'|'UNKNOWN'>}
+ */
+async function settleFromReceipt(batch, entries) {
+  const p = getProvider();
+  if (!p || !batch.txHash) return 'UNKNOWN';
+
+  let receipt;
+  try {
+    receipt = await p.getTransactionReceipt(batch.txHash);
+  } catch (err) {
+    log.warn({ batchId: batch.batchId, err: err?.shortMessage ?? err?.message }, 'receipt lookup failed');
+    return 'UNKNOWN';
+  }
+  if (!receipt) return 'UNKNOWN';
+
+  if (receipt.status !== 1) {
+    batch.status = ANCHOR_STATUS.FAILED;
+    batch.failureReason = 'TRANSACTION_REVERTED';
+    await batch.save();
+    return 'REVERTED';
+  }
+
+  batch.status = ANCHOR_STATUS.CONFIRMED;
+  batch.blockNumber = receipt.blockNumber;
+  batch.gasUsed = receipt.gasUsed?.toString() ?? null;
+  batch.failureReason = null;
+  batch.anchoredAt = batch.anchoredAt ?? new Date();
+  await batch.save();
+  await stampAnchorBatch(entries.map((e) => e.seq), batch.batchId);
+  log.info({ batchId: batch.batchId, txHash: batch.txHash, block: receipt.blockNumber }, 'anchor confirmed from receipt');
+  return 'CONFIRMED';
+}
+
+/**
+ * Batches whose transaction was sent but whose outcome is not recorded: SUBMITTED
+ * ones, and FAILED ones that nonetheless carry a transaction hash (the pre-fix record
+ * of an RPC error while waiting). Each is settled from its receipt.
+ */
+async function reconcileSubmittedBatches() {
+  const rows = await AnchorBatch.find({
+    txHash: { $ne: null },
+    $or: [
+      { status: ANCHOR_STATUS.SUBMITTED },
+      {
+        status: ANCHOR_STATUS.FAILED,
+        failureReason: { $nin: ['TRANSACTION_REVERTED', 'TRANSACTION_DROPPED'] },
+      },
+    ],
+  })
+    .sort({ fromSeq: 1 })
+    .limit(10)
+    .lean();
+
+  const outcomes = [];
+  for (const row of rows) {
+    const batch = batchHandle(row);
+    const entries = await Ledger.find({ seq: { $gte: row.fromSeq, $lte: row.toSeq } }).sort({ seq: 1 }).lean();
+    const outcome = await settleFromReceipt(batch, entries);
+
+    if (outcome === 'UNKNOWN') {
+      // No receipt. Recent: still waiting, and nothing new is batched over it. Long
+      // gone: the transaction was dropped, and the range is released to be retried.
+      const sentAt = new Date(row.lastAttemptAt ?? row.createdAt).getTime();
+      if (Date.now() - sentAt > RECEIPT_GIVE_UP_MS) {
+        batch.status = ANCHOR_STATUS.FAILED;
+        batch.failureReason = 'TRANSACTION_DROPPED';
+      } else {
+        batch.status = ANCHOR_STATUS.SUBMITTED;
+      }
+      await batch.save();
+    }
+    outcomes.push({ batchId: row.batchId, fromSeq: row.fromSeq, toSeq: row.toSeq, outcome, status: batch.status });
+  }
+  return outcomes;
+}
+
+/** How long an unanswered transaction is waited for before its range is retried. */
+const RECEIPT_GIVE_UP_MS = 30 * 60 * 1000;
+
+/**
+ * Submit batches that were sealed in DRY_RUN, oldest first.
+ *
+ * A DRY_RUN batch is a real, final batch: its range is fixed, its root is fixed, and
+ * its entries are already stamped with its id, so the ordinary cycle will never
+ * re-batch them. Without this, switching submission on would anchor only what came
+ * after the switch and leave everything before it provable to nobody but us.
+ *
+ * On a failure the batch goes BACK to DRY_RUN (with the reason kept) so the next cycle
+ * retries it — its entries are stamped, so leaving it FAILED would strand them
+ * permanently. The one exception is the chain disagreeing about the root, which no
+ * retry can fix and which an operator has to see.
+ */
+async function promoteDryRunBatches({ max = 5 } = {}) {
+  const rows = await AnchorBatch.find({ status: ANCHOR_STATUS.DRY_RUN })
+    .sort({ fromSeq: 1 })
+    .limit(max)
+    .lean();
+
+  const outcomes = [];
+  for (const batch of rows.map(batchHandle)) {
+    const entries = await Ledger.find({ anchorBatchId: batch.batchId }).sort({ seq: 1 }).lean();
+    const result = await submitBatch(batch, entries);
+    outcomes.push({ batchId: batch.batchId, fromSeq: batch.fromSeq, toSeq: batch.toSeq, ...pickOutcome(result) });
+
+    if (!result.batched) {
+      // submitBatch records a root disagreement as ON_CHAIN_ROOT_MISMATCH and then its
+      // catch re-records it under the error's code, ANCHOR_ROOT_MISMATCH.
+      if (!/ROOT_MISMATCH/.test(batch.failureReason ?? '')) {
+        batch.status = ANCHOR_STATUS.DRY_RUN;
+        await batch.save();
+      }
+      // An RPC outage will fail every batch behind this one too. Stop, and let the
+      // next cycle try again from the oldest.
+      break;
+    }
+    log.info({ batchId: batch.batchId, fromSeq: batch.fromSeq, toSeq: batch.toSeq }, 'dry-run batch anchored on chain');
+  }
+  return outcomes;
+}
+
+const pickOutcome = (r) => ({ batched: r.batched, reason: r.reason ?? null, txHash: r.batch?.txHash ?? null });
+
+/** The fields a batch may still change after creation. Everything else is immutable. */
+const MUTABLE_BATCH_FIELDS = Object.freeze([
+  'status', 'txHash', 'blockNumber', 'gasUsed', 'anchoredAt', 'failureReason', 'attempts',
+  'lastAttemptAt', 'contractAddress',
+]);
+
+/**
+ * A stored batch, shaped like the document `submitBatch` expects, without hydrating it.
+ *
+ * Hydrating an existing AnchorBatch through Mongoose fails: the schema's immutable
+ * fields carry defaults, and under `strict: 'throw'` applying those defaults to a
+ * document that is not new is refused. Rather than weaken either guard, promotion works
+ * on the plain row and writes back only the fields a batch is allowed to change.
+ */
+function batchHandle(row) {
+  const handle = { ...row, attempts: row.attempts ?? 0 };
+  handle.contractAddress = handle.contractAddress ?? env.ANCHOR_CONTRACT_ADDRESS ?? null;
+  handle.save = async () => {
+    const $set = {};
+    for (const key of MUTABLE_BATCH_FIELDS) $set[key] = handle[key] ?? null;
+    $set.attempts = handle.attempts ?? 0;
+    await AnchorBatch.updateOne({ _id: row._id }, { $set });
+    return handle;
+  };
+  handle.toObject = () => {
+    const { save: _save, toObject: _toObject, ...plain } = handle;
+    return plain;
+  };
+  return handle;
 }
 
 /**
@@ -225,10 +434,27 @@ async function submitBatch(batch, entries) {
 
     return { batched: true, batch: batch.toObject() };
   } catch (err) {
-    batch.status = ANCHOR_STATUS.FAILED;
     // Provider errors can be enormous and can echo request bodies; keep a short,
     // operator-facing summary and nothing else.
-    batch.failureReason = String(err?.shortMessage ?? err?.code ?? err?.message ?? 'UNKNOWN').slice(0, 200);
+    const summary = String(err?.shortMessage ?? err?.code ?? err?.message ?? 'UNKNOWN').slice(0, 200);
+
+    // Once the transaction has gone out, an error is NOT a failure — it is an
+    // unanswered question. Ask the receipt; if it has no answer yet, the batch stays
+    // SUBMITTED and the next cycle asks again.
+    if (batch.txHash && batch.status === ANCHOR_STATUS.SUBMITTED) {
+      const outcome = await settleFromReceipt(batch, entries);
+      if (outcome === 'CONFIRMED') return { batched: true, batch: batch.toObject(), reason: 'CONFIRMED_FROM_RECEIPT' };
+      if (outcome === 'UNKNOWN') {
+        batch.failureReason = summary;
+        await batch.save();
+        log.warn({ batchId: batch.batchId, txHash: batch.txHash, err: summary }, 'anchor outcome unknown; will re-check the receipt');
+        return { batched: false, reason: 'AWAITING_RECEIPT' };
+      }
+      return { batched: false, reason: 'TRANSACTION_REVERTED' };
+    }
+
+    batch.status = ANCHOR_STATUS.FAILED;
+    batch.failureReason = summary;
     await batch.save();
 
     log.error({ batchId: batch.batchId, err: batch.failureReason }, 'anchor failed');
@@ -248,8 +474,10 @@ export async function verifyAnchoredEntry(seq) {
   if (!entry) return { ok: false, reason: 'ENTRY_NOT_FOUND' };
   if (!entry.anchorBatchId) return { ok: false, reason: 'NOT_ANCHORED' };
 
+  // Every failure below still names the batch. The entry WAS stamped into one, and a
+  // caller that saw no batch id reported an integrity failure as "not batched yet".
   const batch = await AnchorBatch.findOne({ batchId: entry.anchorBatchId }).lean();
-  if (!batch) return { ok: false, reason: 'BATCH_NOT_FOUND' };
+  if (!batch) return { ok: false, reason: 'BATCH_NOT_FOUND', batchId: entry.anchorBatchId };
 
   const entries = await Ledger.find({ anchorBatchId: batch.batchId }).sort({ seq: 1 }).lean();
   const hashes = entries.map((e) => e.entryHash);
@@ -259,8 +487,13 @@ export async function verifyAnchoredEntry(seq) {
     return {
       ok: false,
       reason: 'ROOT_MISMATCH',
+      batchId: batch.batchId,
       publishedRoot: batch.merkleRoot,
       computedRoot: recomputedRoot,
+      network: batch.network,
+      chainId: batch.chainId,
+      txHash: batch.txHash,
+      explorerUrl: batch.txHash ? `${env.ANCHOR_EXPLORER_BASE}/tx/${batch.txHash}` : null,
     };
   }
 
@@ -325,6 +558,48 @@ export async function latestAnchor() {
   };
 }
 
+/**
+ * The most recent batches, newest first, for the public verifier's history.
+ *
+ * Same public projection as `latestAnchor` — roots and chain facts, never leaves —
+ * plus FAILED and SUBMITTED batches, because a verifier who can only see successes
+ * cannot tell a quiet pipeline from a broken one.
+ */
+export async function recentAnchors(limit = 10) {
+  const batches = await AnchorBatch.find({})
+    .sort({ fromSeq: -1 })
+    .limit(Math.min(Math.max(Number(limit) || 10, 1), 50))
+    .select('-leafHashes')
+    .lean();
+
+  return batches.map((b) => ({
+    batchId: b.batchId,
+    merkleRoot: b.merkleRoot,
+    fromSeq: b.fromSeq,
+    toSeq: b.toSeq,
+    leafCount: b.leafCount,
+    status: b.status,
+    txHash: b.txHash,
+    blockNumber: b.blockNumber,
+    anchoredAt: b.anchoredAt,
+    explorerUrl: b.txHash ? `${env.ANCHOR_EXPLORER_BASE}/tx/${b.txHash}` : null,
+  }));
+}
+
+/** What the public verifier needs to know about the chain side, stated in one place. */
+export function anchorConfig() {
+  return {
+    network: ANCHOR_NETWORK,
+    chainId: ANCHOR_CHAIN_ID,
+    submitting: anchorCanSubmit,
+    contractAddress: env.ANCHOR_CONTRACT_ADDRESS ?? null,
+    contractExplorerUrl: env.ANCHOR_CONTRACT_ADDRESS
+      ? `${env.ANCHOR_EXPLORER_BASE}/address/${env.ANCHOR_CONTRACT_ADDRESS}`
+      : null,
+    intervalMs: env.ANCHOR_INTERVAL_MS,
+  };
+}
+
 // ---------------------------------------------------------------- scheduler ----
 
 let timer = null;
@@ -377,6 +652,8 @@ export default {
   runAnchorCycle,
   verifyAnchoredEntry,
   latestAnchor,
+  recentAnchors,
+  anchorConfig,
   computeBatchId,
   startAnchorScheduler,
   stopAnchorScheduler,

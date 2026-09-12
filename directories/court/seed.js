@@ -4,7 +4,9 @@
  *
  * Idempotent: every document is upserted on its natural key (court code, judge
  * code, roster order + judge + court, CNR, staff code, CNR + advocate + party
- * side, legal-aid court order ref) — all unique-indexed.
+ * side, legal-aid court order ref) — all unique-indexed. The one exception is the
+ * demo case's vakalatnama register, which is emptied so each run starts with nobody
+ * on record (see VAKALATNAMAS below).
  *
  *   node directories/court/seed.js
  */
@@ -48,8 +50,10 @@ const COURTS = [
     name: 'Sessions Court No. 2, Ghaziabad',
     courtType: 'SESSIONS',
     // POCSO designation — this is what the jurisdiction router matches against
-    // once FIR 0123/2026 comes back as sensitivityClass POCSO.
-    designations: ['POCSO'],
+    // once FIR 0123/2026 comes back as sensitivityClass POCSO. The same court is
+    // also the district's designated Special Court under the SC/ST (Prevention of
+    // Atrocities) Act, which is where FIR 0125/2026 is routed.
+    designations: ['POCSO', 'SC_ST'],
     districtCode: 'UP-GZB',
     stateCode: 'UP',
   },
@@ -73,6 +77,15 @@ const JUDGES = [
     serviceStatus: 'ACTIVE',
     phone: '+91981002291',
   },
+  {
+    // The Magistrate bench. FIR 0124/2026 (maximum 3 years, ordinary) is triable
+    // by a Magistrate, so its chargesheet lands in CJM-01 and this judge's cause list.
+    judgeCode: 'UP-JUD-1180',
+    name: 'Smt. R. Chauhan',
+    designation: 'Chief Judicial Magistrate',
+    serviceStatus: 'ACTIVE',
+    phone: '+91981001180',
+  },
 ];
 
 const ROSTER = [
@@ -94,6 +107,14 @@ const ROSTER = [
     validFrom: D('2025-04-01'),
     validTo: D('2026-03-31'),
   },
+  {
+    rosterOrderRef: 'PDJ/GZB/ROSTER/2026-27',
+    judgeCode: 'UP-JUD-1180',
+    courtCode: 'UP-GZB-CJM-01',
+    caseCategories: ['MAGISTRATE_TRIAL'],
+    validFrom: D('2026-04-01'),
+    validTo: null,
+  },
 ];
 
 const LISTINGS = [
@@ -108,32 +129,45 @@ const LISTINGS = [
   },
 ];
 
+/**
+ * Registry staff. Evidence rooms only.
+ *
+ * There are no registrars here any more. Ruling on a vakalatnama and on disclosure is
+ * the presiding judge's act, verified against the roster; what a registry account is
+ * still needed for is receiving and keeping the physical articles produced in court,
+ * which is a real job that a judge does not do.
+ */
 const REGISTRY_STAFF = [
   {
-    staffCode: 'UP-GZB-REG-01',
-    name: 'Sh. Mohit Bansal',
+    // The Sessions Court's evidence room.
+    staffCode: 'UP-GZB-EVC-01',
+    name: 'Sh. Deepak Rana',
     courtCode: 'UP-GZB-SESS-02',
-    role: 'REGISTRAR',
+    role: 'EVIDENCE_CUSTODIAN',
     serviceStatus: 'ACTIVE',
-    phone: '+919810030001',
+    phone: '+919810030011',
+  },
+  {
+    // The Magistrate's evidence room, for the second demo case.
+    staffCode: 'UP-GZB-EVC-02',
+    name: 'Sh. Anil Tyagi',
+    courtCode: 'UP-GZB-CJM-01',
+    role: 'EVIDENCE_CUSTODIAN',
+    serviceStatus: 'ACTIVE',
+    phone: '+919810030002',
   },
 ];
 
-const VAKALATNAMAS = [
-  {
-    // Adv. Priya Sharma, on record for the accused. This is the record that
-    // makes Lexx grant her access to the case — and its absence for UP/9876/2019
-    // is the denial demo.
-    cnrNumber: DEMO_CNR,
-    advocateEnrolmentNo: 'UP/1234/2015',
-    appearingFor: 'ACCUSED',
-    partyName: 'Ramesh Singh',
-    filedOn: D('2026-05-04'),
-    acceptedByRegistrar: 'UP-GZB-REG-01',
-    acceptedOn: D('2026-05-06'),
-    status: 'ACCEPTED',
-  },
-];
+/**
+ * Deliberately empty.
+ *
+ * No advocate starts on record. An advocate comes on record the way the product says
+ * they do: they file a vakalatnama through Lexx, the presiding judge accepts it, and
+ * the acceptance is written HERE, into the court register, by the court's own act
+ * (POST /directory/vakalatnama). The demo seed drives exactly that sequence for
+ * UP/1234/2015; a row seeded here would be an advocate on record by fiat.
+ */
+const VAKALATNAMAS = [];
 
 const LEGAL_AID = [
   {
@@ -212,6 +246,29 @@ export async function seedCourt(opts = {}) {
       );
     }
 
+    // Registrars from an earlier version of this directory. The role no longer exists
+    // in the product, and an upsert-only seed would leave the old rows behind — so a
+    // stale staff code would still verify and Lexx would refuse it at activation with
+    // a confusing "unknown role" instead of "no such identity".
+    await RegistryStaff.deleteMany({ staffCode: { $nin: REGISTRY_STAFF.map((s) => s.staffCode) } });
+
+    // Registrations made during a rehearsal — a chargesheet filed on FIR 0124/2026 or
+    // 0125/2026 is registered HERE by the simulated registry act — are removed, so
+    // each seed starts with only the seeded listing before any court. `npm run reset`
+    // does not touch the directories, so without this a second run would find those
+    // cases already listed, under CNRs that no longer match anything in Lexx.
+    const seededCnrs = LISTINGS.map((l) => l.cnrNumber);
+    const rehearsal = await CaseListing.find({ cnrNumber: { $nin: seededCnrs } }).select('cnrNumber').lean();
+    await CaseListing.deleteMany({ cnrNumber: { $nin: seededCnrs } });
+
+    // The same for the vakalatnama register. Appearances accepted during a rehearsal
+    // are written here by the court's own act, and without this they would outlive
+    // `npm run reset` — leaving an advocate on record for the next run who never filed
+    // anything in it.
+    await Vakalatnama.deleteMany({
+      cnrNumber: { $in: [DEMO_CNR, ...rehearsal.map((l) => l.cnrNumber)] },
+    });
+
     for (const v of VAKALATNAMAS) {
       await upsert(
         Vakalatnama,
@@ -223,7 +280,7 @@ export async function seedCourt(opts = {}) {
         {
           partyName: v.partyName,
           filedOn: v.filedOn,
-          acceptedByRegistrar: v.acceptedByRegistrar,
+          acceptedBy: v.acceptedBy,
           acceptedOn: v.acceptedOn,
           status: v.status,
         }

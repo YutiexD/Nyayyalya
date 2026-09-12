@@ -31,7 +31,9 @@ import { Case } from '../models/Case.js';
 import { CustodyItem } from '../models/CustodyItem.js';
 import { Ledger } from '../models/Ledger.js';
 import { User } from '../models/User.js';
+import { Referral } from '../models/Referral.js';
 import {
+  REFERRAL_STATUS,
   LEDGER_EVENT,
   SUBJECT_TYPE,
   CUSTODY_STATUS,
@@ -42,6 +44,7 @@ import {
   DECISION,
   DENY_REASON,
   USER_STATUS,
+  ROLE,
   values,
 } from '../models/enums.js';
 import { appendEvent, getSubjectTimeline } from '../services/ledger.js';
@@ -95,6 +98,13 @@ const acceptSchema = z.object({
   sealIntact: z.boolean(),
 });
 
+const liftFreezeSchema = z.object({
+  /** The supervisor's recorded decision. Required: a freeze lifted without a reason is a gap. */
+  note: z.string().trim().min(10, 'State the decision and its basis').max(1000),
+  /** Re-sealed after inspection under a new seal, if it was. */
+  newSealNumber: z.string().trim().min(1).max(120).optional(),
+});
+
 // ---------------------------------------------------------------- helpers ----
 
 const sameId = (a, b) => a != null && b != null && String(a) === String(b);
@@ -122,7 +132,7 @@ const isLegalTransition = (from, to) => (CUSTODY_TRANSITIONS[from] ?? []).includ
 
 /**
  * The lawful one-hop-away states between `from` and `to`, for the gap report.
- * Everything routes through IN_STORE, so this almost always names the malkhana —
+ * Everything routes through IN_STORE, so this almost always names the station store —
  * which is precisely the point being made.
  */
 function intermediateStates(from, to) {
@@ -135,7 +145,11 @@ function intermediateStates(from, to) {
  */
 function allowedActions(item, user) {
   const actions = ['VIEW_CHAIN'];
-  if (item.frozen) return actions;
+  if (item.frozen) {
+    // A hint only: the release route runs the resolver's CUSTODY_RELEASE capability.
+    if (user.role === ROLE.SHO) actions.push('LIFT_FREEZE');
+    return actions;
+  }
   if (sameId(item.currentHolderUserId, user.userId) && (CUSTODY_TRANSITIONS[item.status] ?? []).length) {
     actions.push('INITIATE_TRANSFER');
   }
@@ -179,8 +193,69 @@ function itemView(item) {
     frozenAt: item.frozenAt ?? null,
     pendingTransfer: pending,
     qrPayload: item.qrPayload,
+    labelUrl: labelUrlFor(item.qrPayload),
     createdAt: item.createdAt,
   };
+}
+
+/**
+ * What the QR on a printed label encodes: the client's scan page, carrying the signed
+ * payload. A phone camera opens it straight into Lexx; a desk scanner that types the
+ * payload works too, because the scan page accepts either.
+ *
+ * Opening the link grants nothing — the page asks the server, the server verifies the
+ * HMAC and then runs the resolver on the item, exactly as for a typed payload.
+ */
+function labelUrlFor(qrPayload) {
+  return qrPayload ? `${env.PUBLIC_WEB_URL}/scan?label=${encodeURIComponent(qrPayload)}` : null;
+}
+
+/**
+ * Items as a person reads them off a register: with the FIR they belong to and the
+ * named officer holding them now. Two batched reads, not one per item.
+ */
+async function decorateItems(items) {
+  if (!items.length) return [];
+  const [cases, holders] = await Promise.all([
+    Case.find({ _id: { $in: [...new Set(items.map((i) => String(i.caseId)))] } })
+      .select('_id firNumber cnrNumber stationCode title')
+      .lean(),
+    User.find({
+      _id: {
+        $in: [
+          ...new Set(
+            items
+              .flatMap((i) => [i.currentHolderUserId, i.pendingTransfer?.toUserId, i.createdBy])
+              .filter(Boolean)
+              .map(String)
+          ),
+        ],
+      },
+    })
+      .select('_id name authorityId role')
+      .lean(),
+  ]);
+  const caseById = new Map(cases.map((c) => [String(c._id), c]));
+  const userById = new Map(holders.map((u) => [String(u._id), u]));
+  const person = (id) => {
+    const u = id ? userById.get(String(id)) : null;
+    return u ? { userId: String(u._id), name: u.name, authorityId: u.authorityId, role: u.role } : null;
+  };
+
+  return items.map((item) => {
+    const view = itemView(item);
+    const c = caseById.get(String(item.caseId));
+    return {
+      ...view,
+      firNumber: c?.firNumber ?? null,
+      cnrNumber: c?.cnrNumber ?? null,
+      currentHolder: person(item.currentHolderUserId),
+      bookedBy: person(item.createdBy),
+      pendingTransfer: view.pendingTransfer
+        ? { ...view.pendingTransfer, to: person(item.pendingTransfer.toUserId) }
+        : null,
+    };
+  });
 }
 
 /** Record a custody-specific refusal. The resolver audits its own decisions. */
@@ -278,18 +353,21 @@ export async function createItem(req, res, next) {
     });
 
     return res.status(201).json({
-      item: itemView(item.toObject()),
+      item: (await decorateItems([item.toObject()]))[0],
       // Everything the label printer needs, and nothing that could be mistaken for
       // an authority to move the item.
       qr: {
         payload: qrPayload,
+        url: labelUrlFor(qrPayload),
         itemCode,
         printable: {
           itemCode,
           exhibit: body.description,
           sealNumber: body.sealNumber,
+          identifiers: item.identifiers ?? {},
           firNumber: caseDoc.firNumber,
           stationCode: caseDoc.stationCode,
+          seizedBy: `${req.user.name ?? ''} (${req.user.authorityId})`.trim(),
           issuedAt: entry.occurredAt,
           notice: 'This label identifies the item. It grants no authority to move it.',
         },
@@ -339,7 +417,7 @@ export async function scanItem(req, res, next) {
     const item = req.resource;
     return res.json({
       tag: { authentic: true, itemCode: item.itemCode },
-      item: itemView(item),
+      item: (await decorateItems([item]))[0],
       allowedActions: allowedActions(item, req.user),
       nextStates: item.frozen ? [] : CUSTODY_TRANSITIONS[item.status] ?? [],
       // Stated in the payload so no client can render a scan as permission.
@@ -354,7 +432,7 @@ export async function scanItem(req, res, next) {
 // =============================================================== transfer ====
 
 /**
- * The malkhana rule.
+ * The store-keeper rule.
  *
  * An investigating officer may seize and may hand over, but may not be the store
  * keeper for evidence in their own case: the person who benefits from the exhibit
@@ -480,7 +558,7 @@ export async function initiateTransfer(req, res, next) {
       transferToken: token,
       expiresAt,
       expiresInSec: env.TRANSFER_TOKEN_TTL_SEC,
-      item: itemView(updated.toObject()),
+      item: (await decorateItems([updated.toObject()]))[0],
       ledgerSeq: entry.seq,
     });
   } catch (err) {
@@ -638,7 +716,7 @@ export async function acceptTransfer(req, res, next) {
     }
 
     return res.json({
-      item: itemView(consumed.toObject()),
+      item: (await decorateItems([consumed.toObject()]))[0],
       frozen: broken,
       integrityException: broken
         ? {
@@ -657,6 +735,161 @@ export async function acceptTransfer(req, res, next) {
   }
 }
 
+// ============================================================ freeze decision ====
+
+/** Create-context for the release capability: the item's own case, from the database. */
+export const releaseContext = (req) => ({
+  caseId: req.resource?.caseId ?? null,
+  stationCode: req.resource?.stationCode ?? null,
+});
+
+/**
+ * POST /api/custody/items/:id/lift-freeze   (SHO)
+ *
+ * A broken seal freezes an item "until an SHO records a decision" — and nothing could
+ * record one, so a single seal-broken tick stranded the article for good. This is that
+ * decision: written to the ledger with the supervisor's reasons, never erasing the
+ * exception it answers (the INTEGRITY_EXCEPTION stays in the chain, and every chain
+ * report keeps showing it). If the article was re-sealed after inspection, the new
+ * seal number is recorded against the old one.
+ */
+export async function liftFreeze(req, res, next) {
+  try {
+    const item = req.resource;
+    const body = parse(liftFreezeSchema, req.body);
+
+    if (!item.frozen) {
+      throw Conflict('CUSTODY_NOT_FROZEN', 'This item is not frozen; there is nothing to lift.');
+    }
+
+    const updated = await CustodyItem.findOneAndUpdate(
+      { _id: item._id, frozen: true },
+      {
+        $set: {
+          frozen: false,
+          frozenReason: null,
+          frozenAt: null,
+          ...(body.newSealNumber ? { sealNumber: body.newSealNumber, sealIntact: true } : {}),
+        },
+      },
+      { new: true }
+    );
+    if (!updated) throw Conflict('CONCURRENT_UPDATE', 'The item changed while lifting the freeze. Try again.');
+
+    const entry = await appendEvent({
+      eventType: LEDGER_EVENT.CUSTODY_FREEZE_LIFTED,
+      caseId: item.caseId,
+      subjectId: item._id,
+      subjectType: SUBJECT_TYPE.CUSTODY_ITEM,
+      actorUserId: req.user.userId,
+      actorRole: req.user.role,
+      payload: {
+        custodySeq: await nextCustodySeq(item._id),
+        itemCode: item.itemCode,
+        frozenReason: item.frozenReason ?? null,
+        decision: body.note,
+        previousSealNumber: item.sealNumber,
+        newSealNumber: body.newSealNumber ?? null,
+        decidedByAuthorityId: req.user.authorityId,
+      },
+    });
+
+    return res.json({
+      item: (await decorateItems([updated.toObject()]))[0],
+      ledgerSeq: entry.seq,
+      entryHash: entry.entryHash,
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+// ============================================================= recipients ====
+
+/**
+ * Which roles can sensibly RECEIVE an item into each state. A UI hint, not policy:
+ * the handshake re-checks the store rule, the transition, and the resolver runs on
+ * the recipient's own acceptance.
+ */
+const RECEIVERS_FOR_STATE = Object.freeze({
+  [CUSTODY_STATUS.IN_STORE]: ['SHO', 'IO'],
+  [CUSTODY_STATUS.AT_FSL]: ['FSL_EXAMINER', 'SHO', 'IO'],
+  [CUSTODY_STATUS.IN_COURT]: ['EVIDENCE_CUSTODIAN', 'JUDGE'],
+  [CUSTODY_STATUS.RETURNED]: ['SHO'],
+  [CUSTODY_STATUS.DESTROYED]: ['SHO'],
+});
+
+/** Where an item physically is once it reaches each state. */
+const LOCATION_FOR_STATE = Object.freeze({
+  [CUSTODY_STATUS.IN_STORE]: CUSTODY_LOCATION.MALKHANA,
+  [CUSTODY_STATUS.AT_FSL]: CUSTODY_LOCATION.FSL,
+  [CUSTODY_STATUS.IN_COURT]: CUSTODY_LOCATION.COURT,
+  [CUSTODY_STATUS.RETURNED]: CUSTODY_LOCATION.FIELD,
+  [CUSTODY_STATUS.DESTROYED]: CUSTODY_LOCATION.MALKHANA,
+});
+
+/**
+ * GET /api/custody/items/:id/recipients
+ *
+ * The people this item could lawfully be handed to next, so a sender picks a named
+ * officer instead of typing a database id. Drawn only from Lexx accounts whose
+ * directory-derived scope touches this item: police at its station, examiners at a
+ * laboratory holding a live referral in its case, and the court its case is listed
+ * in. The investigating officer is never offered as the store keeper for their own
+ * case — see the IO_CANNOT_HOLD_OWN_CASE_EVIDENCE rule below.
+ */
+export async function listRecipients(req, res, next) {
+  try {
+    const item = req.resource;
+    const caseDoc = req.caseDoc;
+    const nextStates = item.frozen ? [] : CUSTODY_TRANSITIONS[item.status] ?? [];
+
+    const labs = await Referral.distinct('labId', {
+      caseId: item.caseId,
+      status: { $in: [REFERRAL_STATUS.OPEN, REFERRAL_STATUS.ACCEPTED] },
+    });
+
+    const or = [{ 'scope.stationCode': item.stationCode, role: { $in: ['IO', 'SHO'] } }];
+    if (labs.length) or.push({ role: 'FSL_EXAMINER', 'scope.labId': { $in: labs } });
+    if (caseDoc?.courtId) {
+      or.push({ role: { $in: ['EVIDENCE_CUSTODIAN', 'JUDGE'] }, 'scope.courtId': caseDoc.courtId });
+    }
+
+    const users = await User.find({ status: USER_STATUS.ACTIVE, _id: { $ne: req.user.userId }, $or: or })
+      .select('_id name authorityId role scope')
+      .sort({ role: 1, name: 1 })
+      .lean();
+
+    const candidates = users
+      .map((u) => ({
+        userId: String(u._id),
+        name: u.name,
+        authorityId: u.authorityId,
+        role: u.role,
+        place: u.scope?.stationCode ?? u.scope?.labId ?? u.scope?.courtId ?? null,
+        // The states this person could receive the item into from where it is now.
+        forStates: nextStates.filter(
+          (s) =>
+            (RECEIVERS_FOR_STATE[s] ?? []).includes(u.role) &&
+            // The store-keeper rule, offered up front rather than refused afterwards.
+            !violatesIoCustodyRule(caseDoc, u._id, s)
+        ),
+      }))
+      .filter((c) => c.forStates.length);
+
+    return res.json({
+      itemId: String(item._id),
+      itemCode: item.itemCode,
+      status: item.status,
+      nextStates,
+      locationForState: LOCATION_FOR_STATE,
+      candidates,
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 // ================================================================== chain ====
 
 /** GET /api/custody/items/:id/chain — the full timeline, straight from the ledger. */
@@ -667,7 +900,9 @@ export async function getChain(req, res, next) {
     const analysis = analyseChain(item, entries);
 
     return res.json({
-      item: itemView(item),
+      item: (await decorateItems([item]))[0],
+      allowedActions: allowedActions(item, req.user),
+      nextStates: item.frozen ? [] : CUSTODY_TRANSITIONS[item.status] ?? [],
       events: entries.map((e) => ({
         seq: e.seq,
         custodySeq: e.payload?.custodySeq ?? null,
@@ -802,6 +1037,9 @@ function summarise(item, findings, ledgerState) {
   return {
     itemId: String(item._id),
     itemCode: item.itemCode,
+    // What the article IS. A gap report that names only the code makes a supervisor
+    // cross-reference the register to find out which sealed bag is in trouble.
+    description: item.description,
     caseId: String(item.caseId),
     recordedStatus: item.status,
     ledgerStatus: ledgerState,
@@ -826,7 +1064,7 @@ function summarise(item, findings, ledgerState) {
  * The custody register: what this user's scope actually contains.
  *
  * Added because there was no way to SEE a custody item. Every other custody route
- * addresses one item — by id, or by scanning its QR label — so a malkhana custodian
+ * addresses one item — by id, or by scanning its QR label — so a station officer
  * could accept a transfer for an item someone handed them, and could not answer
  * "what am I holding?" at all. `/gaps` was the only listing, and it returns only the
  * chains with findings, which is the exceptions, not the register.
@@ -835,6 +1073,21 @@ function summarise(item, findings, ledgerState) {
  * custodian sees their station, an SHO their station, a District SP their district —
  * and counsel and examiners, who hold no custody scope, see nothing.
  */
+/**
+ * Intersect the resolver's scope with a requested case — never replace it.
+ *
+ * This was `query.caseId = <requested id>`, which OVERWROTE the scope wherever the
+ * scope is itself a `caseId` set (an investigating officer's cases, a court's cases):
+ * `?caseId=` of any case in the system then listed its custody register, holders,
+ * seals and label payloads included. `$and` keeps both conditions whatever shape the
+ * scope takes, so a case outside it simply yields nothing.
+ */
+function narrowToCase(filter, rawCaseId) {
+  if (rawCaseId === undefined) return { ...filter };
+  const caseId = new mongoose.Types.ObjectId(parse(objectId, rawCaseId));
+  return { $and: [{ ...filter }, { caseId }] };
+}
+
 export async function listItems(req, res, next) {
   try {
     // Materialise: the raw filter can carry a sentinel that only the resolver knows
@@ -844,11 +1097,7 @@ export async function listItems(req, res, next) {
     const filter = await materialiseScopeFilter(req.user, RESOURCE_TYPE.CUSTODY_ITEM);
     if (!filter) return res.json({ items: [], total: 0 });
 
-    const query = { ...filter };
-    if (req.query.caseId !== undefined) {
-      const caseId = parse(objectId, req.query.caseId);
-      query.caseId = new mongoose.Types.ObjectId(caseId);
-    }
+    const query = narrowToCase(filter, req.query.caseId);
     if (req.query.status !== undefined) {
       query.status = parse(z.enum(Object.values(CUSTODY_STATUS)), req.query.status);
     }
@@ -858,7 +1107,7 @@ export async function listItems(req, res, next) {
       .limit(Math.min(Number(req.query.limit) || 100, 200))
       .lean();
 
-    return res.json({ items: items.map(itemView), total: items.length });
+    return res.json({ items: await decorateItems(items), total: items.length });
   } catch (err) {
     return next(err);
   }
@@ -874,11 +1123,7 @@ export async function listGaps(req, res, next) {
       return res.json({ items: [], total: 0, withFindings: 0, broken: [] });
     }
 
-    const query = { ...filter };
-    if (req.query.caseId !== undefined) {
-      const caseId = parse(objectId, req.query.caseId);
-      query.caseId = new mongoose.Types.ObjectId(caseId);
-    }
+    const query = narrowToCase(filter, req.query.caseId);
 
     const items = await CustodyItem.find(query)
       .sort({ createdAt: -1 })
@@ -924,6 +1169,9 @@ export default {
   initiateTransfer,
   acceptTransfer,
   getChain,
+  listRecipients,
+  liftFreeze,
+  releaseContext,
   listGaps,
   analyseChain,
 };

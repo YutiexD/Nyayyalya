@@ -33,6 +33,7 @@ import {
   FORENSIC_STATUS,
   FORENSIC_OPINION,
   FSL_DISCIPLINE,
+  TRIAGE_PRIORITY_ORDER,
 } from '../../models/enums.js';
 
 let mongo;
@@ -144,6 +145,29 @@ function fileReport(session, referralId, { opinion, bytes, signature, summary })
     .field('reportSha256', digest)
     .field('reportSignature', signature ?? session.keys.sign(digest))
     .attach('report', bytes, { filename: 'report.pdf', contentType: 'application/pdf' });
+}
+
+/** The statement an examiner signs, recomputed exactly as the server recomputes it. */
+const verdictDigest = (evidence, opinion, summary, documentSha256 = null) =>
+  sha256(
+    Buffer.from(
+      ['LEXX-FSL-VERDICT', 'v1', evidence.exhibitCode, opinion, summary, documentSha256 ?? '-'].join('|'),
+      'utf8'
+    )
+  );
+
+/** Record a verdict the way the browser does: hash the statement, sign the hash. */
+function recordVerdict(session, evidence, { opinion, summary = 'Examined; nothing further to report.', signature }) {
+  const digest = verdictDigest(evidence, opinion, summary);
+  return auth(
+    request(server).post(`/api/evidence/${evidence._id}/forensic-verdict`),
+    session
+  ).send({
+    opinion,
+    examinationSummary: summary,
+    verdictSha256: digest,
+    verdictSignature: signature ?? session.keys.sign(digest),
+  });
 }
 
 // ================================================================ referral ====
@@ -501,5 +525,194 @@ describe('automated triage and forensic opinion are separate claims', () => {
       expect(e.payload.triagePriority).toBeUndefined();
       expect(e.payload.triage).toBeUndefined();
     }
+  });
+});
+
+// ========================================================== review queue ====
+
+/**
+ * The queue the automatic review priority exists for.
+ *
+ * Before this, an exhibit reached a laboratory only when a police supervisor
+ * remembered to refer it — so the exhibits most likely to be manipulated sat in a
+ * station queue, unseen, and the priority computed for them at ingest had no
+ * audience at all. The laboratory now sees the digital evidence registered in the
+ * state it serves, in the order the system says it should be looked at.
+ */
+describe('the laboratory review queue', () => {
+  it('lists evidence never referred to anyone, worst first', async () => {
+    const { caseId, io } = await caseWithExhibit('queue-1');
+    // A second exhibit with several manipulation indicators, so the two land in
+    // different bands and the ordering is a real assertion rather than a tautology.
+    const bytes = pngBytes('queue-2');
+    const digest = sha256(bytes);
+    await auth(request(server).post('/api/evidence/upload'), io)
+      .field('caseId', caseId)
+      .field('title', 'Forwarded clip')
+      .field('sha256Client', digest)
+      .field('signature', io.keys.sign(digest))
+      .field('sourceType', 'MOBILE')
+      .field('metadata', JSON.stringify({ software: 'Adobe Photoshop 25.0' }))
+      .attach('file', bytes, { filename: 'whatsapp-forward.png', contentType: 'image/png' });
+
+    const examiner = await activateUser(server, EXAMINER);
+    const res = await auth(request(server).get('/api/fsl/queue'), examiner);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.labId).toBe(LAB);
+    expect(res.body.queue.length).toBe(2);
+
+    // Highest band first, and every row carries its priority and the disclaimer.
+    const ranks = res.body.queue.map((x) => TRIAGE_PRIORITY_ORDER.indexOf(x.triage.priority));
+    expect(ranks).toEqual([...ranks].sort((a, b) => a - b));
+    expect(res.body.uiLabel).toBe('Review Priority');
+    expect(res.body.disclaimer).toMatch(/Not expert opinion/i);
+  });
+
+  it('counts the pending work by band, and never counts finished work into it', async () => {
+    const { evidence } = await caseWithExhibit('counts');
+    const examiner = await activateUser(server, EXAMINER);
+
+    const before = await auth(request(server).get('/api/fsl/queue'), examiner);
+    expect(before.body.counts.pending).toBe(1);
+    expect(before.body.counts.reviewed).toBe(0);
+
+    await recordVerdict(examiner, evidence, { opinion: FORENSIC_OPINION.AUTHENTIC });
+
+    const after = await auth(request(server).get('/api/fsl/queue'), examiner);
+    expect(after.body.counts.pending).toBe(0);
+    expect(after.body.counts.reviewed).toBe(1);
+    // A band with nothing left to do in it reads as zero, not as history.
+    expect(Object.values(after.body.counts.byPriority).every((n) => n === 0)).toBe(true);
+  });
+
+  it('shows nobody else the laboratory queue', async () => {
+    await caseWithExhibit('scope');
+    const sho = await activateUser(server, SHO);
+    const res = await auth(request(server).get('/api/fsl/queue'), sho);
+    // Police hold no lab scope, so the queue is empty — the policy answering, not
+    // an empty register.
+    expect(res.status).toBe(200);
+    expect(res.body.queue).toEqual([]);
+    expect(res.body.labId).toBeNull();
+  });
+});
+
+// ============================================================== verdict ====
+
+/**
+ * The whole of the laboratory's act, in one step.
+ *
+ * The refer/accept/report pipeline still exists and is still right when a station
+ * puts named questions to a named lab about an article it has sent. What it made
+ * impossible was the simple case: an examiner looking at the queue, seeing a
+ * CRITICAL exhibit nobody had thought to refer, and wanting to record what they
+ * found. Three roles and two round trips stood between them and a sentence.
+ *
+ * What does not change: the vocabulary, the signature, and the ledger entry.
+ */
+describe('a direct forensic verdict', () => {
+  it('records a signed opinion with no referral in sight', async () => {
+    const { evidence } = await caseWithExhibit('verdict');
+    const examiner = await activateUser(server, EXAMINER);
+
+    const res = await recordVerdict(examiner, evidence, {
+      opinion: FORENSIC_OPINION.MANIPULATED,
+      summary: 'Re-encoding artefacts at frame boundaries consistent with a splice.',
+    });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.forensic.opinion).toBe(FORENSIC_OPINION.MANIPULATED);
+    expect(res.body.forensic.basis).toBe('DIRECT_REVIEW');
+    // The lab's identity is a directory fact, never a request field.
+    expect(res.body.forensic.labId).toBe(LAB);
+    expect(res.body.forensic.section79ARef).toBe('MeitY/79A/2019/17');
+
+    const stored = await Evidence.findById(evidence._id).lean();
+    expect(stored.forensic.opinion).toBe(FORENSIC_OPINION.MANIPULATED);
+    expect(stored.forensic.status).toBe(FORENSIC_STATUS.REPORT_FILED);
+    expect(stored.forensic.examinerName).toBeTruthy();
+
+    const entry = await Ledger.findOne({ eventType: LEDGER_EVENT.FSL_REPORT_FILED }).lean();
+    expect(entry.payload.opinion).toBe(FORENSIC_OPINION.MANIPULATED);
+    expect(entry.payload.basis).toBe('DIRECT_REVIEW');
+    expect((await verifyChain()).intact).toBe(true);
+  });
+
+  it('refuses a signature that does not verify, and logs the attempt', async () => {
+    const { evidence } = await caseWithExhibit('forged');
+    const examiner = await activateUser(server, EXAMINER);
+
+    const res = await recordVerdict(examiner, evidence, {
+      opinion: FORENSIC_OPINION.AUTHENTIC,
+      signature: 'f'.repeat(128),
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('SIGNATURE_INVALID');
+    expect(await Ledger.countDocuments({ eventType: LEDGER_EVENT.INTEGRITY_EXCEPTION })).toBe(1);
+    expect((await Evidence.findById(evidence._id).lean()).forensic.opinion).toBeNull();
+  });
+
+  it('refuses a digest that is not the digest of the verdict that arrived', async () => {
+    const { evidence } = await caseWithExhibit('swapped');
+    const examiner = await activateUser(server, EXAMINER);
+
+    // Sign a digest of one opinion, then send another. The server recomputes the
+    // statement from what it received, so the two cannot be separated.
+    const honest = verdictDigest(evidence, FORENSIC_OPINION.AUTHENTIC, 'Nothing to report.');
+    const res = await auth(
+      request(server).post(`/api/evidence/${evidence._id}/forensic-verdict`),
+      examiner
+    ).send({
+      opinion: FORENSIC_OPINION.MANIPULATED,
+      examinationSummary: 'Nothing to report.',
+      verdictSha256: honest,
+      verdictSignature: examiner.keys.sign(honest),
+    });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error.code).toBe('VERDICT_HASH_MISMATCH');
+  });
+
+  it('refuses everyone who is not a laboratory', async () => {
+    const { evidence, io } = await caseWithExhibit('who');
+    const sho = await activateUser(server, SHO);
+
+    for (const who of [io, sho]) {
+      const res = await recordVerdict(who, evidence, { opinion: FORENSIC_OPINION.AUTHENTIC });
+      expect(res.status, 'only a laboratory produces an authenticity opinion').toBe(403);
+    }
+    expect((await Evidence.findById(evidence._id).lean()).forensic.opinion).toBeNull();
+  });
+
+  it('does not read or write triage — the two claims stay separate', async () => {
+    const { evidence } = await caseWithExhibit('separate');
+    const examiner = await activateUser(server, EXAMINER);
+    const before = (await Evidence.findById(evidence._id).lean()).triage;
+
+    await recordVerdict(examiner, evidence, { opinion: FORENSIC_OPINION.INCONCLUSIVE });
+
+    const after = (await Evidence.findById(evidence._id).lean()).triage;
+    expect(after).toEqual(before);
+
+    const entry = await Ledger.findOne({ eventType: LEDGER_EVENT.FSL_REPORT_FILED }).lean();
+    expect(entry.payload.triagePriority).toBeUndefined();
+    expect(entry.payload.triage).toBeUndefined();
+  });
+
+  it('closes any referral the laboratory still had open on the exhibit', async () => {
+    const { evidence } = await caseWithExhibit('closes');
+    const sho = await activateUser(server, SHO);
+    const referred = await refer(sho, evidence._id);
+    expect(referred.status).toBe(201);
+
+    const examiner = await activateUser(server, EXAMINER);
+    await recordVerdict(examiner, evidence, { opinion: FORENSIC_OPINION.AUTHENTIC });
+
+    // Otherwise the same work reads as outstanding on one screen and finished on
+    // another.
+    const stored = await Referral.findById(referred.body.referral.id).lean();
+    expect(stored.status).toBe(REFERRAL_STATUS.REPORTED);
   });
 });

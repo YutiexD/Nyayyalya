@@ -14,7 +14,7 @@ import { z } from 'zod';
 import { Ledger } from '../models/Ledger.js';
 import { Case } from '../models/Case.js';
 import { verifyChain } from '../services/ledger.js';
-import { verifyAnchoredEntry, latestAnchor } from '../services/anchor.js';
+import { verifyAnchoredEntry, latestAnchor, recentAnchors, anchorConfig } from '../services/anchor.js';
 import { materialiseScopeFilter } from '../services/accessResolver.js';
 import { RESOURCE_TYPE } from '../models/enums.js';
 import { BadRequest } from '../utils/errors.js';
@@ -132,4 +132,74 @@ export async function latestAnchorBatch(req, res, next) {
   }
 }
 
-export default { caseLedger, verifyLedgerChain, entryAnchorProof, latestAnchorBatch };
+/**
+ * GET /api/anchors/entry/:seq/:entryHash  — PUBLIC.
+ *
+ * Checks an upload receipt without an account. The officer's receipt carries the
+ * ledger sequence and entry hash of the upload; anyone holding it can ask whether the
+ * register still holds exactly that entry, whether it sits under an anchored Merkle
+ * root, and whether the contract on chain agrees.
+ *
+ * The entry hash is the credential, the way a certificate token is: without it this
+ * answers "no such receipt" and nothing else, identically for a wrong hash and a
+ * missing entry. With it, the answer is validity and chain facts — never the payload,
+ * the case, or anyone's name.
+ */
+export async function verifyReceipt(req, res, next) {
+  try {
+    const seq = Number(req.params.seq);
+    const entryHash = String(req.params.entryHash ?? '').toLowerCase();
+    const wellFormed = Number.isInteger(seq) && seq > 0 && /^[0-9a-f]{64}$/.test(entryHash);
+
+    const entry = wellFormed ? await Ledger.findOne({ seq }).select('seq entryHash occurredAt eventType').lean() : null;
+    if (!entry || entry.entryHash !== entryHash) {
+      return res.status(404).json({ valid: false, reason: 'RECEIPT_NOT_FOUND' });
+    }
+
+    const proof = await verifyAnchoredEntry(seq);
+    return res.json({
+      valid: true,
+      seq,
+      entryHash,
+      eventType: entry.eventType,
+      recordedAt: entry.occurredAt,
+      anchored: Boolean(proof.batchId),
+      includedInRoot: proof.ok === true,
+      reason: proof.ok ? null : proof.reason,
+      batchId: proof.batchId ?? null,
+      merkleRoot: proof.publishedRoot ?? null,
+      onChainVerified: proof.onChainVerified ?? null,
+      network: proof.network ?? null,
+      txHash: proof.txHash ?? null,
+      explorerUrl: proof.explorerUrl ?? null,
+      disclosure:
+        'This check reports that the register holds this exact entry and whether it is committed to an anchored root. It discloses nothing about what the entry records.',
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+/**
+ * GET /api/anchors/recent?limit=  — PUBLIC.
+ *
+ * The anchoring history, with each batch's transaction and explorer link, plus the
+ * contract and whether this deployment is submitting at all. The same public
+ * projection as /latest: roots and chain facts, nothing about the records.
+ */
+export async function recentAnchorBatches(req, res, next) {
+  try {
+    return res.json({ ...anchorConfig(), batches: await recentAnchors(req.query.limit) });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+export default {
+  caseLedger,
+  verifyLedgerChain,
+  entryAnchorProof,
+  latestAnchorBatch,
+  recentAnchorBatches,
+  verifyReceipt,
+};

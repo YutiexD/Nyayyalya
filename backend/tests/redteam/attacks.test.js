@@ -109,10 +109,13 @@ describe('ATTACK: privilege escalation through the request body', () => {
       scope: { districtCode: 'UP-GZB' },
     });
 
+    // The directory posts this officer as an IO at a station. The body asked for a
+    // District SP with district-wide scope; the body is not consulted.
     expect(res.status).toBe(201);
-    expect(res.body.user.role).toBe(ROLE.MALKHANA_CUSTODIAN);
+    expect(res.body.user.role).toBe(ROLE.IO);
     const stored = await User.findOne({ authorityId: 'UP-GZB-4455' }).lean();
-    expect(stored.role).toBe(ROLE.MALKHANA_CUSTODIAN);
+    expect(stored.role).toBe(ROLE.IO);
+    expect(stored.scope.stationCode).toBe('UP-GZB-KVN'); // from the directory, not the body
     expect(stored.scope.districtCode).toBe('UP-GZB'); // from the directory, not the body
   });
 

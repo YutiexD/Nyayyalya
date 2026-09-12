@@ -105,10 +105,8 @@ export function validateGenerateBody(req, res, next) {
 const DESIGNATION = Object.freeze({
   [ROLE.IO]: 'Investigating Officer',
   [ROLE.SHO]: 'Station House Officer',
-  [ROLE.MALKHANA_CUSTODIAN]: 'Malkhana Custodian',
   [ROLE.DISTRICT_SP]: 'Superintendent of Police',
   [ROLE.JUDGE]: 'Presiding Judge',
-  [ROLE.REGISTRAR]: 'Registrar',
   [ROLE.EVIDENCE_CUSTODIAN]: 'Evidence Custodian',
   [ROLE.FSL_EXAMINER]: 'Forensic Examiner',
   [ROLE.PUBLIC_PROSECUTOR]: 'Public Prosecutor',
@@ -358,13 +356,30 @@ const certificateView = (cert) => ({
   bodyHash: certificateBodyHash(cert),
 });
 
+/**
+ * Record a new PDF digest, keeping the one it replaces.
+ *
+ * A copy of the earlier render may already be in someone's hands — a certificate
+ * handed to defence counsel before the examiner signed Part B — and the public
+ * verifier has to be able to call that copy genuine-but-superseded rather than
+ * unknown. Only digests are kept.
+ */
+function recordPdfDigest(certDoc, stored) {
+  const previous = certDoc.pdfSha256;
+  const history = [...(certDoc.pdfHistory ?? [])];
+  if (previous && previous !== stored.pdfSha256 && !history.some((h) => h.sha256 === previous)) {
+    history.push({ sha256: previous, supersededAt: new Date() });
+  }
+  // `set()` rather than direct assignment: the document is a caller-owned parameter,
+  // and mutating one across an await is exactly the pattern that produces torn state.
+  certDoc.set({ pdfKey: stored.pdfKey, pdfSha256: stored.pdfSha256, pdfHistory: history });
+}
+
 /** Render, store, and record the PDF hash. Called after every change to the body. */
 async function refreshPdf(certDoc, { caseDoc, evidence }) {
   const pdf = await renderCertificatePdf({ certificate: certDoc, caseDoc, evidence });
   const stored = await storeCertificatePdf(certDoc, pdf);
-  // `set()` rather than direct assignment: the document is a caller-owned parameter,
-  // and mutating one across an await is exactly the pattern that produces torn state.
-  certDoc.set({ pdfKey: stored.pdfKey, pdfSha256: stored.pdfSha256 });
+  recordPdfDigest(certDoc, stored);
   await certDoc.save();
   return { pdf, ...stored };
 }
@@ -372,7 +387,7 @@ async function refreshPdf(certDoc, { caseDoc, evidence }) {
 // ============================================================== 1. GENERATE ====
 
 /**
- * POST /api/certificates/generate  { evidenceId }   (IO, REGISTRAR)
+ * POST /api/certificates/generate  { evidenceId }   (IO, JUDGE)
  *
  * A certificate is a point-in-time statement about a record. Generating a second one
  * does not edit the first — signed documents are never edited — it issues a new one,
@@ -520,6 +535,87 @@ async function hasIntegrityException(evidence) {
 /** GET /api/certificates/:id — metadata and the body hash a signer needs. */
 export async function getCertificate(req, res) {
   return res.json({ certificate: certificateView(req.resource) });
+}
+
+/**
+ * GET /api/fsl/referrals/:id/certificates
+ *
+ * The examiner's route to the certificates whose Part B reproduces their report. It
+ * cannot be the evidence route: an examiner's READ on an exhibit ends when the
+ * referral is REPORTED, which is exactly when Part B becomes signable. Authorised as a
+ * READ of the REFERRAL instead, which the resolver scopes to the examiner's own lab.
+ */
+export async function listForReferral(req, res, next) {
+  try {
+    const referral = req.resource;
+    const certificates = await Certificate.find({ evidenceId: referral.evidenceId })
+      .sort({ generatedAt: -1 })
+      .lean();
+    const evidence = await Evidence.findById(referral.evidenceId).select('forensic.status').lean();
+    return res.json({
+      evidenceId: String(referral.evidenceId),
+      exhibitCode: referral.exhibitCode,
+      ...partBStanding(evidence, certificates),
+      certificates: certificates.map(certificateView),
+      total: certificates.length,
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+/**
+ * Whether the exhibit now has a laboratory report that its newest certificate does not
+ * carry. A certificate is a point-in-time statement: one issued before the report has
+ * a blank Part B forever, and the examiner can sign nothing until a fresh one is
+ * issued. Said here so every screen can say it, instead of the lab waiting in silence.
+ */
+function partBStanding(evidence, certificates) {
+  const reportFiled = evidence?.forensic?.status === FORENSIC_STATUS.REPORT_FILED;
+  const newest = certificates[0] ?? null;
+  return {
+    reportFiled,
+    freshCertificateNeeded: reportFiled && Boolean(newest) && !newest.partBComplete,
+  };
+}
+
+/**
+ * Validate `?evidenceId=` before the resolver is asked to load it, for the same
+ * reason as the generate body: a malformed id should be a validation failure, not a
+ * cast error.
+ */
+export function validateEvidenceQuery(req, res, next) {
+  try {
+    parse(z.object({ evidenceId: objectId }), { evidenceId: req.query.evidenceId });
+    return next();
+  } catch (err) {
+    return next(err);
+  }
+}
+
+/**
+ * GET /api/certificates?evidenceId=
+ *
+ * Every certificate issued for one exhibit, newest first. Authorised as a READ of the
+ * EXHIBIT, so it reaches exactly the people who may read the exhibit itself — an
+ * advocate only for an exhibit in the set served on them, an examiner only for one
+ * referred to their laboratory. A certificate is a statement about an exhibit and is
+ * never more visible than the exhibit.
+ */
+export async function listForEvidence(req, res, next) {
+  try {
+    const evidence = req.resource;
+    const certificates = await Certificate.find({ evidenceId: evidence._id }).sort({ generatedAt: -1 }).lean();
+    return res.json({
+      evidenceId: String(evidence._id),
+      exhibitCode: evidence.exhibitCode,
+      ...partBStanding(evidence, certificates),
+      certificates: certificates.map(certificateView),
+      total: certificates.length,
+    });
+  } catch (err) {
+    return next(err);
+  }
 }
 
 // =============================================================== 3. SIGNING ====
@@ -678,8 +774,7 @@ export async function getPdf(req, res, next) {
     const digest = sha256Hex(pdf);
     if (digest !== certificate.pdfSha256) {
       const stored = await storeCertificatePdf(certificate, pdf);
-      certificate.pdfKey = stored.pdfKey;
-      certificate.pdfSha256 = stored.pdfSha256;
+      recordPdfDigest(certificate, stored);
       await certificate.save();
     }
 
@@ -772,7 +867,27 @@ export async function publicVerify(req, res, next) {
     const partySig = has('PARTY');
     const expertSig = has('EXPERT');
 
+    // ---- the copy a holder has in their hand, if they sent its digest ----
+    // Party A hands Party B a PDF; Party B hashes it (the client does this in the
+    // browser — the document itself never comes here) and asks whether it is the
+    // registered document. A digest of the current render is CURRENT; one of an
+    // earlier render (before a later signature was added) is EARLIER_VERSION; anything
+    // else is NO_MATCH — a genuine token attached to a document that is not ours.
+    let copy = null;
+    if (typeof req.query.copy === 'string') {
+      const digest = req.query.copy.trim().toLowerCase();
+      if (/^[0-9a-f]{64}$/.test(digest)) {
+        const earlier = (certificate.pdfHistory ?? []).find((h) => h.sha256 === digest);
+        copy = {
+          sha256: digest,
+          match: digest === certificate.pdfSha256 ? 'CURRENT' : earlier ? 'EARLIER_VERSION' : 'NO_MATCH',
+          supersededAt: earlier?.supersededAt ?? null,
+        };
+      }
+    }
+
     return res.json({
+      copy,
       valid: true,
       issuer: 'LEXX',
       certificate: {

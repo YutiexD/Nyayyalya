@@ -15,16 +15,28 @@ export function cn(...inputs) {
  * FSL are not words, and an Indian audience reads `Pocso` as a typo.
  */
 const ACRONYMS = new Set([
-  'AI', 'BNS', 'BNSS', 'CCTV', 'CCTNS', 'CNR', 'DNA', 'FIR', 'FSL', 'GPS', 'HDD',
+  'AI', 'BNS', 'BNSS', 'CCTV', 'CCTNS', 'CD', 'CNR', 'DNA', 'DVD', 'DVR', 'FIR', 'FSL', 'GPS', 'HDD',
   'ID', 'IMEI', 'IO', 'IP', 'IT', 'MMS', 'OTP', 'PDF', 'PII', 'PIS', 'POCSO', 'QR',
   'SHO', 'SIM', 'SP', 'SSD', 'UID', 'USB', 'UPI', 'URL',
 ]);
+
+/**
+ * Codes that are a single legal name rather than words to split. `SC_ST` is the
+ * Scheduled Castes and Tribes (Prevention of Atrocities) Act; split, it read "Sc st".
+ */
+const WHOLE_CODES = Object.freeze({
+  SC_ST: 'SC/ST',
+  SPECIAL_SC_ST: 'Special (SC/ST)',
+  SPECIAL_POCSO: 'Special (POCSO)',
+  NDPS: 'NDPS',
+});
 
 /** SEIZED -> "Seized", REFERRED_TO_FSL -> "Referred to FSL", POCSO -> "POCSO". */
 export const humanise = (code) =>
   !code
     ? ''
-    : String(code)
+    : WHOLE_CODES[String(code)] ??
+      String(code)
         .split('_')
         .filter(Boolean)
         .map((word, i) => {

@@ -236,7 +236,7 @@ A stale bare `sepolia` in any configuration position fails the build (`npm run v
 | 6 | Watermarking is an overlay plus a recorded token | Not steganographic; a determined leaker can crop it |
 | 7 | Response id field names are inconsistent | `_id` / `id` / `packId` / `certificateId` across modules. Cosmetic but real; normalising would ripple through four test suites |
 | 8 | Compliance clocks are stored but not enforced | `disclosureDueOn` is computed; nothing escalates when it passes |
-| 9 | No pack-lookup endpoint for court users | A registrar must be handed a `packId` rather than listing packs for a case |
+| 9 | ~~No pack-lookup endpoint for court users~~ | Closed: `GET /api/disclosure/case/:caseId/packs`, and the court shares a case file in one act rather than by pack id |
 | 10 | `POST /api/evidence/:id/verify` requires a session | So the four lights cannot be driven from the fully public page |
 
 ### 7.2 Production blockers — must be fixed before any real deployment

@@ -12,7 +12,7 @@
 import { z } from 'zod';
 import { Case } from '../models/Case.js';
 import { Evidence } from '../models/Evidence.js';
-import { materialiseScopeFilter } from '../services/accessResolver.js';
+import { materialiseScopeFilter, seesTriage } from '../services/accessResolver.js';
 import { writeAudit } from '../middleware/audit.js';
 import { RESOURCE_TYPE, ACTION, DECISION } from '../models/enums.js';
 import { BadRequest, ServiceUnavailable } from '../utils/errors.js';
@@ -44,8 +44,12 @@ export async function search(req, res, next) {
       req.query
     );
 
-    // 1. What may this user see AT ALL?
+    // 1. What may this user see AT ALL? Cases and exhibits are scoped separately:
+    // counsel see only the SERVED exhibits of a case they are on record for, and an
+    // examiner only the exhibits referred to their laboratory. Searching exhibits under
+    // the CASE scope found withheld and unreferred exhibits — title, code and all.
     const caseFilter = await materialiseScopeFilter(req.user, RESOURCE_TYPE.CASE);
+    const evidenceFilter = await materialiseScopeFilter(req.user, RESOURCE_TYPE.EVIDENCE);
 
     await writeAudit(req, {
       action: ACTION.READ,
@@ -84,10 +88,19 @@ export async function search(req, res, next) {
           .select('firNumber title stage stationCode districtCode createdAt')
           .limit(q.limit)
           .lean(),
-        Evidence.find({ caseId: { $in: scopedCaseIds }, $text: { $search: q.q } })
-          .select('exhibitCode title caseId mimeType triage.priority courtStatus createdAt')
-          .limit(q.limit)
-          .lean(),
+        evidenceFilter
+          ? Evidence.find({
+              $text: { $search: q.q },
+              $and: [{ ...evidenceFilter }, { caseId: { $in: scopedCaseIds } }],
+            })
+              .select(
+                `exhibitCode title caseId mimeType courtStatus createdAt${
+                  seesTriage(req.user) ? ' triage.priority' : ''
+                }`
+              )
+              .limit(q.limit)
+              .lean()
+          : [],
       ]);
     } catch (err) {
       // Log the real database error for an operator; return a safe, typed code to the

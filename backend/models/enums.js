@@ -16,15 +16,29 @@ export const AUTHORITY = Object.freeze({
   LEGAL: 'LEGAL',
 });
 
+/**
+ * The roles this product has.
+ *
+ * Two roles that existed here are deliberately gone, and their absence is a design
+ * decision rather than an omission:
+ *
+ *   MALKHANA_CUSTODIAN — a separate store-keeper account made every physical
+ *     movement wait on a third person. The station store is still a place
+ *     (CUSTODY_LOCATION.MALKHANA, shown as "Station store"), and every handover is
+ *     still a two-scan, ledgered handshake; it is the station's own officers who
+ *     keep it, so no workflow blocks on a role nobody has logged in as.
+ *
+ *   REGISTRAR — every registry act (ruling on disclosure, serving it, putting an
+ *     advocate on record, issuing a certificate) is now the presiding judge's. One
+ *     court identity, one queue, no approval hop that adds nothing but latency.
+ */
 export const ROLE = Object.freeze({
   // POLICE
   IO: 'IO',
   SHO: 'SHO',
-  MALKHANA_CUSTODIAN: 'MALKHANA_CUSTODIAN',
   DISTRICT_SP: 'DISTRICT_SP',
   // COURT
   JUDGE: 'JUDGE',
-  REGISTRAR: 'REGISTRAR',
   EVIDENCE_CUSTODIAN: 'EVIDENCE_CUSTODIAN',
   // FSL
   FSL_EXAMINER: 'FSL_EXAMINER',
@@ -37,8 +51,8 @@ export const ROLE = Object.freeze({
 
 /** Which authority may hold which role. Enforced at activation — never client-supplied. */
 export const ROLES_BY_AUTHORITY = Object.freeze({
-  [AUTHORITY.POLICE]: [ROLE.IO, ROLE.SHO, ROLE.MALKHANA_CUSTODIAN, ROLE.DISTRICT_SP],
-  [AUTHORITY.COURT]: [ROLE.JUDGE, ROLE.REGISTRAR, ROLE.EVIDENCE_CUSTODIAN],
+  [AUTHORITY.POLICE]: [ROLE.IO, ROLE.SHO, ROLE.DISTRICT_SP],
+  [AUTHORITY.COURT]: [ROLE.JUDGE, ROLE.EVIDENCE_CUSTODIAN],
   [AUTHORITY.FSL]: [ROLE.FSL_EXAMINER],
   [AUTHORITY.LEGAL]: [
     ROLE.DEFENCE_COUNSEL,
@@ -73,8 +87,30 @@ export const CASE_STAGE = Object.freeze({
   CHARGESHEET_FILED: 'CHARGESHEET_FILED',
   COMMITTED: 'COMMITTED',
   TRIAL: 'TRIAL',
+  /** The court has closed the case. Nothing is deleted; the record is sealed as it stands. */
+  CLOSED: 'CLOSED',
   DISPOSED: 'DISPOSED',
 });
+
+/**
+ * The lifecycle, in the order a person watching would expect to see it.
+ *
+ * The UI draws this as one strip so the whole journey is legible at a glance. Note
+ * what it does NOT claim: a case does not wait at a stage for the next one. Forensic
+ * review runs alongside the investigation, and the court reads the file whether or
+ * not a laboratory has reported.
+ */
+export const CASE_LIFECYCLE = Object.freeze([
+  CASE_STAGE.UNDER_INVESTIGATION,
+  CASE_STAGE.FURTHER_INVESTIGATION,
+  CASE_STAGE.CHARGESHEET_FILED,
+  CASE_STAGE.COMMITTED,
+  CASE_STAGE.TRIAL,
+  CASE_STAGE.CLOSED,
+]);
+
+/** Stages in which the case is finished and nothing further may be recorded against it. */
+export const CLOSED_CASE_STAGES = Object.freeze([CASE_STAGE.CLOSED, CASE_STAGE.DISPOSED]);
 
 /** Stages in which an investigating officer may still write. Spec §5. */
 export const WRITABLE_CASE_STAGES = Object.freeze([
@@ -115,8 +151,30 @@ export const SOURCE_TYPE = Object.freeze({
 /**
  * AI output vocabulary. Deliberately small and deliberately not a verdict.
  * There is no "AUTHENTIC" here and there never will be — see FORENSIC_OPINION.
+ *
+ * Four bands, not three. CRITICAL exists because "look at this first" and "look at
+ * this before anything else" are genuinely different instructions to a laboratory
+ * with a queue, and collapsing them made the top of the queue unreadable.
  */
-export const TRIAGE_PRIORITY = Object.freeze({ HIGH: 'HIGH', MEDIUM: 'MEDIUM', LOW: 'LOW' });
+export const TRIAGE_PRIORITY = Object.freeze({
+  CRITICAL: 'CRITICAL',
+  HIGH: 'HIGH',
+  MEDIUM: 'MEDIUM',
+  LOW: 'LOW',
+});
+
+/** Highest first. The one ordering every queue in the product sorts by. */
+export const TRIAGE_PRIORITY_ORDER = Object.freeze([
+  TRIAGE_PRIORITY.CRITICAL,
+  TRIAGE_PRIORITY.HIGH,
+  TRIAGE_PRIORITY.MEDIUM,
+  TRIAGE_PRIORITY.LOW,
+]);
+
+/** Its rank, for a Mongo `$switch` or a client-side sort. Lower sorts first. */
+export const TRIAGE_PRIORITY_RANK = Object.freeze(
+  TRIAGE_PRIORITY_ORDER.reduce((acc, p, i) => ({ ...acc, [p]: i }), {})
+);
 
 export const TRIAGE_DISCLAIMER =
   'Automated triage only. Not expert opinion under BSA s.39 / IT Act s.79A.';
@@ -160,7 +218,9 @@ export const CUSTODY_STATUS = Object.freeze({
 
 /**
  * Legal custody state machine. A jump that is not in this map is a chain gap.
- * Everything routes through the malkhana (IN_STORE) — that is the point of a malkhana.
+ * Everything routes through the station store (IN_STORE) — that is the point of a
+ * store. Who keeps it is the station's own officers; there is no separate custodian
+ * account for a handover to wait on.
  */
 export const CUSTODY_TRANSITIONS = Object.freeze({
   [CUSTODY_STATUS.SEIZED]: [CUSTODY_STATUS.IN_STORE],
@@ -176,6 +236,11 @@ export const CUSTODY_TRANSITIONS = Object.freeze({
   [CUSTODY_STATUS.DESTROYED]: [],
 });
 
+/**
+ * Where an article physically is. `MALKHANA` is the station's own evidence store and
+ * is labelled "Station store" everywhere a person reads it — the value is kept
+ * because it is written into ledger entries that can never be rewritten.
+ */
 export const CUSTODY_LOCATION = Object.freeze({
   MALKHANA: 'MALKHANA',
   FSL: 'FSL',
@@ -188,6 +253,8 @@ export const CUSTODY_LOCATION = Object.freeze({
 export const LEDGER_EVENT = Object.freeze({
   CASE_CREATED: 'CASE_CREATED',
   CASE_STAGE_CHANGED: 'CASE_STAGE_CHANGED',
+  /** The court closing the case. Its own event because it is the end of the story. */
+  CASE_CLOSED: 'CASE_CLOSED',
   EVIDENCE_UPLOADED: 'EVIDENCE_UPLOADED',
   CUSTODY_ITEM_CREATED: 'CUSTODY_ITEM_CREATED',
   CUSTODY_TRANSFER_INITIATED: 'CUSTODY_TRANSFER_INITIATED',
@@ -205,6 +272,10 @@ export const LEDGER_EVENT = Object.freeze({
   EXHIBIT_MARKED: 'EXHIBIT_MARKED',
   JUDICIAL_ORDER: 'JUDICIAL_ORDER',
   INTEGRITY_EXCEPTION: 'INTEGRITY_EXCEPTION',
+  CUSTODY_FREEZE_LIFTED: 'CUSTODY_FREEZE_LIFTED',
+  VAKALATNAMA_FILED: 'VAKALATNAMA_FILED',
+  VAKALATNAMA_ACCEPTED: 'VAKALATNAMA_ACCEPTED',
+  VAKALATNAMA_REJECTED: 'VAKALATNAMA_REJECTED',
 });
 
 export const SUBJECT_TYPE = Object.freeze({
@@ -214,6 +285,7 @@ export const SUBJECT_TYPE = Object.freeze({
   REFERRAL: 'REFERRAL',
   DISCLOSURE_PACK: 'DISCLOSURE_PACK',
   CERTIFICATE: 'CERTIFICATE',
+  VAKALATNAMA: 'VAKALATNAMA',
 });
 
 // ---------------------------------------------------------------- access ----
@@ -239,6 +311,15 @@ export const ACTION = Object.freeze({
    * general WRITE that advocates must never hold.
    */
   ACKNOWLEDGE: 'ACKNOWLEDGE',
+  /**
+   * Signing one's own statement — the deponent's Part A, the examiner's Part B of a
+   * s.63 certificate. It adds a signature over a record already collected and alters
+   * nothing in it, so it is not WRITE: treating it as WRITE locked the investigating
+   * officer out of signing their own certificate the moment the chargesheet closed
+   * the case, which is exactly when a certificate is needed. Who may attest is
+   * narrowed further by the controller: only the person the certificate names.
+   */
+  ATTEST: 'ATTEST',
 });
 
 export const DECISION = Object.freeze({ ALLOW: 'ALLOW', DENY: 'DENY' });
@@ -251,6 +332,9 @@ export const RESOURCE_TYPE = Object.freeze({
   DISCLOSURE_PACK: 'DISCLOSURE_PACK',
   CERTIFICATE: 'CERTIFICATE',
   CASE_ACCESS_GRANT: 'CASE_ACCESS_GRANT',
+  VAKALATNAMA: 'VAKALATNAMA',
+  /** A supervisor's decision lifting a seal-exception freeze on a custody item. */
+  CUSTODY_RELEASE: 'CUSTODY_RELEASE',
   LEDGER: 'LEDGER',
   AUDIT: 'AUDIT',
   SEARCH: 'SEARCH',
@@ -267,6 +351,8 @@ export const DENY_REASON = Object.freeze({
   NOT_ASSIGNED_IO: 'NOT_ASSIGNED_IO',
   OUT_OF_JURISDICTION: 'OUT_OF_JURISDICTION',
   CASE_STAGE_CLOSED_TO_WRITES: 'CASE_STAGE_CLOSED_TO_WRITES',
+  /** The court has closed the case. It stays readable forever; nothing new goes in. */
+  CASE_IS_CLOSED: 'CASE_IS_CLOSED',
   CUSTODIAN_SCOPE: 'CUSTODIAN_SCOPE',
   READ_ONLY_ROLE: 'READ_ONLY_ROLE',
   CASE_NOT_LISTED_IN_YOUR_COURT: 'CASE_NOT_LISTED_IN_YOUR_COURT',
@@ -294,6 +380,20 @@ export const GRANT_BASIS = Object.freeze({
   ROSTER: 'ROSTER',
   PROSECUTION_ASSIGNMENT: 'PROSECUTION_ASSIGNMENT',
 });
+
+/**
+ * A vakalatnama filed through Lexx. PENDING until the court registry rules on it;
+ * only an ACCEPTED filing puts the advocate on record, and only by way of the court
+ * registry recording it (see controllers/vakalatnama.js).
+ */
+export const VAKALATNAMA_STATUS = Object.freeze({
+  PENDING: 'PENDING',
+  ACCEPTED: 'ACCEPTED',
+  REJECTED: 'REJECTED',
+});
+
+/** Which side an advocate appears for. Mirrors the court directory's vocabulary. */
+export const APPEARING_FOR = Object.freeze({ ACCUSED: 'ACCUSED', VICTIM: 'VICTIM' });
 
 export const DISCLOSURE_STATUS = Object.freeze({
   DRAFT: 'DRAFT',

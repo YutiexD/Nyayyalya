@@ -13,7 +13,7 @@ CORS: origins from `WEB_ORIGIN` (comma-separated), `credentials: true`, methods 
 - [Authentication](#authentication)
 - [The error envelope](#the-error-envelope)
 - [Authorization model in one paragraph](#authorization-model-in-one-paragraph)
-- [Modules](#modules) — [Auth](#auth) · [Cases](#cases) · [Evidence](#evidence) · [Custody](#custody) · [FSL](#fsl) · [Disclosure](#disclosure) · [Certificates](#certificates) · [Ledger](#ledger) · [Anchors](#anchors) · [Audit](#audit) · [Search](#search) · [Health](#health)
+- [Modules](#modules) — [Auth](#auth) · [Cases](#cases) · [Evidence](#evidence) · [Custody](#custody) · [FSL](#fsl) · [Disclosure](#disclosure) · [Vakalatnama](#vakalatnama) · [Certificates](#certificates) · [Ledger](#ledger) · [Anchors](#anchors) · [Audit](#audit) · [Search](#search) · [Health](#health)
 - [Denial reason codes](#denial-reason-codes)
 - [The public surface](#the-public-surface)
 - [Known inconsistencies](#known-inconsistencies)
@@ -246,18 +246,24 @@ Every jurisdictional fact on the created case (station, district, state, BNS sec
 
 Query: `limit` (number, capped at 200, default 50).
 
-Scope filter by role: IO → `{ioUserId, stationCode}`; SHO → `{stationCode}`; DISTRICT_SP → `{districtCode}`; MALKHANA_CUSTODIAN → *nothing*; COURT roles → `{courtId}` (nothing if no `courtId` in scope); FSL → cases with a live `OPEN`/`ACCEPTED` referral to their lab; LEGAL → cases with a live `CaseAccessGrant` for them. A null filter renders as an empty list, never as an unfiltered query.
+Scope filter by role: IO → `{ioUserId, stationCode}`; SHO → `{stationCode}`; DISTRICT_SP → `{districtCode}`; COURT roles → `{courtId}` (nothing if no `courtId` in scope); FSL → cases with a live `OPEN`/`ACCEPTED` referral to their lab, **plus** cases in the state their laboratory serves; LEGAL → cases with a live `CaseAccessGrant` for them. A null filter renders as an empty list, never as an unfiltered query.
+
+Each case carries a `summary`: `{ exhibits, forensicOpinions, awaitingForensics, counselOnRecord, disclosure: { status, servedOn } | null, highestPriority }`. `highestPriority` is the most urgent review-priority band present on the case and is **omitted for a party** — triage is investigative workload ordering and is never disclosed to counsel.
 
 **200** `{ "cases": [ …full documents… ], "total": <count> }` (`total` is `countDocuments` of the filter, so it can exceed `cases.length`).
 
 ### `GET /api/cases/:id`
 
 **Guard:** `authorize({ action: READ, resourceType: CASE })`.
-**In practice:** IO must be the assigned IO at the right station; SHO same station; SP same district; JUDGE/REGISTRAR/EVIDENCE_CUSTODIAN require `case.courtId === scope.courtId` (so a pre-chargesheet case is refused, ADR-015); FSL requires a live referral in the case; LEGAL requires a live grant.
+**In practice:** IO must be the assigned IO at the right station; SHO same station; SP same district; JUDGE/EVIDENCE_CUSTODIAN require `case.courtId === scope.courtId` (so a pre-chargesheet case is refused, ADR-015); FSL requires a live referral in the case **or** a case in the state their laboratory serves; LEGAL requires a live grant. A case the court has CLOSED stays readable to everyone who could read it before and accepts no further writes from anyone, including the court.
 
-**200** `{ "case": { … } }` — the document the resolver loaded.
+**200** `{ "case": { … }, "disclosure": { "packId": "…", "status": "DRAFT | APPROVED | SERVED", "updatedAt": "…", "servedOn": null } | null }` — the document the resolver loaded, plus the status of the case's disclosure pack (status only; no exhibit or exclusion is named).
 
 **Errors:** `RESOURCE_NOT_FOUND` 404 · any denial reason 403.
+
+### `GET /api/cases/by-cnr/:cnr`
+
+A CNR only locates a case id; `authorize({ READ, CASE, idFrom: 'lookupCaseId' })` then decides exactly as for `/:id`, and the decision is audited either way. Counsel's "Open by reference" uses it: an advocate not on record is refused `NOT_ON_RECORD_FOR_THIS_CASE`. Same **200** as `GET /api/cases/:id`. An unknown or malformed CNR answers **404** `RESOURCE_NOT_FOUND`, like an unknown id.
 
 ### `GET /api/cases/:id/timeline`
 
@@ -276,7 +282,7 @@ Scope filter by role: IO → `{ioUserId, stationCode}`; SHO → `{stationCode}`;
 **Guard:** `authorize({ WRITE, CASE })`.
 **In practice:** IO on the case at a writable stage, or the station SHO. Court and FSL roles hold no WRITE on a case; advocates are read-only.
 
-Body: ignored. Inputs are read from the case document (ADR-014: `victimIsMinor` is derived, never supplied).
+Body: ignored. Inputs are read from the case document (ADR-014: `victimIsMinor` is derived, never supplied). The court is chosen from the district's courts as `GET /directory/courts?districtCode=` lists them (ADR-035).
 
 **200**
 ```json
@@ -292,16 +298,31 @@ Body: ignored. Inputs are read from the case document (ADR-014: `victimIsMinor` 
 
 **Guard:** `authorize({ WRITE, CASE })`. Body: none.
 
-Requires the case to be at `UNDER_INVESTIGATION` or `FURTHER_INVESTIGATION`, and requires a court listing for the FIR in the court directory. Sets `stage=CHARGESHEET_FILED`, `cnrNumber`, `courtId`, `courtName`, `chargesheetFiledOn`, guarded optimistically on the current stage.
+Requires the case to be at `UNDER_INVESTIGATION` or `FURTHER_INVESTIGATION`. Uses the court directory's listing for the FIR if there is one; otherwise runs the jurisdiction router and registers the chargesheet with the chosen court (`POST /directory/listing`, a simulated eCourts registration), which allots the CNR (ADR-035). Sets `stage=CHARGESHEET_FILED`, `cnrNumber`, `courtId`, `courtName`, `chargesheetFiledOn` and `clocks.disclosureDueOn` (filing + 14 days, BNSS s.230), guarded optimistically on the current stage.
 
 **200** `{ "case": { … } }`
 
-**Errors:** `INVALID_STAGE` 409 · `NO_COURT_LISTING` 404 · `CONCURRENT_UPDATE` 409 · `DIRECTORY_UNAVAILABLE` 503.
+**Errors:** `INVALID_STAGE` 409 · `NO_COURT_FOR_JURISDICTION` 409 (no court in the district holds the required designation; `details.reasons` carries the router's reasoning) · `COURT_REGISTRATION_REFUSED` 409 · `NO_COURT_LISTING` 404 · `CONCURRENT_UPDATE` 409 · `DIRECTORY_UNAVAILABLE` 503.
+
+### `POST /api/cases/:id/close`
+
+**Guard:** `requireHealthyAudit` → `authorize({ action: ORDER, resourceType: CASE })`.
+**In practice: the presiding judge of the court the case is listed in.** Closing is the court's final act on a case it is seized of, so it carries the same action as a judicial order.
+
+Body: `{ reason (3–2000) }`.
+
+Sets `stage = CLOSED`, `closedOn`, `closedByUserId` and appends `CASE_CLOSED` to the ledger with the reason, the CNR, the court and the closing judge's authority id. The stage move is guarded on the case's current stage, so two concurrent closes cannot both succeed.
+
+**Nothing is deleted.** Every exhibit, custody record, forensic opinion, certificate, ledger entry and anchored root stays exactly where it is and stays readable by everyone who could read it before. From this point the resolver refuses every non-read action on the case to every authority — `CASE_IS_CLOSED` — with one exception: custodial writes, because a sealed article still has to be returned or destroyed after a case ends and each of those is a two-scan ledgered handover rather than an edit of the record.
+
+**200** `{ "case": { … }, "ledgerSeq": 42, "entryHash": "…", "note": "…" }`
+
+**Errors:** `VALIDATION_FAILED` 400 · `INVALID_STAGE` 409 (already closed, or not before a court) · `CONCURRENT_UPDATE` 409 · `CASE_IS_CLOSED` 403 on a second attempt (the resolver answers before the controller does, and it is the more useful of the two answers).
 
 ### `POST /api/cases/:id/record-order`
 
 **Guard:** `authorize({ action: ORDER, resourceType: CASE })`.
-**In practice: judges only.** `ORDER` is in `COURT_ONLY_ACTIONS`, so police and FSL are denied `READ_ONLY_ROLE`; the registrar branch denies `ORDER` explicitly; advocates are read-only. A judge additionally needs `case.courtId === scope.courtId`.
+**In practice: judges only.** `ORDER` is in `COURT_ONLY_ACTIONS`, so police and FSL are denied `READ_ONLY_ROLE`; the court's evidence room is denied it explicitly; advocates are read-only. A judge additionally needs `case.courtId === scope.courtId`.
 
 Body: `{ orderType (2–64), text (1–5000), effectiveOn? (coercible date) }`. `effectiveOn` is stored inside the ledger payload as `clientEffectiveOn` and is **never** chain input (ADR-007).
 
@@ -380,7 +401,9 @@ Query: `caseId` (`^[0-9a-fA-F]{24}$`, optional — intersected, never substitute
   "uiLabel": "Review Priority",
   "disclaimer": "Automated triage only. Not expert opinion under BSA s.39 / IT Act s.79A." }
 ```
-Sorted `HIGH` → `MEDIUM` → `LOW`. `disclaimer` is `null` when the queue is empty.
+Sorted `CRITICAL` → `HIGH` → `MEDIUM` → `LOW` — a rank computed in the database before the sort, because a Mongo sort on the string itself orders them alphabetically. The disclaimer travels with the data and is never omitted.
+
+> A party is never shown this queue, not even the order it puts their own served exhibits in: `seesTriage()` returns an empty list for a LEGAL session. For a laboratory the more useful endpoint is [`GET /api/fsl/queue`](#get-apifslqueue), which carries the counts by band and the case each exhibit belongs to.
 
 ### `GET /api/evidence/:id`
 
@@ -388,6 +411,12 @@ Sorted `HIGH` → `MEDIUM` → `LOW`. `disclaimer` is `null` when the queue is e
 **In practice:** police roles by case scope; FSL requires a live `OPEN`/`ACCEPTED` referral **for this exhibit** to their lab; LEGAL requires (a) a live grant on the case, (b) a `SERVED` disclosure pack whose `servedTo` includes them, and (c) this exhibit in `pack.exhibitIds` — otherwise `EXHIBIT_NOT_IN_DISCLOSURE_SET`.
 
 **200** `{ "evidence": { "_id": "…", … } }` with `encryption` deleted.
+
+### `GET /api/evidence/by-code/:code`
+
+An exhibit code (`EX-…`) only locates an id; `authorize({ READ, EVIDENCE, idFrom: 'lookupEvidenceId' })` decides exactly as for `/:id`, and the decision is audited. Counsel reaching for an exhibit outside the set served on them is refused `EXHIBIT_NOT_IN_DISCLOSURE_SET`. Unknown or malformed code → **404** `RESOURCE_NOT_FOUND`.
+
+> **Triage is never disclosed to a party (ADR-038).** For the LEGAL authority, `GET /api/evidence/:id`, `/by-code/:code` and `GET /api/evidence` omit `triage`, `GET /api/evidence/queue/triage` returns an empty queue, and `GET /api/search` omits `triage.priority`. Search scopes exhibits with the EVIDENCE filter, so it finds only what the caller could open.
 
 ### `POST /api/evidence/:id/verify`
 
@@ -469,7 +498,7 @@ The `item` object returned by every endpoint here (`itemView`) is:
 
 The stored transfer token hash is never included in `pendingTransfer`.
 
-**Lawful transitions** (`CUSTODY_TRANSITIONS`): `SEIZED → IN_STORE`; `IN_STORE → AT_FSL | IN_COURT | RETURNED | DESTROYED`; `AT_FSL → IN_STORE`; `IN_COURT → IN_STORE | RETURNED`; `RETURNED` and `DESTROYED` are terminal. Everything routes through the malkhana.
+**Lawful transitions** (`CUSTODY_TRANSITIONS`): `SEIZED → IN_STORE`; `IN_STORE → AT_FSL | IN_COURT | RETURNED | DESTROYED`; `AT_FSL → IN_STORE`; `IN_COURT → IN_STORE | RETURNED`; `RETURNED` and `DESTROYED` are terminal. Everything routes through the station store — that is what a store is for.
 
 ### `POST /api/custody/items`
 
@@ -484,7 +513,7 @@ The stored transfer token hash is never included in `pendingTransfer`.
 | `sealNumber` | string | 1–120 |
 | `identifiers.imei` | string \| null | ≤64, optional |
 | `identifiers.serialNumber` | string \| null | ≤120, optional |
-| `location` | enum | `MALKHANA | FSL | COURT | FIELD`, default `FIELD` |
+| `location` | enum | `MALKHANA | FSL | COURT | FIELD`, default `FIELD`. `MALKHANA` is the station's own store and is labelled "Station store" in every UI surface; the enum value is kept because it is written into ledger entries that can never be rewritten. |
 | `locationDetail` | string \| null | ≤200 |
 
 `stationCode` and `districtCode` are copied from the authorised case, never from the body.
@@ -531,7 +560,9 @@ Query: `caseId?` (24-hex), `status?` (a `CUSTODY_STATUS`), `limit?` (default 100
 
 **200** `{ "items": [ …itemView… ], "total": 2 }`
 
-**Scope, per role:** malkhana custodian and SHO see their station; District SP their district; the IO sees items on **their own cases** (not merely their station — see the note below); counsel and FSL examiners hold no custody scope and receive an empty list.
+**Scope, per role:** every police role sees its own scope of the register — IO and SHO their **station**, District SP their district (read-only). Court roles see the items in cases listed before their court. Counsel hold no custody scope and receive an empty list; an FSL examiner sees only the articles in cases referred to their laboratory.
+
+> The custody register is STATION-wide for the police, not case-scoped, and that is deliberate. An article in the station store is kept by the station, so any officer posted there can see it, receive it and hand it on. Scoping it per case would recreate the problem the malkhana custodian was invented to solve and then remove the role that solved it: the only person who could take an article into the store would be the very officer whose case it belongs to, which is the one thing `IO_CANNOT_HOLD_OWN_CASE_EVIDENCE` forbids.
 
 > An earlier `scopeFilterFor(IO, CUSTODY_ITEM)` returned `{ ioUserId, stationCode }`. `custody_items` has no `ioUserId` path — only a case does — and because `shared/mongo.js` sets `strictQuery: true`, Mongoose **silently dropped** the unknown condition rather than erroring. The remaining filter was `{ stationCode }`, so an investigating officer saw every custody item at their station, including items booked on another officer's investigation. The IO now resolves through `__caseScope`, which `materialiseScopeFilter` turns into the case ids they are actually on.
 
@@ -558,7 +589,7 @@ Walks each item's ledger history and reports structured findings. Finding codes:
 
 ### `POST /api/custody/items/:id/initiate-transfer`
 
-**Guard:** `authorize({ WRITE, CUSTODY_ITEM })`. For a `MALKHANA_CUSTODIAN` the resolver only checks `item.stationCode === scope.stationCode`; for other police roles it is a case-scoped WRITE.
+**Guard:** `authorize({ WRITE, CUSTODY_ITEM })`. For every police role the resolver checks `item.stationCode === scope.stationCode` — custody is station-scoped, not case-scoped. The controller then checks the things the policy cannot see: that the caller currently holds the item, that the transition is lawful, and that the recipient would not become the store keeper for their own case's evidence.
 
 Body: `{ toUserId (ObjectId), reason (1–500), toStatus (CUSTODY_STATUS), toLocation (CUSTODY_LOCATION) }`.
 
@@ -604,6 +635,28 @@ When the seal was broken, `integrityException` is `{ "reason": "SEAL_BROKEN", "l
 
 ---
 
+### `POST /api/custody/items/:id/lift-freeze`
+
+**Guard:** `authorize({ WRITE, CUSTODY_ITEM })` → `authorizeCreate(CUSTODY_RELEASE)` — the capability only an `SHO` holds; READ-implied, so it works after the chargesheet.
+
+Body: `{ "note": "<decision and basis, ≥10 chars>", "newSealNumber": "<optional, if re-sealed>" }`. Clears the freeze, records `CUSTODY_FREEZE_LIFTED` (with the previous and any new seal number) in the ledger; the original `INTEGRITY_EXCEPTION` stays in the chain.
+
+**200** `{ "item": {…}, "ledgerSeq": 42, "entryHash": "…" }`
+
+**Errors:** `CUSTODY_NOT_FROZEN` 409 · `READ_ONLY_ROLE` 403 (not an SHO) · `VALIDATION_FAILED` 400.
+
+> **Handovers after the chargesheet (ADR-036).** `initiate-transfer` and `accept-transfer` are custody, not investigation: the stage lock does not apply to a `WRITE` on an existing custody item. Booking a new item (`POST /api/custody/items`) is still refused after filing. A laboratory holding a `REPORTED` referral in the case can still act on its custody items, to return them.
+
+### `GET /api/custody/items/:id/recipients`
+
+Guard: `authorize(READ, CUSTODY_ITEM)`. The people this item could lawfully be handed to next, so a sender picks a named officer rather than typing a user id. Candidates are ACTIVE Lexx accounts whose directory scope touches the item: police (IO, SHO) at its station, FSL examiners at a lab holding a live referral in its case, and the judge or evidence room of the court its case is listed in. The investigating officer on the case is never offered as the keeper of its own evidence.
+
+**200** `{ itemId, itemCode, status, nextStates: [...], locationForState: { IN_STORE: "MALKHANA", ... }, candidates: [{ userId, name, authorityId, role, place, forStates: [...] }] }`
+
+> Every custody item response (`POST /items`, `GET /items`, `/scan`, `/chain`, the transfer responses) now also carries `firNumber`, `cnrNumber`, `currentHolder`, `bookedBy` and `labelUrl` — the `PUBLIC_WEB_URL/scan?label=…` link the printed QR encodes. `/chain` also returns `allowedActions` and `nextStates`. An FSL examiner may READ and hand over (WRITE) a custody item while their lab holds a live referral in its case, so a laboratory can receive a sealed article through the two-scan handshake.
+
+---
+
 ## FSL
 
 `backend/routes/fsl.js` → `backend/controllers/fsl.js`. (`POST /api/evidence/:id/refer-fsl` is documented under [Evidence](#post-apievidenceidrefer-fsl).)
@@ -616,6 +669,32 @@ When the seal was broken, `integrityException` is `{ "reason": "SEAL_BROKEN", "l
   "status": "OPEN | ACCEPTED | REPORTED | WITHDRAWN",
   "referredAt": "…", "acceptedAt": null, "reportedAt": null }
 ```
+
+### `GET /api/fsl/queue`
+
+**Guard:** `authorizeCollection(EVIDENCE)` — authorised as an EVIDENCE collection, not a REFERRAL one, because the queue's whole purpose is to reach beyond what has been formally referred.
+
+The examiner's review queue: every exhibit their laboratory may need to look at, ordered by the review priority computed at ingest. A session with no laboratory scope gets an empty queue — the access policy answering, not an empty register.
+
+Query: `state` (`PENDING` | `REVIEWED` | `ALL`, default `PENDING`), `limit` (≤200, default 100).
+
+The scope is the resolver's EVIDENCE scope for an FSL session: exhibits with a live referral to this lab, **plus** the digital evidence registered in the state the lab serves (`scope.stateCode`, read from the FSL directory at sign-in). A session carrying no state falls back to referrals alone rather than to everything — the direction a scoping bug has to fail in.
+
+**200**
+```json
+{ "labId": "UP-FSL-LKO",
+  "state": "PENDING",
+  "queue": [ { "_id": "…", "exhibitCode": "EX-…", "title": "…", "triage": { … },
+               "forensic": { … }, "case": { "firNumber": "…", "title": "…" } } ],
+  "counts": { "pending": 4, "reviewed": 1,
+              "byPriority": { "CRITICAL": 1, "HIGH": 2, "MEDIUM": 0, "LOW": 1 } },
+  "uiLabel": "Review Priority",
+  "disclaimer": "Automated triage only. Not expert opinion under BSA s.39 / IT Act s.79A." }
+```
+
+`counts.byPriority` counts only what is still PENDING: a band with nothing left to do in it is not a queue, and an examiner reading "6 CRITICAL" needs that to mean six exhibits waiting.
+
+Sorting is done in the database with a `$switch` rank derived from `TRIAGE_PRIORITY_ORDER` — a Mongo sort on the string itself orders CRITICAL, HIGH, LOW, MEDIUM, and a `$limit` after that would drop MEDIUM before LOW.
 
 ### `GET /api/fsl/referrals`
 
@@ -670,6 +749,53 @@ The referral must be `ACCEPTED`. The file must sniff as `application/pdf`. The s
 
 ---
 
+### `POST /api/evidence/:id/forensic-verdict` *(multipart)*
+
+Mounted from `routes/fsl.js` under `/api/evidence`.
+
+**Guards:** `requireHealthyAudit` → `authorize({ WRITE, EVIDENCE })` → multer → controller.
+**In practice: an FSL examiner**, for an exhibit referred to their laboratory **or** registered in the state it serves. The controller additionally requires the session to carry a `labId`, which is what stops a police or court `WRITE` — each of which passes the same guard for its own reasons — from reaching this handler.
+
+**The laboratory's whole act, in one step.** The refer → accept → report pipeline still exists and is still the right shape when a station puts named questions to a named laboratory about a physical article it has sent. What it made impossible was the simple case: an examiner looking at the review queue, seeing a CRITICAL exhibit nobody had thought to refer, and wanting to record what they found. Three roles and two round trips stood between them and a sentence.
+
+File field: `report` (optional, exactly one, ≤32 MB). Body fields:
+
+| Field | Type | Constraint |
+|---|---|---|
+| `opinion` | enum | `AUTHENTIC | MANIPULATED | INCONCLUSIVE` |
+| `examinationSummary` | string | 1–5000 |
+| `verdictSha256` | string | `^[0-9a-f]{64}$` |
+| `verdictSignature` | string | `^[0-9a-f]{128}$` (P-256, IEEE P1363) |
+
+**What is signed is the verdict, not a digest the client chose.** The browser hashes a canonical statement and signs that hash; the server rebuilds the same statement from the fields it received and refuses anything that does not agree (`VERDICT_HASH_MISMATCH`), so the opinion and the summary cannot be changed between signing and sending:
+
+```
+LEXX-FSL-VERDICT|v1|<exhibitCode>|<opinion>|<examinationSummary>|<documentSha256 or '-'>
+```
+
+The report document is **optional**, which is the other thing that changed: requiring a PDF meant an examiner who had finished examining could not record what they had found until they had also produced a document. When one is attached it is sniffed as PDF, hashed, sealed into the vault and its digest is covered by the same signature. `forensic.basis` records which route produced the opinion — `REFERRAL` or `DIRECT_REVIEW` — because a court reading the record is entitled to know whether a report document stands behind it.
+
+The laboratory's identity (`labId`, `labName`, `section79ARef`) is read from the FSL directory, never from the request. Any referral this laboratory still holds `OPEN` or `ACCEPTED` on the exhibit is moved to `REPORTED`, so the same work does not read as outstanding on one screen and finished on another. `evidence.triage` is not read and not written.
+
+**201**
+```json
+{ "forensic": { "opinion": "MANIPULATED", "examinationSummary": "…",
+                "labId": "…", "labName": "…", "section79ARef": "…",
+                "examinerName": "…", "reportSha256": null,
+                "reportedAt": "…", "basis": "DIRECT_REVIEW" },
+  "ledgerSeq": 44, "entryHash": "…", "basisNote": "…" }
+```
+
+**Errors:** `NO_OPEN_REFERRAL_TO_YOUR_LAB` 403 (outside the lab's referrals and its state) · `VALIDATION_FAILED` 400 · `LAB_NOT_FOUND` 404 · `REPORT_MUST_BE_PDF` 400 · `VERDICT_HASH_MISMATCH` 400 (`details.declared`, `.computed`) · `NO_REGISTERED_KEY` 400 · `SIGNATURE_INVALID` 400 (also recorded as an `INTEGRITY_EXCEPTION`) · `AUDIT_UNAVAILABLE` 503 · `PAYLOAD_TOO_LARGE` 413.
+
+---
+
+### `GET /api/fsl/referrals/:id/certificates`
+
+Guard: `authorize(READ, REFERRAL)` — the examiner's own lab. The certificates for the referred exhibit, so the examiner can sign Part B after reporting. (An examiner can also reach the certificate directly through `GET /api/certificates?evidenceId=` when the exhibit is in the state their laboratory serves; this route is the one that works when the only thing connecting them to the exhibit is the referral.) **200** `{ evidenceId, exhibitCode, certificates: [<certificate view>], total }`.
+
+---
+
 ## Disclosure
 
 `backend/routes/disclosure.js` → `backend/controllers/disclosure.js`. All routes require a session.
@@ -688,8 +814,10 @@ The referral must be `ACCEPTED`. The file must sniff as `application/pdf`. The s
 
 ### `POST /api/disclosure/:caseId/prepare`
 
-**Guards:** `authorize({ WRITE, CASE, idFrom: 'params.caseId' })` **then** `authorizeCreate(DISCLOSURE_PACK, packCreateContext)`.
-**In practice: the assigned IO only.** The `DISCLOSURE_PACK` capability is `POLICE && role === IO`; the WRITE guard adds station scope, IO assignment and a writable case stage. An SHO passes the WRITE but fails the capability with `READ_ONLY_ROLE`.
+**Guards:** `authorize({ APPROVE, CASE, idFrom: 'params.caseId' })` **then** `authorizeCreate(DISCLOSURE_PACK, packCreateContext)` (APPROVE-implied).
+**In practice: the presiding judge of the court the case is listed in.** `APPROVE` is in `COURT_ONLY_ACTIONS`, so **every police role is refused outright** — the police have no route to disclosure at all. The `DISCLOSURE_PACK` capability then narrows it from court staff generally to the judge. A pack that has been served cannot be re-composed.
+
+> **This moved.** Disclosure used to begin with the investigating officer proposing a set and asking to withhold parts of it. That put a party to the case in charge of what the opposing party gets to see, and it made the accused's s.230 entitlement wait on a form the investigation had to remember. The court holds the case file once the chargesheet is filed; what the defence gets from it is the court's decision. Most callers should use [`/share`](#post-apidisclosurecaseidshare) instead, which does this and the next two steps in one act.
 
 Body:
 
@@ -705,10 +833,44 @@ The exhibit set is **computed** server-side as every exhibit on the case minus t
 
 **Errors:** `VALIDATION_FAILED` 400 · `DISCLOSURE_PACK_LOCKED` 409 (`details.packId`, `.status` — an already `APPROVED`/`SERVED` pack cannot be re-prepared) · `EXCLUDED_ITEM_NOT_IN_CASE` 400 (`details.itemIds`).
 
+### `POST /api/disclosure/:caseId/share`
+
+**Guards:** `requireHealthyAudit` → `authorize({ APPROVE, CASE, idFrom: 'params.caseId' })` → `authorizeCreate(DISCLOSURE_PACK, packCreateContext)`.
+**In practice: the presiding judge of the court the case is listed in.**
+
+**The disclosure route the product leads with.** Composes the set, rules on anything withheld and serves it, in one act.
+
+Composing, ruling and serving used to be three acts by two authorities across three screens, and an advocate saw nothing until the last of them happened. In practice the chain broke at whichever step somebody forgot, and what was lost was the accused's statutory entitlement under BNSS s.230.
+
+Body:
+
+| Field | Type | Constraint |
+|---|---|---|
+| `withheldItems` | array | ≤200, default `[]`; each `{ itemId: ObjectId, reason: string 10–1000 }` |
+| `recipientUserIds` | array of ObjectId | ≤50, optional — narrows service to named advocates already on record |
+| `redactionVariant` | string | 2–64, optional |
+| `maskVictimIdentity` | boolean | optional — one-way |
+
+The set is **computed**: every exhibit on the case, minus anything withheld. Sending an empty body withholds nothing, which is the common case. The court both requests and rules on each withholding here, because the court is the one deciding — there is no pending state left behind, and an unruled exclusion was precisely what used to block service.
+
+**Everything the three-step version recorded is still recorded.** Three ledger entries, not one: `DISCLOSURE_PREPARED`, `DISCLOSURE_APPROVED`, `DISCLOSURE_SERVED`. "The set was settled, the withholdings were ruled on, the pack was served" remains three facts with three timestamps even when one person did all three in one click. One unguessable watermark is minted per recipient, and the s.230 clock is stopped by each recipient's own acknowledgement.
+
+**201** on first share, **200** on a re-share to a newly appointed advocate:
+```json
+{ "pack": { …packView… },
+  "servedNow": [ { "userId": "…", "authorityId": "…", "watermarkToken": "…", "watermarkLabel": "…" } ],
+  "disclosureServedOn": "…",
+  "withheld": [ { "exhibitCode": "EX-…", "reason": "…" } ] }
+```
+
+**Errors:** `VALIDATION_FAILED` 400 · `PACK_ALREADY_SERVED` 409 (changing what is in a served file needs a fresh order) · `EXCLUDED_ITEM_NOT_IN_CASE` 400 (`details.itemIds`) · `NO_RECIPIENTS_ON_RECORD` 409 · `RECIPIENT_NOT_ON_RECORD` 400 · `AUDIT_UNAVAILABLE` 503.
+
+The separate `prepare`, `approve` and `serve` routes still exist and still work, for a court that wants to settle the set first and rule on withholdings separately.
+
 ### `POST /api/disclosure/:caseId/sync-representation`
 
 **Guards:** `authorize({ READ, CASE, idFrom: 'params.caseId' })` **then** `authorizeCreate(CASE_ACCESS_GRANT, …)`.
-**In practice: a COURT `REGISTRAR` whose `scope.courtId` matches the case.** The `CASE_ACCESS_GRANT` capability is registrar-only, and `resolveCreate` then evaluates a WRITE on the case, which for a registrar means court scope. An investigating officer cannot decide who represents the accused (ADR-019).
+**In practice: the presiding judge of the court the case is listed in.** The `CASE_ACCESS_GRANT` capability is judge-only, and `resolveCreate` then evaluates `APPROVE` on the case, which means court scope. An investigating officer cannot decide who represents the accused (ADR-019).
 
 Body: **not read at all.** Every fact comes from the court directory.
 
@@ -730,26 +892,28 @@ Recorded in `audit_events` with reason `REPRESENTATION_SYNCED`; there is no `LED
 ### `POST /api/disclosure/:packId/approve`
 
 **Guard:** `authorize({ action: APPROVE, resourceType: DISCLOSURE_PACK, idFrom: 'params.packId' })`.
-**In practice: `REGISTRAR` **or** `JUDGE`**, each needing `case.courtId === scope.courtId`. `APPROVE` is in `COURT_ONLY_ACTIONS`, so police and FSL are denied `READ_ONLY_ROLE`; advocates are read-only (ADR-019).
+**In practice: the presiding judge**, needing `case.courtId === scope.courtId`. `APPROVE` is in `COURT_ONLY_ACTIONS`, so police and FSL are denied `READ_ONLY_ROLE`; the court's evidence room does not hold it; advocates are read-only (ADR-019).
 
 Body:
 
 | Field | Type | Constraint |
 |---|---|---|
-| `approvedExclusions` | array of ObjectId | ≤200, default `[]` |
+| `approvedExclusions` | array of ObjectId | ≤200, default `[]` — withholding requests the court agrees to |
+| `refusedExclusions` | array of ObjectId | ≤200, default `[]` — withholding requests the court refuses; each exhibit is put into the served set |
+| `refusalNote` | string | ≤1000, optional — the court's reason, written to the ledger |
 | `redactionVariant` | string | 2–64, optional |
-| `maskVictimIdentity` | boolean | optional (still cannot unmask a protected victim) |
+| `maskVictimIdentity` | boolean | optional — one-way: can switch masking on, never off |
 
-Sets `status = APPROVED` and stamps each approved exclusion with the registrar id and time.
+Sets `status = APPROVED`; stamps each approved exclusion (`approvedByRegistrarId`, `approvedAt`) and each refused one (`refusedByUserId`, `refusedAt`, `refusalNote`). Service is blocked only by requests with no ruling either way (ADR-037).
 
 **200** `{ "pack": {…}, "pendingExclusions": ["…"], "servable": false }`
 
-**Errors:** `VALIDATION_FAILED` 400 · `PACK_ALREADY_SERVED` 409 · `UNKNOWN_EXCLUSION` 400 (`details.itemIds` — approving something never requested).
+**Errors:** `VALIDATION_FAILED` 400 · `PACK_ALREADY_SERVED` 409 · `UNKNOWN_EXCLUSION` 400 (`details.itemIds` — ruling on something never requested) · `CONFLICTING_RULING` 400 (the same id approved and refused) · `EXCLUSION_ALREADY_RULED` 409 (a contrary second ruling).
 
 ### `POST /api/disclosure/:packId/serve`
 
 **Guard:** `requireHealthyAudit` → `authorize({ WRITE, DISCLOSURE_PACK, idFrom: 'params.packId' })`.
-**In practice:** a `REGISTRAR` or `EVIDENCE_CUSTODIAN` in the case's court — *and also* the station `SHO`, and the assigned `IO` while the case is still open to writes, because `WRITE` is not court-only. See [Known inconsistencies](#known-inconsistencies) item 5.
+**In practice: the presiding judge of the case's court.** `DISCLOSURE_PACK` is in the court's writable set and no police role reaches a disclosure pack at all — the resolver's police branch has no policy that admits one. Most callers should use [`/share`](#post-apidisclosurecaseidshare), which composes, rules and serves in one act.
 
 Body: `{ recipientUserIds? }` — array of ObjectId, ≤50. Optional narrowing of the recipient list; every id must already hold a live advocate grant.
 
@@ -772,9 +936,9 @@ Also sets `Case.clocks.disclosureServedOn` (the BNSS s.230 clock) and writes the
 ### `GET /api/disclosure/case/:caseId/packs`
 
 **Guard:** `authorize({ APPROVE, CASE, idFrom: 'params.caseId' })`.
-**In practice:** the `JUDGE`, `REGISTRAR` or `EVIDENCE_CUSTODIAN` of the court the case is listed in — and nobody else. `APPROVE` is in `COURT_ONLY_ACTIONS`, so the IO who *authored* the pack is refused `READ_ONLY_ROLE` here, as are FSL and counsel. A `READ` guard would have handed the draft pack list, exclusion reasons and all, to the advocate the exclusions are directed against.
+**In practice: the presiding judge of the court the case is listed in — and nobody else.** `APPROVE` is in `COURT_ONLY_ACTIONS`, so every police role is refused `READ_ONLY_ROLE` here, as are FSL and counsel; the court's evidence room does not hold `APPROVE` either. A `READ` guard would have handed the pack list, withholding grounds and all, to the advocate those withholdings are directed against.
 
-The registrar's discovery endpoint: `approve` and `serve` both take a `packId`, and before this there was no way to learn one except to be told it out of band.
+The court's discovery endpoint: `approve` and `serve` both take a `packId`, and before this there was no way to learn one except to be told it out of band.
 
 Query: `status?` — one of `DRAFT | PENDING_APPROVAL | APPROVED | SERVED` (whatever `DISCLOSURE_STATUS` holds); omitted means all, newest first.
 
@@ -787,7 +951,7 @@ Query: `status?` — one of `DRAFT | PENDING_APPROVAL | APPROVED | SERVED` (what
                "servedOn": null, "recipientCount": 0, "acknowledgedCount": 0,
                "createdAt": "…" } ] }
 ```
-This is a summary, not `packView`. It deliberately omits `servedTo[].watermarkToken` — the token identifies the copy one named advocate holds, and belongs in the serve response to the registrar who minted it, not in a list.
+This is a summary, not `packView`. It deliberately omits `servedTo[].watermarkToken` — the token identifies the copy one named advocate holds, and belongs in the response to the court that minted it, not in a list.
 
 **Errors:** `READ_ONLY_ROLE` 403 · `OUT_OF_COURT_SCOPE` 403 · `CASE_NOT_LISTED_IN_YOUR_COURT` 403 · `RESOURCE_NOT_FOUND` 404 · `VALIDATION_FAILED` 400 (bad `status`).
 
@@ -831,6 +995,59 @@ Repeat calls return `{ packId, acknowledgedAt, alreadyAcknowledged: true }` (no 
 
 ---
 
+### `GET /api/disclosure/trace/:token`
+
+Guard: the token resolves to its pack, then `authorize(APPROVE, DISCLOSURE_PACK)` — court-only. Names whose served copy a watermark token belongs to. An unknown and a malformed token both answer **404** `WATERMARK_NOT_FOUND`. Writes a `WATERMARK_TRACED` audit row.
+
+**200** `{ packId, cnrNumber, firNumber, recipient: { userId, name, authorityId, role }, watermarkLabel, servedAt, acknowledgedAt, note }`
+
+> `GET /api/disclosure/case/:caseId/packs` now also returns, per pack, `exclusions: [{ itemId, exhibitCode, title, reason, approved, approvedAt }]` and `servedTo: [userId]`, so the court rules on named exhibits and serves advocates by name.
+
+---
+
+## Vakalatnama
+
+How an advocate comes on record (ADR-030). Filing grants nothing; the presiding judge's acceptance is written to the court register **before** Lexx creates the `CaseAccessGrant`.
+
+### `POST /api/vakalatnama` *(multipart)*
+
+Guard: `authorizeCreate(VAKALATNAMA)` — an advocate (defence, victim or legal-aid counsel; not a prosecutor), against a case that is listed before a court. The case is looked up by CNR.
+
+| Field | Type | Rule |
+|---|---|---|
+| `document` | file | the signed vakalatnama; must sniff as `application/pdf`; ≤ 10 MB |
+| `cnrNumber` | string | `^[A-Z]{2}[A-Z0-9]{2}\d{12}$` |
+| `appearingFor` | enum | `ACCUSED` → DEFENCE_COUNSEL, `VICTIM` → VICTIM_COUNSEL |
+| `partyName` | string | 2–120 |
+| `documentSha256` | string | `^[0-9a-f]{64}$`, must equal the server's recomputed hash |
+| `documentSignature` | string | `^[0-9a-f]{128}$`, P-256 IEEE P1363 over the hex digest, verified against the advocate's registered key |
+
+**201** `{ filing: { id, caseId, cnrNumber, firNumber, advocateAuthorityId, appearingFor, partyName, documentSha256, status: "PENDING", ... }, ledgerSeq, entryHash, notice }`. Appends `VAKALATNAMA_FILED`.
+Errors: `CNR_NOT_FOUND` 404 · `DOCUMENT_MUST_BE_PDF` · `DOCUMENT_HASH_MISMATCH` · `SIGNATURE_INVALID` · `ALREADY_ON_RECORD` 409 · `VAKALATNAMA_ALREADY_FILED` 409.
+
+### `GET /api/vakalatnama/mine`
+
+The caller's own filings, newest first, with `status`, `decidedAt`, `decidedByAuthorityId`, `decisionNote`.
+
+### `GET /api/vakalatnama/case/:caseId`
+
+Guard: `authorize(APPROVE, CASE)` — the judge and registry of the court the case is listed in. **200** `{ caseId, cnrNumber, filings: [...], pending, onRecord: [{ grantId, userId, name, authorityId, active, role, grantBasis, grantRef, validFrom }] }`.
+
+### `GET /api/vakalatnama/:id/document`
+
+Guard: `authorize(DOWNLOAD, VAKALATNAMA)` — the filing advocate, or the court. Police and FSL are refused the resource outright. Returns the PDF (`X-Lexx-Document-Sha256` header); audited as a download.
+
+### `POST /api/vakalatnama/:id/accept`
+
+Guards: `requireHealthyAudit` → `authorize(APPROVE, VAKALATNAMA)` → `authorizeCreate(CASE_ACCESS_GRANT)` (the presiding judge only). Relays the acceptance to the court register (`POST /directory/vakalatnama` with the judge's own code, which the register verifies against its judges **and** against the roster order placing them in that court today); `VAKALATNAMA_ALREADY_ON_RECORD` from the register is treated as success. Then marks the filing `ACCEPTED`, creates the grant (`grantRef: VAK/<cnr>/<enrolment>/<side>`) and appends `VAKALATNAMA_ACCEPTED`.
+**200** `{ filing, grant: { grantId, role, grantBasis, grantRef }, courtRegister: "RECORDED" | "ALREADY_ON_RECORD", ledgerSeq, entryHash }`. Errors: `VAKALATNAMA_NOT_PENDING` 409 · `COURT_REGISTER_REFUSED` 409 (nothing changes in Lexx) · `ADVOCATE_NOT_ACTIVE` 409.
+
+### `POST /api/vakalatnama/:id/reject`
+
+Same guards. Body `{ note }` (10–1000 chars, required — the advocate reads it). Appends `VAKALATNAMA_REJECTED`.
+
+---
+
 ## Certificates
 
 `backend/routes/certificate.js` → `backend/controllers/certificate.js`. BSA s.63 certificates.
@@ -857,7 +1074,7 @@ Repeat calls return `{ packId, acknowledgedAt, alreadyAcknowledged: true }` (no 
 ### `POST /api/certificates/generate`
 
 **Middleware:** `validateGenerateBody` → `authorize({ READ, EVIDENCE, idFrom: 'body.evidenceId' })` → `authorizeCreate(CERTIFICATE, …)` → controller.
-**In practice:** POLICE `IO` **or** COURT `REGISTRAR` (capability), plus READ on the exhibit. Uniquely, `CREATE_IMPLIES_ACTION[CERTIFICATE] = READ`, so the case-level check is READ rather than WRITE — a certificate attests to the record, it does not amend it, and it is normally prepared *after* the chargesheet closes the case to writes.
+**In practice:** POLICE `IO` **or** the COURT `JUDGE` (capability), plus READ on the exhibit. Uniquely, `CREATE_IMPLIES_ACTION[CERTIFICATE] = READ`, so the case-level check is READ rather than WRITE — a certificate attests to the record, it does not amend it, and it is normally prepared *after* the chargesheet closes the case to writes.
 
 Body: `{ evidenceId }` — `^[0-9a-fA-F]{24}$`.
 
@@ -869,6 +1086,12 @@ Required Part A fields: `deponentName`, `deponentDesignation`, `deponentAuthorit
 
 **Errors:** `VALIDATION_FAILED` 400 · `SESSION_USER_MISSING` 404 · **`CERTIFICATE_PART_A_INCOMPLETE` 400** with `details.missing` (an array such as `["partA.make", "partA.serialNumber OR partA.imeiOrUid"]`), `details.exhibitCode` and `details.remedy`. Nothing is written, and the refusal is audited. Generating a second certificate for the same exhibit is permitted — signed documents are never edited, a new one is issued.
 
+### `GET /api/certificates?evidenceId=`
+
+Guard: `authorize(READ, EVIDENCE)` on the named exhibit — a certificate is never more visible than its exhibit (counsel: served set only). **200** `{ evidenceId, exhibitCode, certificates: [<certificate view incl. verificationToken and verificationUrl>], total }`. A malformed id is `VALIDATION_FAILED` 400.
+
+> `verificationUrl` is `PUBLIC_WEB_URL/verify?token=…` (it was `/verify.html`, a page of the old client that no longer exists).
+
 ### `GET /api/certificates/:id`
 
 **Guard:** `authorize({ READ, CERTIFICATE })`. For FSL, the resolver allows any examiner whose lab holds a referral (of any status) for the certificate's exhibit.
@@ -876,6 +1099,8 @@ Required Part A fields: `deponentName`, `deponentDesignation`, `deponentAuthorit
 **200** `{ "certificate": { …certificateView… } }`
 
 ### `POST /api/certificates/:id/sign-part-a`
+
+Guard: `authorize(ATTEST, CERTIFICATE)` — `ATTEST`, not `WRITE`, so the deponent can still sign after the chargesheet closes the case (ADR-031). The same applies to Part B.
 
 **Guard:** `authorize({ WRITE, CERTIFICATE })`, then the controller requires `partA.deponentAuthorityId === req.user.authorityId`.
 
@@ -910,6 +1135,8 @@ Renders fresh; if the bytes differ from the stored `pdfSha256` (a signature was 
 Mounted at `/public`, **outside** `/api`, on its own router with no `requireSession` and no resolver. The only credential is the 32-byte token in the path.
 
 Path param: `^[A-Za-z0-9_-]{43}$`. A malformed token is answered **identically** to an unknown one, so the token space cannot be mapped from outside.
+
+Optional query `?copy=<sha256 hex>` — the digest of a PDF the caller holds, computed in their browser (the document never travels). The response then carries `"copy": { "sha256": "…", "match": "CURRENT | EARLIER_VERSION | NO_MATCH", "supersededAt": "…" | null }`: the current render, an earlier render superseded by a later signature (digests of earlier renders are kept), or not this certificate. The PDF carries its token in its metadata (`Keywords: lexx-verify:<token>`), so the public verifier reads it from a dropped file (ADR-039).
 
 **200**
 ```json
@@ -1005,13 +1232,25 @@ When the entry is not anchored the body is the short form `{ seq, entryHash, ok:
 
 ---
 
+### `GET /api/anchors/recent?limit=` — PUBLIC
+
+The anchoring history, newest first (limit 1–50, default 10), including SUBMITTED and FAILED batches. **200** `{ network, chainId, submitting, contractAddress, contractExplorerUrl, intervalMs, batches: [{ batchId, merkleRoot, fromSeq, toSeq, leafCount, status, txHash, blockNumber, anchoredAt, explorerUrl }] }`. Never leaf hashes.
+
+### `GET /api/anchors/entry/:seq/:entryHash` — PUBLIC
+
+Checks an officer's upload receipt. The entry hash is the credential: a wrong hash, a missing entry and a malformed request all answer **404** `{ valid: false, reason: "RECEIPT_NOT_FOUND" }`. **200** `{ valid: true, seq, entryHash, eventType, recordedAt, anchored, includedInRoot, reason, batchId, merkleRoot, onChainVerified, network, txHash, explorerUrl, disclosure }` — `onChainVerified` is the contract's own `verifyEntry` answer for a CONFIRMED batch. Never the payload.
+
+> Batch ids are `keccak256("lexx-batch:monad-testnet:<from>-<to>:<root>")` — the root is part of the id so a reset ledger cannot collide with batches already on chain (ADR-032). With submission on, each cycle first promotes DRY_RUN batches to the chain, oldest first (ADR-033).
+
+---
+
 ## Audit
 
 `backend/routes/system.js` → `backend/controllers/audit.js`. Both routes require a session.
 
 ### `GET /api/audit`
 
-**Guard:** `requireSession` only. The controller gates on role: `SHO`, `DISTRICT_SP`, `REGISTRAR`, `JUDGE`. Anyone else gets `AUDIT_NOT_PERMITTED` 403.
+**Guard:** `requireSession` only. The controller gates on role: `SHO`, `DISTRICT_SP`, `JUDGE`. Anyone else gets `AUDIT_NOT_PERMITTED` 403.
 
 Query: `caseId` (ObjectId, optional — intersected with the visible set, never widening it), `decision` (`ALLOW | DENY`), `action` (string ≤24), `limit` (1–200, default 100).
 
@@ -1030,7 +1269,7 @@ Rows are restricted to cases inside the caller's materialised scope filter, so a
 
 ### `GET /api/audit/security`
 
-**Guard:** `requireSession`; the controller requires (POLICE **and** (`SHO` or `DISTRICT_SP`)) **or** role `REGISTRAR`. Note a `JUDGE` may read `/api/audit` but not this feed.
+**Guard:** `requireSession`; the controller requires (POLICE **and** (`SHO` or `DISTRICT_SP`)) **or** role `JUDGE`.
 
 Query: `limit` (capped 200, default 50).
 
@@ -1108,8 +1347,9 @@ Each is safe to show a user on its own: it may reveal *why the caller is not ent
 | `NOT_ASSIGNED_IO` | You are an investigating officer, but not the one assigned to this case. |
 | `OUT_OF_JURISDICTION` | The case belongs to a different station (IO/SHO) or district (District SP) than your posting. |
 | `CASE_STAGE_CLOSED_TO_WRITES` | The case has left investigation (`UNDER_INVESTIGATION` / `FURTHER_INVESTIGATION`), so investigative writes are no longer accepted. |
-| `CUSTODIAN_SCOPE` | A malkhana custodian may touch only custody items at their own station, and nothing else at all. |
-| `READ_ONLY_ROLE` | Your role may read this but may not perform this action. Also returned when a police or FSL user attempts a court-only action (`ORDER`, `APPROVE`), when a registrar attempts `ORDER`, and when a role lacks the capability to create this kind of resource. |
+| `CUSTODIAN_SCOPE` | A custody item can only be acted on at the station that holds it. |
+| `READ_ONLY_ROLE` | Your role may read this but may not perform this action. Also returned when a police or FSL user attempts a court-only action (`ORDER`, `APPROVE`), when the court attempts an investigative `WRITE` against a case or an exhibit, and when a role lacks the capability to create this kind of resource. |
+| `CASE_IS_CLOSED` | The court has closed this case. It stays readable in full; nothing further can be recorded against it. Custodial handovers are the one exception — a sealed article still has to be returned after a case ends. |
 | `CASE_NOT_LISTED_IN_YOUR_COURT` | Judge: the case is not bound to your court — either it has no `courtId` yet (still under investigation, before no court) or it is listed elsewhere. |
 | `OUT_OF_COURT_SCOPE` | Registry staff: the case is not listed in your court. |
 | `NO_OPEN_REFERRAL_TO_YOUR_LAB` | Your laboratory holds no live referral for this exhibit or case — the only thing that gives an examiner visibility. Also returned when the session carries no lab scope at all, and by the FSL controller when the acting user's `scope.labId` does not match the referral. |
@@ -1175,17 +1415,17 @@ Cases and evidence return raw Mongo documents (`_id`, `ObjectId` semantics); cus
 
 **3. ~~The evidence *list* endpoints are scoped by case, not by disclosure set or referral.~~ FIXED.** `materialiseScopeFilter(user, EVIDENCE)` now answers the per-exhibit question for the list paths as well: an advocate's `GET /api/evidence` and `GET /api/evidence/queue/triage` resolve to the exhibit ids in a pack `SERVED` to them, and an examiner's resolve to the exhibits actually referred to their lab. Previously both scoped by case, so being on record listed every exhibit in it — including exhibits excluded from the pack, and on the triage queue the `triage.priority` that `exhibitView` withholds from `my-pack`.
 
-**4. `GET /api/custody/gaps` uses a case-shaped scope filter against a `CustodyItem` query.** `scopeFilterFor(user, CUSTODY_ITEM)` returns `{ ioUserId, stationCode }` for an IO and `{ courtId }` for court roles. `CustodyItem` has `stationCode` and `districtCode` but no `ioUserId` and no `courtId` (`backend/models/CustodyItem.js:33-57`), so an IO and every court role always get an empty result. SHO, District SP and malkhana custodian work correctly.
+**4. ~~`GET /api/custody/gaps` uses a case-shaped scope filter against a `CustodyItem` query.~~ FIXED.** The custody register is station-scoped for every police role and resolved to case ids for court roles, both of which are fields the collection actually has. An integration test asserts that an officer sees their whole station's register and nothing from another station — the direction the bug has to fail in.
 
-**5. `POST /api/disclosure/:packId/serve` is not registrar-restricted.** The route comment says "Registrar serves it", but the only guard is `authorize({ WRITE, DISCLOSURE_PACK })`, and `WRITE` is not in `COURT_ONLY_ACTIONS`. The station SHO — and the assigned IO while the case is still open to writes — therefore pass the resolver and can mint watermarks and serve the pack. `prepare`, `approve`, `acknowledge` and `sync-representation` all carry a second capability or action-level guard; `serve` does not.
+**5. ~~`POST /api/disclosure/:packId/serve` is not registrar-restricted.~~ FIXED.** No police role can reach a disclosure pack at all: the resolver's police branch has no policy that admits one, and `DISCLOSURE_PACK` is in the court's writable set. The authz matrix asserts it.
 
-**6. `GET /api/audit/security` is not scope-filtered.** It is gated on role only (`SHO`/`DISTRICT_SP` in POLICE, or `REGISTRAR`) and then returns every `LOGIN` audit row in the deployment — `authorityId`, decision, reason and source IP — regardless of station, district or court. `GET /api/audit` is properly scoped; this feed is not, and the code says so explicitly ("these carry no caseId, so they are gated on role rather than case scope").
+**6. `GET /api/audit/security` is not scope-filtered.** It is gated on role only (`SHO`/`DISTRICT_SP` in POLICE, or `JUDGE`) and then returns every `LOGIN` audit row in the deployment — `authorityId`, decision, reason and source IP — regardless of station, district or court. `GET /api/audit` is properly scoped; this feed is not, and the code says so explicitly ("these carry no caseId, so they are gated on role rather than case scope").
 
 **7. `POST /api/auth/verify-identity` is an unauthenticated identity oracle.** Given a valid identifier it returns the person's real name, authority, Lexx role, full jurisdictional scope, a masked phone number and whether they hold a Lexx account. It is rate-limited (60 per 15 minutes per IP) and audited, but the rate limiter is skipped for loopback whenever `NODE_ENV !== production` — and behind a reverse proxy in a non-production deployment, every request arrives from loopback.
 
 **8. `GET /api/ledger/verify-chain` discloses ledger volume to any authenticated session.** ADR-012 describes it as "scope-filtered", and the controller comment says "what is scoped is the DETAIL returned". In fact no scoping happens: any active session — including an advocate with a single grant — learns `intact`, `entriesChecked`, `firstSeq`, `lastSeq` and `brokenAtSeq` for the whole deployment. No entry content is returned, so the leak is metadata (total ledger size and growth), not case data.
 
-**9. Several controller doc-comments describe an older authorization design.** `controllers/disclosure.js:321-324` states that approval is "REGISTRAR-scoped" because "no single ACTION covers both" registrar and judge; `:646-651` states that acknowledgement "is authorised with `ACTION.VERIFY`"; `:741-747` states that `sync-representation` "is authorised as a WRITE on the case… That admits the station's IO/SHO as well". All three were superseded by ADR-019 and the current routes use `APPROVE`, `ACKNOWLEDGE` and a registrar-only `CASE_ACCESS_GRANT` capability respectively. The routes are correct; the comments are stale.
+**9. Some controller doc-comments in `controllers/disclosure.js` still describe an older authorization design** — acknowledgement "authorised with `ACTION.VERIFY`", and `sync-representation` "authorised as a WRITE on the case… That admits the station's IO/SHO as well". Both were superseded by ADR-019; the routes use `ACKNOWLEDGE` and a judge-only `CASE_ACCESS_GRANT` capability. The routes are correct; those comments are stale.
 
 **10. `DENY_REASON.GRANT_REVOKED` is defined but unreachable.** `liveGrantFor` (`services/accessResolver.js:117`) filters the query on `revokedAt: null`, so a revoked grant is simply not found and the caller sees `NOT_ON_RECORD_FOR_THIS_CASE`. The more specific code is never returned.
 

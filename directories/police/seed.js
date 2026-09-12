@@ -79,6 +79,10 @@ const OFFICERS = [
     aadhaarLast4: '4402',
   },
   {
+    // The officer who keeps the station store. There is no custodian ROLE any more —
+    // the store is kept by the station's own officers — so this is an investigating
+    // officer like any other, and the separation that matters is enforced per case:
+    // the IO ON a case may never be the store keeper for that case's own evidence.
     pisId: 'UP-GZB-4455',
     name: 'HC Suresh Yadav',
     rank: 'HEAD_CONSTABLE',
@@ -138,7 +142,7 @@ const POSTINGS = [
     orderNumber: 'GZB/POST/2026/1155',
     pisId: 'UP-GZB-4455',
     stationCode: 'UP-GZB-KVN',
-    role: 'MALKHANA_CUSTODIAN',
+    role: 'IO',
     validFrom: D('2024-11-01'),
     validTo: null,
   },
@@ -275,6 +279,12 @@ export async function seedPolice(opts = {}) {
       // second pass, exactly as a real personnel system would.
       await Officer.updateOne({ _id: officerBy.get(p.pisId) }, { $set: { currentPostingId: doc._id } });
     }
+
+    // Postings for roles this product no longer has — the malkhana custodian above
+    // all. An upsert-only seed would leave them in force, so a stale identifier would
+    // still verify in the directory and then be refused at activation.
+    await Posting.deleteMany({ orderNumber: { $nin: POSTINGS.map((p) => p.orderNumber) } });
+    await Officer.deleteMany({ pisId: { $nin: OFFICERS.map((o) => o.pisId) } });
 
     for (const f of FIRS) {
       await upsert(

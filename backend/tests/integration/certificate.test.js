@@ -41,8 +41,8 @@ let mongo;
 let server;
 
 const IO = 'UP-GZB-4471';
+const JUDGE = 'UP-JUD-2291'; // the court the demo case is listed before
 const SHO = 'UP-GZB-4402';
-const REGISTRAR = 'UP-GZB-REG-01';
 const EXAMINER = 'FSL-LKO-0091';
 const ADVOCATE_NOT_ON_RECORD = 'UP/9876/2019';
 
@@ -77,8 +77,9 @@ const FULL_DEVICE = Object.freeze({
 });
 
 let io;
+let judge;
 let sho;
-let registrar;
+
 let examiner;
 let stranger;
 
@@ -94,8 +95,8 @@ beforeAll(async () => {
   server = createApp();
 
   io = await asUser(server, IO);
+  judge = await asUser(server, JUDGE);
   sho = await asUser(server, SHO);
-  registrar = await asUser(server, REGISTRAR);
   examiner = await asUser(server, EXAMINER);
   stranger = await asUser(server, ADVOCATE_NOT_ON_RECORD);
 }, 180_000);
@@ -341,19 +342,19 @@ describe('Part A is auto-filled from the record, not typed', () => {
     expect(entry.payload.partBComplete).toBe(false);
   });
 
-  it('a registrar may also generate; an SHO may not', async () => {
+  it('the court may also generate; an SHO may not', async () => {
     const { caseDoc, evidence } = await fixture();
 
     const shoAttempt = await generateFor(sho, evidence._id);
     expect(shoAttempt.status).toBe(403);
     expect(shoAttempt.body.error.code).toBe(DENY_REASON.READ_ONLY_ROLE);
 
-    // A registrar's scope over a case begins when it is listed before their court.
+    // The court's scope over a case begins when it is listed before it.
     await as(io, request(server).post(`/api/cases/${caseDoc._id}/file-chargesheet`)).send({});
-    const registrarAttempt = await generateFor(registrar, evidence._id);
-    expect(registrarAttempt.status, JSON.stringify(registrarAttempt.body)).toBe(201);
-    expect(registrarAttempt.body.certificate.partA.deponentDesignation).toBe(
-      'Registrar, UP-GZB-SESS-02'
+    const courtAttempt = await generateFor(judge, evidence._id);
+    expect(courtAttempt.status, JSON.stringify(courtAttempt.body)).toBe(201);
+    expect(courtAttempt.body.certificate.partA.deponentDesignation).toBe(
+      'Presiding Judge, UP-GZB-SESS-02'
     );
   });
 
@@ -426,10 +427,12 @@ describe('Part B comes only from a filed FSL report', () => {
       request(server).post(`/api/certificates/${gen.body.certificate.certificateId}/sign-part-b`)
     ).send({ signature: examiner.keys.sign(gen.body.certificate.bodyHash) });
 
-    // The examiner has no referral for this exhibit yet, so the resolver stops them
-    // before the controller can even report an empty Part B.
-    expect(res.status).toBe(403);
-    expect(res.body.error.code).toBe(DENY_REASON.NO_OPEN_REFERRAL_TO_YOUR_LAB);
+    // The examiner CAN reach this exhibit — it is registered in the state their
+    // laboratory serves — so the answer is now the accurate one rather than a
+    // scoping refusal that happened to be in the way: Part B is blank because no
+    // report has been filed, and there is nothing to sign.
+    expect(res.status).toBe(409);
+    expect(res.body.error.code).toBe('PART_B_NOT_FILED');
   });
 });
 
@@ -644,6 +647,81 @@ describe('the PDF', () => {
   });
 });
 
+// ================================================ 5b. A COPY IN SOMEONE'S HAND ===
+
+/**
+ * Party A hands Party B a certificate PDF. Party B has no account; they hash the file
+ * (in the browser — the document never travels) and ask the public verifier about it.
+ */
+describe('checking the copy a party was handed', () => {
+  const pdfOf = async (session, certificateId) =>
+    (
+      await as(session, request(server).get(`/api/certificates/${certificateId}/pdf`))
+        .buffer()
+        .parse(binaryParser)
+    ).body;
+
+  it('carries its own verification token in the PDF metadata, readable from the bytes', async () => {
+    const { evidence } = await fixture();
+    const gen = await generateFor(io, evidence._id);
+    const { certificateId, verificationToken } = gen.body.certificate;
+
+    const text = (await pdfOf(io, certificateId)).toString('latin1');
+    expect(text.match(/lexx-verify:([A-Za-z0-9_-]{43})/)?.[1]).toBe(verificationToken);
+  });
+
+  it('calls the current document CURRENT', async () => {
+    const { evidence } = await fixture();
+    const gen = await generateFor(io, evidence._id);
+    const { certificateId, verificationToken } = gen.body.certificate;
+    const digest = hashOf(await pdfOf(io, certificateId));
+
+    const res = await request(server).get(`/public/verify/${verificationToken}?copy=${digest}`);
+    expect(res.status).toBe(200);
+    expect(res.body.copy).toEqual({ sha256: digest, match: 'CURRENT', supersededAt: null });
+  });
+
+  it('calls a copy taken before a later signature an EARLIER_VERSION, not a forgery', async () => {
+    const { evidence } = await fixture();
+    const gen = await generateFor(io, evidence._id);
+    const { certificateId, verificationToken, bodyHash } = gen.body.certificate;
+
+    const before = hashOf(await pdfOf(io, certificateId));
+    await as(io, request(server).post(`/api/certificates/${certificateId}/sign-part-a`)).send({
+      signature: io.keys.sign(bodyHash),
+    });
+    const after = hashOf(await pdfOf(io, certificateId));
+    expect(after).not.toBe(before);
+
+    const old = await request(server).get(`/public/verify/${verificationToken}?copy=${before}`);
+    expect(old.body.copy.match).toBe('EARLIER_VERSION');
+    expect(old.body.copy.supersededAt).toBeTruthy();
+
+    const current = await request(server).get(`/public/verify/${verificationToken}?copy=${after}`);
+    expect(current.body.copy.match).toBe('CURRENT');
+  });
+
+  it('calls any other file NO_MATCH — a genuine token on a document that is not ours', async () => {
+    const { evidence } = await fixture();
+    const gen = await generateFor(io, evidence._id);
+    const altered = Buffer.concat([await pdfOf(io, gen.body.certificate.certificateId), Buffer.from('\n')]);
+
+    const res = await request(server).get(
+      `/public/verify/${gen.body.certificate.verificationToken}?copy=${hashOf(altered)}`
+    );
+    expect(res.body.valid).toBe(true);
+    expect(res.body.copy.match).toBe('NO_MATCH');
+  });
+
+  it('ignores a malformed digest rather than guessing', async () => {
+    const { evidence } = await fixture();
+    const gen = await generateFor(io, evidence._id);
+    const res = await request(server).get(`/public/verify/${gen.body.certificate.verificationToken}?copy=nothex`);
+    expect(res.status).toBe(200);
+    expect(res.body.copy).toBeNull();
+  });
+});
+
 // ================================================== 6. THE PUBLIC VERIFIER ===
 
 describe('the public verifier: validity, never contents', () => {
@@ -817,8 +895,9 @@ describe('the public verifier: validity, never contents', () => {
     const gen = await generateFor(io, evidence._id);
     const url = gen.body.certificate.verificationUrl;
 
-    // The verifier PAGE, which reads ?token= on load — not the JSON endpoint.
-    expect(url).toContain('/verify.html');
+    // The verifier PAGE, which reads ?token= on load — not the JSON endpoint. The
+    // single-page client routes `/verify`; the old `/verify.html` no longer exists.
+    expect(new URL(url).pathname).toBe('/verify');
     expect(url).toContain(`token=${gen.body.certificate.verificationToken}`);
 
     // Still outside /api, and still not the raw JSON route.
@@ -827,5 +906,72 @@ describe('the public verifier: validity, never contents', () => {
 
     // It must be an absolute URL: a relative one is not scannable from a phone.
     expect(() => new URL(url)).not.toThrow();
+  });
+});
+
+// ================================================== listing, per exhibit =====
+
+describe('GET /api/certificates?evidenceId= — never more visible than the exhibit', () => {
+  it('lists every certificate for the exhibit, with the token the verifier takes', async () => {
+    const { evidence } = await fixture();
+    const first = await generateFor(io, evidence._id);
+    expect(first.status).toBe(201);
+
+    const res = await as(io, request(server).get('/api/certificates').query({ evidenceId: evidence._id }));
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.total).toBe(1);
+    expect(res.body.certificates[0].verificationToken).toBe(first.body.certificate.verificationToken);
+    expect(new URL(res.body.certificates[0].verificationUrl).pathname).toBe('/verify');
+  });
+
+  it('refuses an advocate who may not read the exhibit', async () => {
+    const { evidence } = await fixture();
+    await generateFor(io, evidence._id);
+    const res = await as(stranger, request(server).get('/api/certificates').query({ evidenceId: evidence._id }));
+    expect(res.status).toBe(403);
+  });
+
+  it('rejects a malformed exhibit id as a validation failure, not a cast error', async () => {
+    const res = await as(io, request(server).get('/api/certificates').query({ evidenceId: 'nope' }));
+    expect(res.status).toBe(400);
+  });
+
+  it('reaches the examiner after reporting, both directly and through their referral', async () => {
+    const { caseDoc, evidence } = await fixture();
+    await fileForensicReport(caseDoc, evidence);
+    await generateFor(io, evidence._id);
+
+    // Part B is the examiner's own statement, and they can reach it two ways — by
+    // the exhibit, which is registered in the state their laboratory serves, and by
+    // the referral their laboratory holds. Both are the same certificate.
+    const direct = await as(
+      examiner,
+      request(server).get('/api/certificates').query({ evidenceId: evidence._id })
+    );
+    expect(direct.status, JSON.stringify(direct.body)).toBe(200);
+    expect(direct.body.certificates[0].partBComplete).toBe(true);
+
+    const referral = await Referral.findOne({ evidenceId: evidence._id }).lean();
+    const res = await as(examiner, request(server).get(`/api/fsl/referrals/${referral._id}/certificates`));
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.certificates[0].partBComplete).toBe(true);
+  });
+});
+
+describe('attesting is not amending — a signature survives the chargesheet', () => {
+  it('lets the deponent sign Part A after the case is closed to investigative writes', async () => {
+    const { caseDoc, evidence } = await fixture();
+    const gen = await generateFor(io, evidence._id);
+    expect(gen.status).toBe(201);
+
+    const filed = await as(io, request(server).post(`/api/cases/${caseDoc._id}/file-chargesheet`)).send({});
+    expect(filed.status, JSON.stringify(filed.body)).toBe(200);
+
+    const { certificateId, bodyHash } = gen.body.certificate;
+    const res = await as(io, request(server).post(`/api/certificates/${certificateId}/sign-part-a`)).send({
+      signature: io.keys.sign(bodyHash),
+    });
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.certificate.signatures.map((s) => s.role)).toContain('PARTY');
   });
 });

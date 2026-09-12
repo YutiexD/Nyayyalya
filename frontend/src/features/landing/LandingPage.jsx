@@ -63,7 +63,7 @@ const CLAIMS = [
   {
     icon: FileSearch,
     title: 'Disclosure scoped per exhibit',
-    body: 'An advocate sees the set served on them and nothing else. Access follows the court record — a vakalatnama accepted by the registrar, or a legal aid order — which Lexx mirrors and cannot create. Material outside the served set is refused by reason code, and the refusal is logged.',
+    body: 'An advocate sees the set served on them and nothing else. Access follows the court record — a vakalatnama accepted by the court, or a legal aid order — which Lexx mirrors and cannot create. Material outside the served set is refused by reason code, and the refusal is logged.',
     limit:
       'Completeness of the case file. It proves what was served on whom; what was withheld is a decision the court ruled on, not one the system made.',
   },
@@ -108,7 +108,7 @@ export default function LandingPage() {
           <div className="will-reveal">
             <p className="mt-6 max-w-2xl text-balance text-base leading-relaxed text-muted-foreground sm:text-lg">
               A register for digital evidence from the officer who seizes a device, through the
-              malkhana and the laboratory, to the court, the advocate on record and anyone holding
+              station store and the laboratory, to the court, the advocate on record and anyone holding
               a printed certificate. Hashed and signed before a byte is sent. Nothing deleted, ever.
             </p>
           </div>
@@ -177,7 +177,7 @@ export default function LandingPage() {
           </div>
           <div className="will-reveal space-y-4 text-base leading-relaxed text-muted-foreground">
             <p>
-              A phone seized at a scene passes through a seizing officer, a malkhana, one or more
+              A phone seized at a scene passes through a seizing officer, a station store, one or more
               investigating officers, a forensic science laboratory, a court registry and counsel
               on both sides. At every hand-off the question a court eventually asks is the same:
               is the file in front of me the file that was seized?

@@ -1,5 +1,5 @@
 /**
- * Merkle batching and anchoring to Arbitrum Sepolia.
+ * Merkle batching and anchoring to Monad Testnet.
  *
  * These run in DRY_RUN (no signing key), which exercises the whole pipeline —
  * batching, root computation, idempotency guards, entry stamping and proof
@@ -134,10 +134,19 @@ describe('anchor batching', () => {
 // ============================================================= idempotency ===
 
 describe('anchor idempotency — a batch may be anchored exactly once', () => {
-  it('derives a deterministic batch id from the sequence range', () => {
-    expect(computeBatchId(1, 10)).toBe(computeBatchId(1, 10));
-    expect(computeBatchId(1, 10)).not.toBe(computeBatchId(1, 11));
-    expect(computeBatchId(1, 10)).toMatch(/^0x[0-9a-f]{64}$/);
+  it('derives a deterministic batch id from the sequence range and its root', () => {
+    const root = '0x' + 'ab'.repeat(32);
+    expect(computeBatchId(1, 10, root)).toBe(computeBatchId(1, 10, root));
+    expect(computeBatchId(1, 10, root)).not.toBe(computeBatchId(1, 11, root));
+    expect(computeBatchId(1, 10, root)).toMatch(/^0x[0-9a-f]{64}$/);
+  });
+
+  it('never reuses an id across two ledgers that cover the same range', () => {
+    // A reset ledger starts at sequence 1 again. Its batch must not ask the contract
+    // for an id an earlier ledger already anchored under a different root.
+    const before = computeBatchId(1, 18, '0x' + '11'.repeat(32));
+    const afterReset = computeBatchId(1, 18, '0x' + '22'.repeat(32));
+    expect(afterReset).not.toBe(before);
   });
 
   it('refuses a second batch over the same sequence range', async () => {
@@ -275,6 +284,58 @@ describe('GET /api/anchors/latest — public', () => {
     const anchor = await latestAnchor();
     expect(anchor.explorerUrl).toContain('testnet.monadexplorer.com');
     expect(anchor.explorerUrl).toContain('/tx/0x');
+  });
+});
+
+describe('GET /api/anchors/recent — public', () => {
+  it('lists batches newest first with chain facts, and no leaves', async () => {
+    await addEvents(2);
+    await runAnchorCycle();
+    await addEvents(1);
+    await runAnchorCycle();
+
+    const res = await request(server).get('/api/anchors/recent');
+    expect(res.status).toBe(200);
+    expect(res.body.network).toBe('monad-testnet');
+    expect(typeof res.body.submitting).toBe('boolean');
+    expect(res.body.batches.map((b) => b.fromSeq)).toEqual([3, 1]);
+    expect(JSON.stringify(res.body)).not.toMatch(/leafHashes|payload|caseId/);
+  });
+});
+
+describe('GET /api/anchors/entry/:seq/:entryHash — public receipt check', () => {
+  it('confirms a receipt the register still holds, and its place under the root', async () => {
+    await addEvents(3);
+    await runAnchorCycle();
+    const entry = await Ledger.findOne({ seq: 2 }).lean();
+
+    const res = await request(server).get(`/api/anchors/entry/2/${entry.entryHash}`);
+    expect(res.status).toBe(200);
+    expect(res.body.valid).toBe(true);
+    expect(res.body.anchored).toBe(true);
+    expect(res.body.includedInRoot).toBe(true);
+    // Validity and chain facts only — never what the entry records.
+    expect(res.body.payload).toBeUndefined();
+    expect(JSON.stringify(res.body)).not.toMatch(/"i":|event 1/);
+  });
+
+  it('answers a wrong hash exactly like a missing entry', async () => {
+    await addEvents(1);
+    const wrong = await request(server).get(`/api/anchors/entry/1/${'a'.repeat(64)}`);
+    const missing = await request(server).get(`/api/anchors/entry/999/${'a'.repeat(64)}`);
+    const malformed = await request(server).get('/api/anchors/entry/1/not-a-hash');
+    for (const res of [wrong, missing, malformed]) {
+      expect(res.status).toBe(404);
+      expect(res.body).toEqual({ valid: false, reason: 'RECEIPT_NOT_FOUND' });
+    }
+  });
+
+  it('reports an entry not yet batched as valid but unanchored', async () => {
+    await addEvents(1);
+    const entry = await Ledger.findOne({ seq: 1 }).lean();
+    const res = await request(server).get(`/api/anchors/entry/1/${entry.entryHash}`);
+    expect(res.status).toBe(200);
+    expect(res.body.anchored).toBe(false);
   });
 });
 

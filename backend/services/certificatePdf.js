@@ -44,9 +44,15 @@ const TEMPLATE_TITLE =
 export const certificatePdfKey = (certificateId) =>
   buildStorageKey(sha256Hex(`certificate-pdf:${String(certificateId)}`), certificateId);
 
-/** The URL the QR on the certificate points at. */
+/**
+ * The URL the QR on the certificate points at: the client's public verifier route.
+ *
+ * `/verify`, not `/verify.html`. The multi-page client served a `verify.html`; the
+ * single-page client routes `/verify`, and a printed QR still pointing at the old file
+ * landed a scanning phone on the front page with nothing verified.
+ */
 export const verificationUrlFor = (verificationToken) =>
-  `${env.PUBLIC_WEB_URL}/verify.html?token=${encodeURIComponent(verificationToken)}`;
+  `${env.PUBLIC_WEB_URL}/verify?token=${encodeURIComponent(verificationToken)}`;
 
 // ---------------------------------------------------------------- rendering ----
 
@@ -130,6 +136,11 @@ export async function renderCertificatePdf({ certificate, caseDoc, evidence }) {
       Subject: TEMPLATE_TITLE,
       Producer: 'LEXX',
       Creator: 'LEXX',
+      // Machine-readable copy of the verification token, in the document's own
+      // metadata (ASCII, so it is stored as plain text, outside the compressed page
+      // streams). The public verifier reads it when a holder drops the PDF on it, so
+      // checking a copy handed over by another party needs nothing but the file.
+      Keywords: `lexx-verify:${certificate.verificationToken}`,
       // Pinned, so the same content always hashes to the same bytes.
       CreationDate: generatedAt,
       ModDate: generatedAt,

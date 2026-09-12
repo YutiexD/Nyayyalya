@@ -35,6 +35,19 @@ router.get(
   evidence.triageQueue
 );
 
+/**
+ * Open an exhibit by its register code (EX-…). The code only locates an id; the
+ * resolver decides as for `/:id`, so counsel reaching for an exhibit outside the set
+ * served on them is refused EXHIBIT_NOT_IN_DISCLOSURE_SET — and the attempt is in the
+ * audit feed. Declared before `/:id`.
+ */
+router.get(
+  '/by-code/:code',
+  evidence.evidenceIdFromCode,
+  authorize({ action: ACTION.READ, resourceType: RESOURCE_TYPE.EVIDENCE, idFrom: 'lookupEvidenceId' }),
+  evidence.getEvidence
+);
+
 router.get(
   '/:id',
   authorize({ action: ACTION.READ, resourceType: RESOURCE_TYPE.EVIDENCE }),

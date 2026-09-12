@@ -28,7 +28,7 @@ router.use(...requireSession);
  *                                 The evidence id is read from the body, but the
  *                                 resolver loads the record itself and derives the
  *                                 case from it, so nothing is asserted by the caller.
- *   authorizeCreate(CERTIFICATE)— may this role author a certificate? (IO, REGISTRAR)
+ *   authorizeCreate(CERTIFICATE)— may this role author a certificate? (IO, JUDGE)
  */
 router.post(
   '/generate',
@@ -45,6 +45,14 @@ router.post(
   certificate.generate
 );
 
+/** Every certificate for one exhibit — no more visible than the exhibit itself. */
+router.get(
+  '/',
+  certificate.validateEvidenceQuery,
+  authorize({ action: ACTION.READ, resourceType: RESOURCE_TYPE.EVIDENCE, idFrom: 'query.evidenceId' }),
+  certificate.listForEvidence
+);
+
 /** Metadata plus the canonical body hash a signer has to sign. */
 router.get(
   '/:id',
@@ -52,10 +60,16 @@ router.get(
   certificate.getCertificate
 );
 
-/** Part A is signed by the deponent it names; the controller enforces that identity. */
+/**
+ * Part A is signed by the deponent it names; the controller enforces that identity.
+ *
+ * ATTEST, not WRITE: a signature attests to a record already collected and changes
+ * nothing in it. As WRITE, the stage lock refused the investigating officer their own
+ * signature once the chargesheet was filed — the moment a certificate is for.
+ */
 router.post(
   '/:id/sign-part-a',
-  authorize({ action: ACTION.WRITE, resourceType: RESOURCE_TYPE.CERTIFICATE }),
+  authorize({ action: ACTION.ATTEST, resourceType: RESOURCE_TYPE.CERTIFICATE }),
   certificate.signPartA
 );
 
@@ -66,7 +80,7 @@ router.post(
  */
 router.post(
   '/:id/sign-part-b',
-  authorize({ action: ACTION.WRITE, resourceType: RESOURCE_TYPE.CERTIFICATE }),
+  authorize({ action: ACTION.ATTEST, resourceType: RESOURCE_TYPE.CERTIFICATE }),
   certificate.signPartB
 );
 

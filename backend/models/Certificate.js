@@ -76,6 +76,21 @@ const CertificateSchema = new Schema(
 
     pdfKey: { type: String, default: null },
     pdfSha256: { type: String, default: null },
+    /**
+     * Digests of earlier renders of this same certificate. The PDF is re-rendered when
+     * a signature is added, so a copy handed over before Part B was signed no longer
+     * matches `pdfSha256` — and a holder must be told "earlier version of a genuine
+     * certificate", not "not our document". Digests only; the old bytes are not kept.
+     */
+    pdfHistory: {
+      type: [
+        new Schema(
+          { sha256: { type: String, required: true }, supersededAt: { type: Date, required: true } },
+          { _id: false }
+        ),
+      ],
+      default: [],
+    },
 
     signatures: { type: [SignatureSchema], default: [] },
 

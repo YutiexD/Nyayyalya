@@ -37,7 +37,7 @@ let server;
 
 // Seeded identities (see each directory's seed.js).
 const IO = 'UP-GZB-4471';
-const REGISTRAR = 'UP-GZB-REG-01';
+const JUDGE = 'UP-JUD-2291'; // presides over the Sessions court the demo CNR is listed in
 const ADVOCATE_ON_RECORD = 'UP/1234/2015'; // vakalatnama ACCEPTED for the demo CNR
 const ADVOCATE_NOT_ON_RECORD = 'UP/9876/2019'; // real advocate, on no case at all
 const LEGAL_AID_ADVOCATE = 'UP/7777/2018'; // BNSS s.341 assignment for the same CNR
@@ -74,7 +74,7 @@ const FULL_DEVICE = Object.freeze({
 });
 
 let io;
-let registrar;
+let judge;
 let onRecord;
 let notOnRecord;
 let legalAid;
@@ -83,7 +83,24 @@ beforeAll(async () => {
   mongo = await MongoMemoryServer.create();
   const uri = mongo.getUri();
 
-  await startDirectories(uri);
+  const directories = await startDirectories(uri);
+
+  // The court register starts with nobody on record (directories/court/seed.js). This
+  // suite is about MIRRORING that register, so the appearance is put on it directly,
+  // as the registry itself would — not through Lexx's own e-filing flow, which has its
+  // own suite (vakalatnama.test.js).
+  const filed = await fetch(`${directories.court}/directory/vakalatnama`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      cnrNumber: CNR,
+      advocateEnrolmentNo: ADVOCATE_ON_RECORD,
+      appearingFor: 'ACCUSED',
+      partyName: 'Ramesh Singh',
+      acceptedBy: JUDGE,
+    }),
+  });
+  expect([201, 409]).toContain(filed.status);
 
   await mongoose.connect(uri, { dbName: 'lexx_test_disclosure', bufferCommands: false });
   for (const m of allModels) await m.createIndexes();
@@ -93,7 +110,7 @@ beforeAll(async () => {
   // Activated once. Password hashing at 12 rounds is deliberately expensive, so
   // repeating it per test would spend the whole budget proving bcrypt works.
   io = await asUser(server, IO);
-  registrar = await asUser(server, REGISTRAR);
+  judge = await asUser(server, JUDGE);
   onRecord = await asUser(server, ADVOCATE_ON_RECORD);
   notOnRecord = await asUser(server, ADVOCATE_NOT_ON_RECORD);
   legalAid = await asUser(server, LEGAL_AID_ADVOCATE);
@@ -145,9 +162,34 @@ async function uploadExhibit(caseId, title, device = {}) {
 }
 
 /**
+ * A case listed before a court: created, given exhibits, and filed.
+ *
+ * Disclosure cannot start before this point any more. The court composes the set, and
+ * a case still with the police is before no court at all — so there is nobody
+ * with the authority to compose one, which is the legally correct posture rather than
+ * a gap. (The old sequence let the investigating officer propose a set during the
+ * investigation, which put a party to the case in charge of what the other party sees.)
+ */
+async function listedCase(titles = ['CCTV clip', 'Witness statement']) {
+  const caseDoc = await createCase();
+  const exhibits = [];
+  for (const title of titles) exhibits.push(await uploadExhibit(caseDoc._id, title));
+
+  const filed = await as(io, request(server).post(`/api/cases/${caseDoc._id}/file-chargesheet`)).send({});
+  expect(filed.status, JSON.stringify(filed.body)).toBe(200);
+
+  return { caseDoc: await Case.findById(caseDoc._id).lean(), exhibits };
+}
+
+/**
  * The full statutory sequence, in the order the law actually runs:
- * case → exhibits → IO prepares → chargesheet filed → representation synced from the
- * court directory → registrar approves → registrar serves.
+ * case → exhibits → chargesheet filed → representation synced from the court
+ * directory → the court composes the set → the court rules on it → the court serves.
+ *
+ * Disclosure begins AFTER filing now, and that is not an ordering detail. The police
+ * no longer compose the set at all: the court holds the case file once the chargesheet
+ * is filed, and deciding what the defence gets from it is the court's decision rather
+ * than a form the investigation has to remember to fill in first.
  */
 async function fixture({
   exclude = 1,
@@ -165,7 +207,19 @@ async function fixture({
 
   const excluded = exhibits.slice(exhibits.length - exclude);
 
-  const prepared = await as(io, request(server).post(`/api/disclosure/${caseDoc._id}/prepare`)).send({
+  const filed = await as(io, request(server).post(`/api/cases/${caseDoc._id}/file-chargesheet`)).send({});
+  expect(filed.status, JSON.stringify(filed.body)).toBe(200);
+
+  const synced = await as(
+    judge,
+    request(server).post(`/api/disclosure/${caseDoc._id}/sync-representation`)
+  ).send({});
+  expect(synced.status, JSON.stringify(synced.body)).toBe(200);
+
+  const prepared = await as(
+    judge,
+    request(server).post(`/api/disclosure/${caseDoc._id}/prepare`)
+  ).send({
     excludedItems: excluded.map((e) => ({
       itemId: e._id,
       reason: 'Identifies a protected witness; withheld pending a redaction order.',
@@ -174,16 +228,7 @@ async function fixture({
   expect(prepared.status, JSON.stringify(prepared.body)).toBe(201);
   const packId = prepared.body.pack.packId;
 
-  const filed = await as(io, request(server).post(`/api/cases/${caseDoc._id}/file-chargesheet`)).send({});
-  expect(filed.status, JSON.stringify(filed.body)).toBe(200);
-
-  const synced = await as(
-    registrar,
-    request(server).post(`/api/disclosure/${caseDoc._id}/sync-representation`)
-  ).send({});
-  expect(synced.status, JSON.stringify(synced.body)).toBe(200);
-
-  const approved = await as(registrar, request(server).post(`/api/disclosure/${packId}/approve`)).send({
+  const approved = await as(judge, request(server).post(`/api/disclosure/${packId}/approve`)).send({
     approvedExclusions: approveAllExclusions ? excluded.map((e) => e._id) : excluded.slice(1).map((e) => e._id),
     redactionVariant: 'DEFENCE_V1',
   });
@@ -199,7 +244,7 @@ async function fixture({
     recipientUserIds = grant ? [String(grant.userId)] : [];
   }
 
-  const served = await as(registrar, request(server).post(`/api/disclosure/${packId}/serve`)).send(
+  const served = await as(judge, request(server).post(`/api/disclosure/${packId}/serve`)).send(
     recipientUserIds ? { recipientUserIds } : {}
   );
 
@@ -226,7 +271,7 @@ describe('representation is mirrored from the court directory, never asserted', 
     await as(io, request(server).post(`/api/cases/${caseDoc._id}/file-chargesheet`)).send({});
 
     const res = await as(
-      registrar,
+      judge,
       request(server).post(`/api/disclosure/${caseDoc._id}/sync-representation`)
     ).send({});
 
@@ -249,7 +294,7 @@ describe('representation is mirrored from the court directory, never asserted', 
   it('creates NO grant for the advocate who is on no case', async () => {
     const caseDoc = await createCase();
     await as(io, request(server).post(`/api/cases/${caseDoc._id}/file-chargesheet`)).send({});
-    await as(registrar, request(server).post(`/api/disclosure/${caseDoc._id}/sync-representation`)).send({});
+    await as(judge, request(server).post(`/api/disclosure/${caseDoc._id}/sync-representation`)).send({});
 
     const grants = await CaseAccessGrant.find({ caseId: caseDoc._id }).lean();
     const holders = grants.map((g) => String(g.userId));
@@ -259,7 +304,7 @@ describe('representation is mirrored from the court directory, never asserted', 
   it('also mirrors a BNSS s.341 legal-aid assignment', async () => {
     const caseDoc = await createCase();
     await as(io, request(server).post(`/api/cases/${caseDoc._id}/file-chargesheet`)).send({});
-    await as(registrar, request(server).post(`/api/disclosure/${caseDoc._id}/sync-representation`)).send({});
+    await as(judge, request(server).post(`/api/disclosure/${caseDoc._id}/sync-representation`)).send({});
 
     const grant = await CaseAccessGrant.findOne({
       caseId: caseDoc._id,
@@ -273,9 +318,9 @@ describe('representation is mirrored from the court directory, never asserted', 
   it('is idempotent — polling twice does not duplicate a grant', async () => {
     const caseDoc = await createCase();
     await as(io, request(server).post(`/api/cases/${caseDoc._id}/file-chargesheet`)).send({});
-    await as(registrar, request(server).post(`/api/disclosure/${caseDoc._id}/sync-representation`)).send({});
+    await as(judge, request(server).post(`/api/disclosure/${caseDoc._id}/sync-representation`)).send({});
     const second = await as(
-      registrar,
+      judge,
       request(server).post(`/api/disclosure/${caseDoc._id}/sync-representation`)
     ).send({});
 
@@ -286,24 +331,24 @@ describe('representation is mirrored from the court directory, never asserted', 
   it('refuses to sync a case that is not yet listed before a court', async () => {
     const caseDoc = await createCase();
     const res = await as(
-      registrar,
+      judge,
       request(server).post(`/api/disclosure/${caseDoc._id}/sync-representation`)
     ).send({});
-    // A registrar has no scope over a case with no courtId — the resolver stops it.
+    // The court has no scope over a case with no courtId — the resolver stops it,
+    // and says precisely why: this case is not listed before this court.
     expect(res.status).toBe(403);
-    expect(res.body.error.code).toBe(DENY_REASON.OUT_OF_COURT_SCOPE);
+    expect(res.body.error.code).toBe(DENY_REASON.CASE_NOT_LISTED_IN_YOUR_COURT);
   });
 });
 
 // ============================================================== preparation ==
 
-describe('the IO proposes the set; the set is computed, not submitted', () => {
-  it('includes every exhibit except the ones excluded with a reason', async () => {
-    const caseDoc = await createCase();
-    const a = await uploadExhibit(caseDoc._id, 'CCTV clip');
-    const b = await uploadExhibit(caseDoc._id, 'Witness statement');
+describe('the court composes the set; the set is computed, not submitted', () => {
+  it('includes every exhibit except the ones withheld with a reason', async () => {
+    const { caseDoc, exhibits } = await listedCase();
+    const [a, b] = exhibits;
 
-    const res = await as(io, request(server).post(`/api/disclosure/${caseDoc._id}/prepare`)).send({
+    const res = await as(judge, request(server).post(`/api/disclosure/${caseDoc._id}/prepare`)).send({
       excludedItems: [{ itemId: b._id, reason: 'Names a protected witness under POCSO.' }],
     });
 
@@ -314,28 +359,33 @@ describe('the IO proposes the set; the set is computed, not submitted', () => {
     expect(res.body.pack.status).toBe(DISCLOSURE_STATUS.DRAFT);
   });
 
-  it('refuses an exclusion with no reason', async () => {
-    const caseDoc = await createCase();
-    const a = await uploadExhibit(caseDoc._id, 'CCTV clip');
+  it('refuses a withholding with no reason', async () => {
+    const { caseDoc, exhibits } = await listedCase(['CCTV clip']);
 
-    const res = await as(io, request(server).post(`/api/disclosure/${caseDoc._id}/prepare`)).send({
-      excludedItems: [{ itemId: a._id, reason: '' }],
+    const res = await as(judge, request(server).post(`/api/disclosure/${caseDoc._id}/prepare`)).send({
+      excludedItems: [{ itemId: exhibits[0]._id, reason: '' }],
     });
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe('VALIDATION_FAILED');
   });
 
-  it('refuses an exclusion naming an exhibit from another case', async () => {
-    const caseDoc = await createCase();
-    await uploadExhibit(caseDoc._id, 'CCTV clip');
+  it('refuses a withholding naming an exhibit from another case', async () => {
+    const { caseDoc } = await listedCase(['CCTV clip']);
 
-    const res = await as(io, request(server).post(`/api/disclosure/${caseDoc._id}/prepare`)).send({
+    const res = await as(judge, request(server).post(`/api/disclosure/${caseDoc._id}/prepare`)).send({
       excludedItems: [
         { itemId: new mongoose.Types.ObjectId().toString(), reason: 'Not in this case at all.' },
       ],
     });
     expect(res.status).toBe(400);
     expect(res.body.error.code).toBe('EXCLUDED_ITEM_NOT_IN_CASE');
+  });
+
+  it('the investigating officer cannot compose a pack — disclosure is the court\u2019s', async () => {
+    const { caseDoc } = await listedCase();
+    const res = await as(io, request(server).post(`/api/disclosure/${caseDoc._id}/prepare`)).send({});
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe(DENY_REASON.READ_ONLY_ROLE);
   });
 
   it('an advocate cannot prepare a pack', async () => {
@@ -345,16 +395,99 @@ describe('the IO proposes the set; the set is computed, not submitted', () => {
     expect(res.body.error.code).toBe(DENY_REASON.NOT_ON_RECORD_FOR_THIS_CASE);
   });
 
-  it('writes DISCLOSURE_PREPARED to the ledger with the exclusion reasons', async () => {
-    const caseDoc = await createCase();
-    const a = await uploadExhibit(caseDoc._id, 'CCTV clip');
-    await as(io, request(server).post(`/api/disclosure/${caseDoc._id}/prepare`)).send({
-      excludedItems: [{ itemId: a._id, reason: 'Withheld pending a redaction order.' }],
+  it('writes DISCLOSURE_PREPARED to the ledger with the withholding reasons', async () => {
+    const { caseDoc, exhibits } = await listedCase(['CCTV clip']);
+    await as(judge, request(server).post(`/api/disclosure/${caseDoc._id}/prepare`)).send({
+      excludedItems: [{ itemId: exhibits[0]._id, reason: 'Withheld pending a redaction order.' }],
     });
 
     const entry = await Ledger.findOne({ eventType: LEDGER_EVENT.DISCLOSURE_PREPARED }).lean();
     expect(entry).toBeTruthy();
     expect(entry.payload.exclusions[0].reason).toMatch(/redaction order/);
+  });
+});
+
+// ======================================================= share, in one act ==
+
+/**
+ * The route the product actually leads with.
+ *
+ * Composing the set, ruling on what is withheld and serving it used to be three acts
+ * by two authorities across three screens, and an advocate saw nothing until the last
+ * of them happened. `share` is all three in one decision by the court that is seized
+ * of the case — and it still writes all three ledger entries, because "the set was
+ * settled, the withholdings were ruled on, the pack was served" remains three facts
+ * with three timestamps even when one person did them in one click.
+ */
+describe('POST /api/disclosure/:caseId/share', () => {
+  async function listedWithCounsel(titles) {
+    const { caseDoc, exhibits } = await listedCase(titles);
+    const synced = await as(
+      judge,
+      request(server).post(`/api/disclosure/${caseDoc._id}/sync-representation`)
+    ).send({});
+    expect(synced.status, JSON.stringify(synced.body)).toBe(200);
+    return { caseDoc, exhibits };
+  }
+
+  it('shares everything, and serves it, with no input at all', async () => {
+    const { caseDoc, exhibits } = await listedWithCounsel();
+
+    const res = await as(judge, request(server).post(`/api/disclosure/${caseDoc._id}/share`)).send({});
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.pack.status).toBe(DISCLOSURE_STATUS.SERVED);
+    expect(res.body.pack.exhibitCount).toBe(exhibits.length);
+    expect(res.body.servedNow.length).toBeGreaterThan(0);
+    // Every recipient gets their own unguessable tracer.
+    expect(res.body.servedNow[0].watermarkToken.length).toBeGreaterThanOrEqual(32);
+  });
+
+  it('withholds what the court withholds, with the ground on the record', async () => {
+    const { caseDoc, exhibits } = await listedWithCounsel();
+    const withheld = exhibits[exhibits.length - 1];
+
+    const res = await as(judge, request(server).post(`/api/disclosure/${caseDoc._id}/share`)).send({
+      withheldItems: [{ itemId: withheld._id, reason: 'Names a protected witness under POCSO.' }],
+    });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.pack.exhibitIds).not.toContain(withheld._id);
+    expect(res.body.withheld[0].exhibitCode).toBe(withheld.exhibitCode);
+    expect(res.body.withheld[0].reason).toMatch(/protected witness/);
+  });
+
+  it('writes PREPARED, APPROVED and SERVED — one act, three facts', async () => {
+    const { caseDoc } = await listedWithCounsel();
+    await as(judge, request(server).post(`/api/disclosure/${caseDoc._id}/share`)).send({});
+
+    const events = await Ledger.find({ caseId: caseDoc._id }).sort({ seq: 1 }).select('eventType').lean();
+    const types = events.map((e) => e.eventType);
+    for (const expected of [
+      LEDGER_EVENT.DISCLOSURE_PREPARED,
+      LEDGER_EVENT.DISCLOSURE_APPROVED,
+      LEDGER_EVENT.DISCLOSURE_SERVED,
+    ]) {
+      expect(types, `${expected} must be in the case history`).toContain(expected);
+    }
+  });
+
+  it('refuses the police and an advocate', async () => {
+    const { caseDoc } = await listedWithCounsel();
+    for (const who of [io, onRecord]) {
+      const res = await as(who, request(server).post(`/api/disclosure/${caseDoc._id}/share`)).send({});
+      expect(res.status).toBe(403);
+    }
+  });
+
+  it('refuses to re-decide a case file it has already shared', async () => {
+    const { caseDoc } = await listedWithCounsel();
+    expect(
+      (await as(judge, request(server).post(`/api/disclosure/${caseDoc._id}/share`)).send({})).status
+    ).toBe(201);
+
+    const again = await as(judge, request(server).post(`/api/disclosure/${caseDoc._id}/share`)).send({});
+    expect(again.status).toBe(409);
+    expect(again.body.error.code).toBe('PACK_ALREADY_SERVED');
   });
 });
 
@@ -426,7 +559,7 @@ describe('serving', () => {
   it('refuses to serve a recipient who is not on record', async () => {
     const f = await fixture();
     const stranger = String(notOnRecord.user.userId);
-    const res = await as(registrar, request(server).post(`/api/disclosure/${f.packId}/serve`)).send({
+    const res = await as(judge, request(server).post(`/api/disclosure/${f.packId}/serve`)).send({
       recipientUserIds: [stranger],
     });
     expect(res.status).toBe(400);
@@ -551,7 +684,7 @@ describe('scoping is per pack, per recipient and per moment', () => {
     const a = await uploadExhibit(caseDoc._id, 'CCTV clip');
     await as(io, request(server).post(`/api/disclosure/${caseDoc._id}/prepare`)).send({});
     await as(io, request(server).post(`/api/cases/${caseDoc._id}/file-chargesheet`)).send({});
-    await as(registrar, request(server).post(`/api/disclosure/${caseDoc._id}/sync-representation`)).send({});
+    await as(judge, request(server).post(`/api/disclosure/${caseDoc._id}/sync-representation`)).send({});
 
     // On record — but nothing has been served yet.
     const pack = await as(onRecord, request(server).get(`/api/disclosure/my-pack/${caseDoc._id}`));
@@ -751,7 +884,7 @@ describe('a certificate is scoped to the same served set as its exhibit', () => 
     });
     await as(io, request(server).post(`/api/cases/${caseDoc._id}/file-chargesheet`)).send({});
     await as(
-      registrar,
+      judge,
       request(server).post(`/api/disclosure/${caseDoc._id}/sync-representation`)
     ).send({});
 
@@ -773,7 +906,7 @@ describe('a certificate is scoped to the same served set as its exhibit', () => 
 
 /**
  * REGRESSION — `approve` and `serve` both take a packId and there was no endpoint
- * that returned one. The registrar had to be told the id out of band, which made a
+ * that returned one. The court had to be told the id out of band, which made a
  * statutory step depend on copying a hex string by hand.
  *
  * The guard is APPROVE on the CASE, not READ, and that distinction is the test: a
@@ -781,29 +914,21 @@ describe('a certificate is scoped to the same served set as its exhibit', () => 
  * the advocate the exclusions are directed against.
  */
 describe('GET /api/disclosure/case/:caseId/packs', () => {
-  /** Case → exhibits → IO prepares → chargesheet filed, which is what lists it. */
+  /** Case → exhibits → chargesheet filed (which lists it) → the court composes. */
   async function preparedCase() {
-    const caseDoc = await createCase();
-    await uploadExhibit(caseDoc._id, 'CCTV clip');
-    await uploadExhibit(caseDoc._id, 'Mobile video');
+    const { caseDoc } = await listedCase(['CCTV clip', 'Mobile video']);
     const prepared = await as(
-      io,
+      judge,
       request(server).post(`/api/disclosure/${caseDoc._id}/prepare`)
     ).send({ excludedItems: [] });
     expect(prepared.status, JSON.stringify(prepared.body)).toBe(201);
     return { caseDoc, packId: prepared.body.pack.packId };
   }
 
-  it('returns the pack the registrar has to act on, without being told its id', async () => {
+  it('returns the pack the court has to act on, without being told its id', async () => {
     const { caseDoc, packId } = await preparedCase();
-    const filed = await as(
-      io,
-      request(server).post(`/api/cases/${caseDoc._id}/file-chargesheet`)
-    ).send({});
-    expect(filed.status, JSON.stringify(filed.body)).toBe(200);
-
     const res = await as(
-      registrar,
+      judge,
       request(server).get(`/api/disclosure/case/${caseDoc._id}/packs`)
     );
     expect(res.status, JSON.stringify(res.body)).toBe(200);
@@ -815,21 +940,24 @@ describe('GET /api/disclosure/case/:caseId/packs', () => {
 
   it('shows the court NOTHING until the case is actually listed before it', async () => {
     // Court scope comes from `Case.courtId`, which is set by filing the chargesheet.
-    // A pack prepared during investigation is an investigative document and the
-    // registry has no business in it yet — the same rule that governs the case.
-    const { caseDoc } = await preparedCase();
+    // Before that the case is before no court, so there is no court entitled to ask
+    // — and none entitled to compose a pack in the first place, which is why there
+    // is nothing here to show.
+    const caseDoc = await createCase();
+    await uploadExhibit(caseDoc._id, 'CCTV clip');
+
     const res = await as(
-      registrar,
+      judge,
       request(server).get(`/api/disclosure/case/${caseDoc._id}/packs`)
     );
     expect(res.status).toBe(403);
-    expect(res.body.error.code).toBe(DENY_REASON.OUT_OF_COURT_SCOPE);
+    expect(res.body.error.code).toBe(DENY_REASON.CASE_NOT_LISTED_IN_YOUR_COURT);
   });
 
   it('reports how many exclusions still await a ruling', async () => {
     const f = await fixture({ approveAllExclusions: false, exclude: 1 });
     const res = await as(
-      registrar,
+      judge,
       request(server).get(`/api/disclosure/case/${f.caseId}/packs`)
     );
     expect(res.status).toBe(200);
@@ -840,7 +968,7 @@ describe('GET /api/disclosure/case/:caseId/packs', () => {
   it('never returns a watermark token: that names one advocate’s copy', async () => {
     const f = await fixture();
     const res = await as(
-      registrar,
+      judge,
       request(server).get(`/api/disclosure/case/${f.caseId}/packs`)
     );
     expect(res.status).toBe(200);
@@ -857,7 +985,7 @@ describe('GET /api/disclosure/case/:caseId/packs', () => {
   it('filters by status', async () => {
     const f = await fixture();
     const served = await as(
-      registrar,
+      judge,
       request(server).get(
         `/api/disclosure/case/${f.caseId}/packs?status=${DISCLOSURE_STATUS.SERVED}`
       )
@@ -866,7 +994,7 @@ describe('GET /api/disclosure/case/:caseId/packs', () => {
     expect(served.body.total).toBe(1);
 
     const drafts = await as(
-      registrar,
+      judge,
       request(server).get(
         `/api/disclosure/case/${f.caseId}/packs?status=${DISCLOSURE_STATUS.DRAFT}`
       )
@@ -878,7 +1006,7 @@ describe('GET /api/disclosure/case/:caseId/packs', () => {
   it('rejects a status that is not a disclosure status', async () => {
     const f = await fixture();
     const res = await as(
-      registrar,
+      judge,
       request(server).get(`/api/disclosure/case/${f.caseId}/packs?status=ANYTHING`)
     );
     expect(res.status).toBe(400);
@@ -953,7 +1081,7 @@ describe('evidence LIST endpoints are scoped to the served set, not the case', (
     });
     await as(io, request(server).post(`/api/cases/${caseDoc._id}/file-chargesheet`)).send({});
     await as(
-      registrar,
+      judge,
       request(server).post(`/api/disclosure/${caseDoc._id}/sync-representation`)
     ).send({});
 
@@ -980,5 +1108,59 @@ describe('evidence LIST endpoints are scoped to the served set, not the case', (
     const codes = res.body.evidence.map((e) => e.exhibitCode);
     for (const e of f.excluded) expect(codes).not.toContain(e.exhibitCode);
     expect(codes.length).toBe(f.disclosed.length);
+  });
+});
+
+// ============================================= the court's ruling surface =====
+
+describe('the court rules on named exhibits, not database ids', () => {
+  it('lists each withholding with its exhibit code, title and ground', async () => {
+    const { caseDoc, exhibits } = await listedCase(['CCTV clip', 'Witness statement']);
+    const [kept, withheld] = exhibits;
+    await as(judge, request(server).post(`/api/disclosure/${caseDoc._id}/prepare`)).send({
+      excludedItems: [
+        {
+          itemId: withheld._id,
+          reason: 'Identifies a protected witness; withheld pending a redaction order.',
+        },
+      ],
+    });
+
+    const res = await as(judge, request(server).get(`/api/disclosure/case/${caseDoc._id}/packs`));
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    const [x] = res.body.packs[0].exclusions;
+    expect(x.exhibitCode).toBe(withheld.exhibitCode);
+    expect(x.title).toBe('Witness statement');
+    expect(x.reason).toMatch(/protected witness/);
+    expect(x.approved).toBe(false);
+    expect(res.body.packs[0].exclusions.map((e) => e.itemId)).not.toContain(String(kept._id));
+  });
+});
+
+describe('GET /api/disclosure/trace/:token — whose copy leaked', () => {
+  it('names the recipient a watermark token was served on, to the court', async () => {
+    const { served } = await fixture();
+    const token = served.body.servedNow[0].watermarkToken;
+
+    const res = await as(judge, request(server).get(`/api/disclosure/trace/${token}`));
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.recipient.authorityId).toBe(ADVOCATE_ON_RECORD);
+    expect(res.body.watermarkLabel).toContain(ADVOCATE_ON_RECORD);
+  });
+
+  it('refuses the advocate — tracing a leak is the court’s question, not a party’s', async () => {
+    const { served } = await fixture();
+    const token = served.body.servedNow[0].watermarkToken;
+    const res = await as(onRecord, request(server).get(`/api/disclosure/trace/${token}`));
+    expect(res.status).toBe(403);
+  });
+
+  it('answers an unknown and a malformed token identically', async () => {
+    const unknown = await as(judge, request(server).get(`/api/disclosure/trace/${'A'.repeat(43)}`));
+    const malformed = await as(judge, request(server).get('/api/disclosure/trace/short'));
+    for (const res of [unknown, malformed]) {
+      expect(res.status).toBe(404);
+      expect(res.body.error.code).toBe('WATERMARK_NOT_FOUND');
+    }
   });
 });

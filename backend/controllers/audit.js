@@ -27,8 +27,8 @@ const parse = (schema, data) => {
   return r.data;
 };
 
-/** Who may read an audit feed at all (spec §7: SHO, SP, REGISTRAR). */
-const AUDIT_READERS = new Set([ROLE.SHO, ROLE.DISTRICT_SP, ROLE.REGISTRAR, ROLE.JUDGE]);
+/** Who may read an audit feed at all: station and district supervision, and the court. */
+const AUDIT_READERS = new Set([ROLE.SHO, ROLE.DISTRICT_SP, ROLE.JUDGE]);
 
 /**
  * GET /api/audit?caseId=&decision=DENY&limit=
@@ -99,7 +99,7 @@ export async function securityFeed(req, res, next) {
   try {
     if (
       !(req.user.authority === AUTHORITY.POLICE && (req.user.role === ROLE.SHO || req.user.role === ROLE.DISTRICT_SP)) &&
-      req.user.role !== ROLE.REGISTRAR
+      req.user.role !== ROLE.JUDGE
     ) {
       throw Forbidden('AUDIT_NOT_PERMITTED', 'This role cannot read the security feed');
     }

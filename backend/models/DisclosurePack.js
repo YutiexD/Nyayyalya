@@ -18,6 +18,14 @@ const ExcludedItemSchema = new Schema(
     requestedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
     approvedByRegistrarId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
     approvedAt: { type: Date, default: null },
+    /**
+     * The other ruling. A court that disagrees with a withholding request must be
+     * able to say so — otherwise the only way to serve a pack is to agree with every
+     * exclusion in it. A refused exclusion puts the exhibit back into the served set.
+     */
+    refusedByUserId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
+    refusedAt: { type: Date, default: null },
+    refusalNote: { type: String, default: null, maxlength: 1000 },
   },
   { _id: false }
 );

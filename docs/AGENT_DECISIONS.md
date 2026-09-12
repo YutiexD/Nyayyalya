@@ -489,3 +489,150 @@ The state is deliberately *not* folded into `ANCHOR_MISMATCH`: the roots genuine
 **Security impact.** Removes a false integrity claim from the public verifier. No access control changes.
 
 **Testing impact.** Four tests in `integration/evidence.test.js`, covering DRY_RUN, a confirmed batch, and a divergence in each mode — because `ANCHOR_LOCAL_ONLY` must not become a catch-all that masks a real mismatch.
+
+---
+
+## ADR-030 — Advocates come on record by filing a vakalatnama through Lexx; the registrar's acceptance is written to the court register first
+
+**Decision.** A new `VakalatnamaFiling` resource (`/api/vakalatnama`). An advocate files a signed vakalatnama PDF against a CNR — hashed and ECDSA-signed in the browser exactly as evidence is, re-hashed and signature-checked on the server, sealed in the vault. Filing grants nothing. The REGISTRAR of the court the case is listed before accepts or refuses it (a refusal requires a reason the advocate can read). On acceptance Lexx **first** relays the registry act to the court register (`POST /directory/vakalatnama`, carrying the registrar's own staff code, which the directory verifies against its registry staff and the case's court), and **only then** mirrors it as a `CaseAccessGrant` with basis `VAKALATNAMA`. Every step is a ledger event (`VAKALATNAMA_FILED` / `_ACCEPTED` / `_REJECTED`). The court directory seed no longer carries any pre-accepted vakalatnama for the demo case, and empties the demo case's register on every seed.
+
+**Reason.** Being on record previously depended on a row seeded straight into the court directory — an advocate on record by fiat, with no act anyone could show. The requirement is that a lawyer is assigned by the court only after they send a vakalatnama through the app. Writing to the court register before granting keeps the court directory the source of truth for who represents whom, so `sync-representation` keeps working unchanged: it reads the same register this writes to, and a vakalatnama later withdrawn at the court still revokes access here.
+
+**Policy.** Filing is `authorizeCreate(VAKALATNAMA)`, answered in the resolver without a case WRITE (the filer is by definition not on record) — it needs an advocate's capability and a case actually listed before a court. Reading a filing: the court the case is listed in, or the filing advocate (above the grant check in the LEGAL branch). Police and FSL are refused the resource outright. Ruling: `APPROVE` on the filing (court scope) **and** the `CASE_ACCESS_GRANT` capability (REGISTRAR only), exactly as `sync-representation` is gated; `requireHealthyAudit` on acceptance.
+
+**Alternatives.** Grant inside Lexx without touching the court register — rejected: the next `sync-representation` would revoke it, and Lexx would be deciding representation. Keep the seeded register row — rejected: it is the thing the requirement removes.
+
+**Supersedes** ADR-028's "nothing in Lexx calls it": the simulator endpoint now has exactly one caller, the registrar's acceptance. Its gate and its `simulated` label are unchanged; in a real deployment this relay is the eCourts e-filing interface.
+
+**Testing impact.** New suite `integration/vakalatnama.test.js` (18 tests). `disclosure.test.js` now puts its fixture appearance on the court register directly in `beforeAll`, since the seed no longer does.
+
+## ADR-031 — `ATTEST` is its own action: signing a certificate is not amending the case
+
+**Decision.** `ACTION.ATTEST` for `sign-part-a` and `sign-part-b`. The controller still requires the signer to be the person the certificate names in that part.
+
+**Reason.** Signing was authorised as `WRITE`, and the stage lock refuses every police `WRITE` once the chargesheet is filed — so the investigating officer could not sign their own s.63 certificate at exactly the moment it is needed. Found when the seed's Part A signature came back 403. This is the same reasoning as `CREATE_IMPLIES_ACTION` for generation: a signature attests to a record already collected and alters nothing in it.
+
+**Testing impact.** Regression test in `certificate.test.js` (sign after chargesheet).
+
+## ADR-032 — An anchor batch id commits to its Merkle root, not just its sequence range
+
+**Decision.** `computeBatchId(fromSeq, toSeq, merkleRoot)`.
+
+**Reason.** The id was a hash of the range alone. `npm run reset` starts the ledger at sequence 1 again, so the first batch of every rehearsal asked the contract for an id it already held under a different root; the contract refuses, the batcher records `ON_CHAIN_ROOT_MISMATCH`, and the new ledger could never be anchored. Committing the root keeps the id stable for a retry of the same batch and makes two ledgers unable to collide. Surfaced when live anchoring was switched on.
+
+## ADR-033 — Switching submission on promotes DRY_RUN batches to the chain, oldest first
+
+**Decision.** When `anchorCanSubmit`, every anchor cycle first submits up to five `DRY_RUN` batches, in sequence order, before batching anything new. On failure the batch returns to `DRY_RUN` (reason kept) so the next cycle retries it — its entries are already stamped, so leaving it `FAILED` would strand them — except for a root mismatch, which stays `FAILED` for an operator. Promotion works on the plain stored row: hydrating an existing `AnchorBatch` fails under `strict: 'throw'` because its immutable fields carry defaults.
+
+**Reason.** Without it, switching on would anchor only what came after the switch and leave the dry-run period provable to nobody but us. Verified live on Monad Testnet: four dry-run batches confirmed in blocks 61687401–61687421, and `verifyEntry` on the contract confirmed a ledger entry's proof.
+
+## ADR-034 — Everything a verifier needs is shown where it belongs, and every such check has a public route
+
+**Decision.** (a) The certificate panel (officer, court, counsel, lab) shows the verification link, its QR, copy buttons and the PDF. (b) Custody labels print with a QR that encodes `/scan?label=<payload>` and the particulars a person checks against the bag; `/scan` resolves it after sign-in. (c) New public `GET /api/anchors/entry/:seq/:entryHash` checks an officer's upload receipt against the register and the anchored root, answering a wrong hash exactly like a missing entry; `GET /api/anchors/recent` lists batches with explorer links. (d) Court-only `GET /api/disclosure/trace/:token` names whose served copy a watermark token belongs to. (e) The court rules on exclusions by exhibit code and serves advocates by name.
+
+**Reason.** Several verification inputs existed only in the database: the certificate token (no screen showed it), the label payload (shown once at booking), exhibit ids (the approve form wanted 24-character ids), and the receipt had nowhere to be checked without an account.
+
+**Also fixed.** The QR on every certificate PDF pointed at `/verify.html`, a page of the old multi-page client that no longer exists; it now points at `/verify`.
+
+## ADR-035 — Filing a chargesheet registers the case with the court the router picks
+
+**Decision.** `POST /api/cases/:id/file-chargesheet` uses the court register's listing when one exists; otherwise it runs the jurisdiction router over the district's courts (new `GET /directory/courts?districtCode=`), and registers the chargesheet with the chosen court through a second simulated registry act, `POST /directory/listing`, which allots the CNR. Same three labels as the vakalatnama simulator: gated by `allowSimulatedFilings`, `simulated: true` on every response, one caller in Lexx. Idempotent on the FIR. A required designation no court holds is refused with `NO_COURT_FOR_JURISDICTION`, never routed to an ordinary court. The court seed gains a Magistrate bench (judge `UP-JUD-1180`, registrar `UP-GZB-REG-02`, CJM-01), the Sessions court's evidence custodian (`UP-GZB-EVC-01`), and the `SC_ST` designation on Sessions Court No. 2. Each seed removes listings a rehearsal created, and their vakalatnamas.
+
+**Reason.** Only the one seeded FIR had a listing, so a chargesheet on any other case failed `NO_COURT_LISTING` — the workflow could be demonstrated end to end on exactly one case. Separately, `compute-jurisdiction` asked `/directory/court/<district code>`, which is not a court, so it matched nothing and told every case "no court in this district holds the required designation" while the officer's screen showed "Reason: —".
+
+## ADR-036 — Custody writes survive the chargesheet; booking does not
+
+**Decision.** The resolver's stage lock no longer applies to `WRITE` on an existing `CUSTODY_ITEM` (the two-scan handover). Booking a new item is still a create against the case and still refused after filing. A laboratory holding a `REPORTED` referral may still act on the case's custody items, so it can return the article. A frozen item is released only by the SHO (`POST /api/custody/items/:id/lift-freeze`, new `CUSTODY_RELEASE` capability, READ-implied), with a recorded decision and an optional new seal number; the integrity exception stays in the chain.
+
+**Reason.** Every article the police held at filing was stranded — it could not be produced in court or returned — and the examiner who received an article could not hand it back once they had reported. A broken seal froze an item "until an SHO records a decision", and no route could record one.
+
+## ADR-037 — The court rules both ways on an exclusion; disclosure is preparable after filing
+
+**Decision.** `approve` takes `refusedExclusions` (with an optional `refusalNote`): a refused exclusion is recorded as a ruling and its exhibit is put into the served set. Service is blocked only by unruled requests. Masking is one-way at approval as well as at preparation. `prepare` is READ-implied (`CREATE_IMPLIES_ACTION`), like certificate generation, so the investigating officer can prepare the pack after the chargesheet; the case record reports the pack's status. Filing the chargesheet writes the BNSS s.230 deadline (`clocks.disclosureDueOn`, fourteen days), and service copies it to the pack.
+
+**Reason.** The court could only agree with a withholding request — disagreeing left the pack unservable for ever. Filing before preparing made disclosure impossible for that case. The s.230 clock was read in four places and written in none, so counsel's countdown could never show. The approve form always sent `maskVictimIdentity: false`, which unmasked a victim masked at preparation.
+
+## ADR-038 — Machine triage is never disclosed to a party, on any read path
+
+**Decision.** One resolver helper, `seesTriage(user)`, false for the LEGAL authority. `GET /api/evidence/:id` and `GET /api/evidence` drop `triage` for counsel; the triage queue is empty for them; search omits it. Search now scopes exhibits with the EVIDENCE filter, not the CASE filter.
+
+**Reason.** The disclosure view omitted triage but the ordinary evidence reads handed it to counsel for every served exhibit, and search found exhibits withheld from counsel (and unreferred ones for an examiner) because it searched every exhibit of every visible case.
+
+## ADR-039 — A certificate copy can be checked by its holder, and an unanswered anchor is not a failed one
+
+**Decision.** (a) The certificate PDF carries its verification token in its metadata (`Keywords: lexx-verify:<token>`). The public verifier accepts a dropped PDF, hashes it in the browser, reads the token from it, and asks `GET /public/verify/:token?copy=<sha256>`: `CURRENT`, `EARLIER_VERSION` (a render superseded by a later signature — digests of earlier renders are kept in `pdfHistory`) or `NO_MATCH`. The document never leaves the browser. (b) Once an anchor transaction has been sent, an error while waiting is settled from the receipt; a batch without an answer stays `SUBMITTED` and nothing new is batched over it; one wrongly recorded `FAILED` with a transaction hash is reconciled on the next cycle; a transaction with no receipt after 30 minutes is treated as dropped and its range retried.
+
+**Reason.** (a) Party A hands Party B a certificate; Party B could check the token but not the file in their hand. (b) Live: batch 27–28 was mined with `status = 1` (block 61704167) but an RPC error during `tx.wait` ("could not coalesce error") recorded it `FAILED`, leaving its entries unstamped and its range blocked.
+
+## ADR-040 — The malkhana custodian and the registrar are removed; the station keeps its store and the presiding judge holds the court's authority
+
+**Decision.** `MALKHANA_CUSTODIAN` and `REGISTRAR` are gone from `ROLE`, from `ROLES_BY_AUTHORITY`, from the police and court directories, and from the resolver. What each one was actually load-bearing for survives:
+
+- **The store-keeper rule.** `IO_CANNOT_HOLD_OWN_CASE_EVIDENCE` is unchanged and is now enforced against whoever would end up holding the article, at initiation and again at acceptance. The station store is still a place (`CUSTODY_LOCATION.MALKHANA`, rendered "Station store"), every movement is still a two-scan ledgered handshake, and the custody register is now STATION-scoped for every police role rather than case-scoped — an article in the store is kept by the station.
+- **The registry's acts.** Ruling on a vakalatnama, composing and serving disclosure, issuing a s.63 certificate and putting an advocate on record are the presiding judge's. `COURT_WRITABLE` names the records a court may `WRITE` — disclosure packs, certificates, vakalatnamas, custody items, access grants — so the judge still cannot perform an investigative write against a case or an exhibit. The court's `EVIDENCE_CUSTODIAN` remains, for the one job only it does: receiving and keeping the physical articles produced in court.
+
+`CASE_ACCESS_GRANT` and `DISCLOSURE_PACK` creation now imply `APPROVE` rather than `WRITE`, because both are the court ruling on a case it is seized of — and `WRITE` would have refused them exactly when they occur, after the chargesheet.
+
+**Reason.** Neither role made a decision. The custodian was an account every physical handover had to queue behind; on a real station nobody logs in as one, and in a demo nobody ever did. The registrar was a second court login standing between a judge's decision and its effect, and it was where every rehearsal stalled: an advocate filed a vakalatnama, the judge could see it and could not act on it, and the defence saw nothing.
+
+**Affected.** `models/enums.js`, `services/accessResolver.js`, `services/directoryClient.js`, `controllers/{custody,audit,certificate,disclosure,vakalatnama}.js`, `routes/{disclosure,cases}.js`, both directory simulators and their seeds, `seed/seed-all.js`, the whole client, `authz/matrix.test.js` and five integration suites.
+
+**Alternatives.** (a) Keep the roles and hide them in the UI — the workflow would still have waited on accounts nobody holds. (b) Let any court user do everything — that would have given the evidence room the power to rule on disclosure, which is a real separation worth keeping.
+
+**Security impact.** Net tightening in two places and a deliberate widening in none. The police now have *no* route to a disclosure pack at all (previously the IO authored it and, through a `WRITE` gate, the SHO could serve it — see the now-fixed "known inconsistency 5"). The court cannot write a case or an exhibit. The directory simulator that records an appearance now verifies the judge against the roster order placing them in that court today, which is a stronger check than the registrar's staff code it replaced.
+
+**Testing impact.** `authz/matrix.test.js` gains the station-store rule, the court evidence room's boundary, the judge's registry powers and the close-case matrix; `POLICE — Malkhana custodian` and `COURT — Registrar` are replaced rather than deleted, so the rules they protected still have tests. Five integration suites were re-pointed at the judge.
+
+## ADR-041 — Every exhibit is given a review priority at ingest, from weighted and separated signals
+
+**Decision.** `TRIAGE_PRIORITY` gains `CRITICAL`, making four bands. `triageEvidence()` is a weighted model rather than an indicator count, and it reads the case as well as the file: ingest integrity, metadata manipulation indicators, media type, source type, sensitivity class and maximum punishment. Every weight is attached to a sentence, and the result carries `reasons[]` (label, weight, kind) alongside the existing `indicators[]`.
+
+Two separations do the work:
+
+1. **Findings vs context.** A *finding* is something observed about this file. *Context* is what the file is and how grave the case is. Findings set the band; context can promote it by exactly one place, only when there was a finding to begin with, and never into `CRITICAL`. `indicators[]` contains findings only, so an exhibit with clean metadata has none.
+2. **Weights vs counts.** "The bytes received did not hash to the officer's digest" and "no C2PA content credentials" were worth the same under a count, and the second is true of almost every file a station will ever handle — so noise outvoted the one signal that means something. A single ingest-integrity failure now reaches `CRITICAL` alone; three weak provenance gaps still reach `MEDIUM`.
+
+It runs in `uploadEvidence` from server-resolved facts only. There is no field for a priority on any request and no endpoint that sets one.
+
+**Reason.** Three bands could not distinguish "look at this first" from "look at this before anything else", which is a real instruction to a laboratory with a queue. And banding on the count made every exhibit on a serious case arrive pre-elevated, so `LOW` stopped existing and the queue stopped being ordered.
+
+**Affected.** `services/triage.js`, `models/{enums,Evidence}.js`, `controllers/{evidence,cases,fsl}.js`, the priority components in the client, `seed/seed-all.js` (whose fixtures were a few hundred bytes each and tripped "unusually small for a camera original" on all of them).
+
+**Security impact.** None directly; the compliance boundary is unchanged and still asserted — no score, no percentage, no authenticity vocabulary, never on the ledger or the chain. The `reasons[]` weights are the model's working, are never rendered as a confidence, and are not disclosed to a party (ADR-038 covers the whole `triage` subdocument).
+
+**Testing impact.** Six assertions in `unit/services.test.js`: CRITICAL on an integrity failure alone; no CRITICAL from provenance gaps alone; gravity does not lift a file nothing was observed about; gravity lifts exactly one band when something was; nothing is promoted into CRITICAL on context; every media type gets a band.
+
+## ADR-042 — A laboratory sees the evidence in the state it serves, and can record a verdict in one step
+
+**Decision.** Two additions, and the referral pipeline is untouched.
+
+- `GET /api/fsl/queue` — the examiner's review queue, ordered by the priority computed at ingest, with counts by band. Authorised as an EVIDENCE collection.
+- `POST /api/evidence/:id/forensic-verdict` — a signed opinion recorded directly on an exhibit, with an OPTIONAL report document. `forensic.basis` records `REFERRAL` or `DIRECT_REVIEW`.
+
+The resolver's FSL branch gains a second route in: an exhibit referred to this lab (as before), **or** an exhibit whose case is in the state the lab serves (`scope.stateCode`, read from the FSL directory at sign-in). The widening covers EVIDENCE and CASE reads and the certificate; it deliberately does **not** cover CUSTODY_ITEM, which stays referral-bound — a laboratory examines exhibits, it does not handle articles nobody sent it. A session with no state falls back to referrals alone.
+
+The signature covers a canonical statement (`LEXX-FSL-VERDICT|v1|<exhibitCode>|<opinion>|<summary>|<documentSha256 or '-'>`) that the server rebuilds from the fields it received, so the opinion cannot be swapped after signing.
+
+**Reason.** An exhibit reached a laboratory only when a police supervisor remembered to refer it, so the exhibits most likely to be manipulated sat in a station queue, unseen, and the review priority computed for them had no audience at all. Separately, requiring a PDF before an opinion could be recorded meant an examiner who had finished examining could not say so until they had also produced a document.
+
+**Affected.** `services/accessResolver.js` (FSL branch, `scopeFilterFor`, `materialiseScopeFilter`), `controllers/fsl.js`, `routes/fsl.js`, `models/Evidence.js` (`forensic.basis`), the client's lab screen.
+
+**Alternatives.** (a) Auto-create a referral on upload — invents a formal act nobody performed, and fails when the lab directory is unreachable. (b) Let an examiner see everything — unbounded; the lab's own state code is the narrowest boundary the directory already vouches for.
+
+**Security impact.** A widening, and it is bounded by a directory fact the session cannot assert. The failure direction is correct: no state means the queue falls back to referrals, and no lab scope at all means an empty queue rather than the register. `authz/matrix.test.js` asserts the state boundary, the custody exclusion, and that an examiner holds neither `ORDER` nor `APPROVE`.
+
+**Testing impact.** Nine assertions in `integration/fsl.test.js` covering queue ordering, the band counts, scope, the signed verdict, a forged signature, a swapped opinion, non-laboratory callers, triage separation, and closing an open referral.
+
+## ADR-043 — Disclosure is the court's, and `share` is one act; the court closes the case
+
+**Decision.** `DISCLOSURE_PACK` creation moves from `POLICE && IO` to `COURT && JUDGE`, and `POST /api/disclosure/:caseId/share` composes the set, rules on every withholding and serves it in a single request — writing all three ledger entries (`DISCLOSURE_PREPARED`, `DISCLOSURE_APPROVED`, `DISCLOSURE_SERVED`), because those remain three facts with three timestamps even when one person did them in one click. Serving is extracted into `serveToRecipients()` so `share` and `serve` mint watermarks identically. `prepare`, `approve` and `serve` remain for a court that wants the steps apart.
+
+`POST /api/cases/:id/close` (ORDER, `requireHealthyAudit`) sets `stage = CLOSED`, records `closedOn` / `closedByUserId` and appends `CASE_CLOSED` with the reason. The resolver then refuses every non-read action on the case to every authority, including the court — except custodial writes, because a sealed article still has to be returned after a case ends. Nothing is deleted, and the response says so.
+
+**Reason.** The officer proposing a set and asking to withhold parts of it put a party to the case in charge of what the opposing party sees, and made the accused's BNSS s.230 entitlement wait on a form the investigation had to remember. Across three acts and two authorities, the chain broke at whichever step somebody forgot. Separately, a case could reach `DISPOSED` only through a stage value nothing set, so there was no way to end one.
+
+**Affected.** `services/accessResolver.js`, `controllers/{disclosure,cases}.js`, `routes/{disclosure,cases}.js`, `models/Case.js`, `models/enums.js` (`CASE_STAGE.CLOSED`, `CASE_LIFECYCLE`, `CLOSED_CASE_STAGES`, `LEDGER_EVENT.CASE_CLOSED`, `DENY_REASON.CASE_IS_CLOSED`), the court screen, `seed/seed-all.js`.
+
+**Security impact.** Tightening. No police role can reach a disclosure pack at all, which also closes known inconsistency 5 (the SHO could serve one through an ungated `WRITE`). A closed case is immutable to everyone.
+
+**Testing impact.** Five assertions on `share` in `integration/disclosure.test.js` (serves with no input; withholds with the ground on the record; writes all three events; refuses the police and an advocate; refuses re-deciding a served file) and four on closing in `authz/matrix.test.js`.

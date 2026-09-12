@@ -90,11 +90,11 @@ this in production, and says so on the form).
 |---|---|---|
 | `UP-GZB-4471` | Investigating Officer | Beats 2, 3, 5, 7 |
 | `UP-GZB-4402` | SHO | Beats 6, 11 |
-| `UP-GZB-4455` | Malkhana custodian | Beat 5 |
+| `UP-GZB-4455` | Officer who keeps the station store | Beat 5 |
 | `UP-GZB-9001` | District SP | (spare — supervisory scope) |
 | `FSL-LKO-0091` | FSL examiner | Beat 8 |
-| `UP-JUD-2291` | Judge | (spare — court scope) |
-| `UP-GZB-REG-01` | Registrar | Beat 9 |
+| `UP-JUD-2291` | Presiding judge | Beat 9 |
+| `UP-GZB-EVC-01` | Court evidence room | (spare — receives articles in court) |
 | `UP/1234/2015` | Defence counsel — **on record** | Beat 9 |
 | `UP/9876/2019` | Defence counsel — **not on record** | Beat 9 (the refusal) |
 | `UP-GZB-9999` | **Does not exist** | Beat 1 |
@@ -127,7 +127,7 @@ what it is, move on.
 **Shows.** A refusal, with a machine code and a plain sentence.
 
 > *"Lexx holds no identities of its own. Officers live in the police directory, judges and
-> registrars in the court directory, advocates in the Bar Council roll. There is no
+> court staff in the court directory, advocates in the Bar Council roll. There is no
 > sign-up. If the directory has no record of you, there is nothing here to create — and
 > the attempt is already in the audit log."*
 
@@ -194,7 +194,7 @@ Then two digests side by side: **client** and **server**.
 **Shows.** Every movement is a two-scan handshake. The gap report names the missing step
 and the ledger sequence where the chain jumps.
 
-> *"The second item went from seized straight to the laboratory. The malkhana deposit never
+> *"The second item went from seized straight to the laboratory. The deposit into the station store never
 > happened. Nobody filed a complaint about that — the system found it, because the ledger
 > knows what a lawful sequence looks like."*
 
@@ -295,7 +295,7 @@ any sign-in at all**, and discloses validity, never contents.
 **Do.** On the verifier page, the **Anchoring record** panel.
 
 **Shows.** The batch, the Merkle root, the ledger range, network `monad-testnet`, chain
-`10143` — and an amber **DRY RUN** banner.
+`10143`, and — with `ANCHOR_ENABLED=true` — a confirmed transaction you can open on the explorer (**Anchoring history** lists every batch). In a deployment without a funded key it shows an amber **DRY RUN** banner instead; say which one the audience is looking at.
 
 > *"Every few minutes the new ledger entries are batched into a Merkle tree and the root is
 > anchored. Only the root. No evidence, no filenames, no personal data, no case
@@ -331,7 +331,7 @@ question you will be asked.
 **"Is this production ready?"**
 No, and `docs/PRODUCTION_READINESS.md` says exactly what is missing: the master key belongs
 in an HSM, the directories are simulated, there is no HA story. What is solid is the
-security model, and there are 455 tests behind it.
+security model, and there are 489 tests behind it.
 
 **"Why not put the evidence on the blockchain?"**
 Because that would put case data on a public, permanent, unredactable ledger. We publish a

@@ -1,63 +1,52 @@
 /**
- * Advocate: the disclosure set served on you, and nothing else.
+ * The advocate's workspace.
  *
- * Two boundaries are visible on this page and both are deliberate.
+ * ## The question this screen answers
  *
- *   Being on record is a fact of the COURT record, not of Lexx. A vakalatnama accepted
- *   by the registrar, or a legal aid order, puts an advocate on record; Lexx mirrors
- *   that and can neither create nor extend it. `GET /api/cases` therefore returns the
- *   cases the court directory says you are on, and an empty list is the access policy
- *   answering rather than an empty database.
+ * "What has the court given me, and what do I have to do about it?"
  *
- *   Being served is separate again. On record with nothing served is answered with
- *   NO_DISCLOSURE_PACK_SERVED, which is not a failure — it is the registrar not having
- *   served yet, and it is rendered as an explained empty state rather than an error.
+ * An advocate is the one user here who is not an operator of this system. They do not
+ * manage evidence, order queues or audit anything — they read a case and the material
+ * served on them, and they acknowledge receipt. So this is the shortest screen in the
+ * product, and everything technical about how the register works has been taken off it.
  *
- * Exhibits withheld from the pack are reported as a COUNT and a GROUND, never as items.
- * There is deliberately no affordance anywhere on this page for browsing the case file:
- * material outside the served set is refused with EXHIBIT_NOT_IN_DISCLOSURE_SET and the
- * attempt is logged, and a UI that invited the attempt would be misrepresenting what
- * counsel is entitled to.
+ * ## The two boundaries, both deliberate, both visible
+ *
+ * **Being on record** is a fact of the COURT record, not of Lexx. A vakalatnama the
+ * court accepts, or a legal aid order, puts an advocate on record; Lexx mirrors that
+ * and can neither create nor extend it. An empty case list is the access policy
+ * answering, not an empty database.
+ *
+ * **Being served** is separate again. On record with nothing served is answered with
+ * NO_DISCLOSURE_PACK_SERVED — which is not a failure, it is the court not having
+ * shared the file yet, and it is rendered as an explained empty state rather than an
+ * error.
+ *
+ * Material withheld from the file is reported as a COUNT and a GROUND, never as items.
+ * There is deliberately no affordance anywhere on this page for browsing the case
+ * file: anything outside the served set is refused and the attempt is logged, and a
+ * UI that invited the attempt would be misrepresenting what counsel is entitled to.
  */
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { toast } from 'sonner';
-import { CalendarClock, FileCheck2, FolderLock, FolderOpen, Scale } from 'lucide-react';
+import { Check, FolderLock, Scale } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
-import { Label } from '@/components/ui/label';
-import { Badge } from '@/components/ui/badge';
 import { Separator } from '@/components/ui/separator';
-import { Skeleton } from '@/components/ui/skeleton';
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from '@/components/ui/select';
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from '@/components/ui/table';
 
-import { Section, KeyValue, Hash, PageHeader, TableSkeleton, EmptyState } from '@/components/common/Primitives';
-import { Eyebrow, StatCard } from '@/components/common/Premium';
-import { ForensicOpinion, Denial, Note } from '@/components/common/Verdicts';
-import { useCases, useMyPack, useAcknowledgePack } from '@/hooks/queries';
-import { useReveal } from '@/hooks/useGsap';
-import { humanise, fmtDate, fmtBytes } from '@/lib/utils';
+import {
+  Counter, CounterRow, DetailSkeleton, Disclosure, Empty, Facts, Panel, Row, Rows,
+  RowsSkeleton, SplitView, Workspace,
+} from '@/components/common/Shell';
+import { StageBadge } from '@/components/common/Lifecycle';
+import { Denial, ForensicBadge, Note } from '@/components/common/Verdicts';
+import { ExhibitDialog, useExhibitDialog } from '@/features/evidence/ExhibitDialog';
+import { FileVakalatnama, MyFilings } from '@/features/vakalatnama/Vakalatnama';
+import { useAcknowledgePack, useCases, useMyPack } from '@/hooks/queries';
+import { explain } from '@/lib/api';
+import { fmtBytes, fmtDate } from '@/lib/utils';
 
 const DAY_MS = 86_400_000;
-
-/** A stable identity for "no cases yet", so effects do not re-run on every render. */
-const NO_CASES = Object.freeze([]);
-
-/** Column headings read as labels over the data, not as a first row of it. */
-const HEADINGS = '[&_th]:text-xs [&_th]:uppercase [&_th]:tracking-wider hover:bg-transparent';
 
 /** Whole days from now until `iso`, negative once it has passed. */
 function daysUntil(iso) {
@@ -69,412 +58,285 @@ function daysUntil(iso) {
 
 const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
-// ------------------------------------------------------------------ figures ----
-
 /**
- * The s.230 clock as one figure. It reads from the served pack and from nothing else,
- * so with no pack served it is a dash: a number of days on a clock that has not
- * started would be an invention.
+ * The BNSS s.230 clock, as one sentence.
+ *
+ * It reads from the served file and from nothing else, so with nothing served there
+ * is no clock — a countdown on a clock that has not started would be an invention.
  */
-function clockFigure(pack) {
-  if (!pack) return { value: '—', caption: 'Starts when a pack is served on you.' };
+function ClockLine({ pack }) {
+  if (!pack) return null;
   if (pack.acknowledgedAt) {
-    return {
-      value: '—',
-      tone: 'ok',
-      caption: `Stopped — receipt acknowledged ${fmtDate(pack.acknowledgedAt)}.`,
-    };
+    return (
+      <Note>
+        <span className="font-medium text-foreground">Receipt acknowledged</span>{' '}
+        {fmtDate(pack.acknowledgedAt)}. The fourteen-day clock under BNSS s.230 stopped then.
+      </Note>
+    );
   }
+
   const remaining = daysUntil(pack.dueOn);
   if (remaining === null) {
-    return { value: '—', tone: 'warn', caption: 'No due date is recorded on this pack.' };
+    return <Note tone="warn">No due date is recorded on this file.</Note>;
   }
   if (remaining < 0) {
-    return {
-      value: 0,
-      suffix: 'days',
-      tone: 'bad',
-      caption: `Ran out ${plural(Math.abs(remaining), 'day')} ago; receipt is still not acknowledged.`,
-    };
+    return (
+      <Note tone="warn">
+        The fourteen days under BNSS s.230 ran out {plural(Math.abs(remaining), 'day')} ago and
+        receipt is still not acknowledged.
+      </Note>
+    );
   }
-  return {
-    value: remaining,
-    suffix: remaining === 1 ? 'day' : 'days',
-    tone: 'warn',
-    caption: `Until ${fmtDate(pack.dueOn)}. Stops when you acknowledge receipt.`,
-  };
-}
-
-function CounselFigures({ cases, list, pack }) {
-  const served = pack.isSuccess ? pack.data : null;
-  const exhibits = served ? (served.exhibitCount ?? (served.exhibits ?? []).length) : null;
-  const withheld = served ? (served.withheld ?? []).length : null;
-  const clock = clockFigure(served);
-
   return (
-    <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-      <StatCard
-        className="will-reveal"
-        label="Cases on record"
-        value={cases.isSuccess ? list.length : '—'}
-        icon={Scale}
-        tone="accent"
-        caption="From the court directory. Lexx reads that record and cannot add to it."
-      />
-      <StatCard
-        className="will-reveal"
-        label="Exhibits served"
-        value={exhibits ?? '—'}
-        icon={FolderOpen}
-        caption="The only exhibits open to you in this case. Anything else is refused and logged."
-        delay={0.1}
-      />
-      <StatCard
-        className="will-reveal"
-        label="Withheld"
-        value={withheld ?? '—'}
-        icon={FolderLock}
-        tone={withheld > 0 ? 'warn' : undefined}
-        caption="Reported as a count and a ground, never as items."
-        delay={0.2}
-      />
-      <StatCard
-        className="will-reveal"
-        label="BNSS s.230 clock"
-        value={clock.value}
-        suffix={clock.suffix}
-        icon={CalendarClock}
-        tone={clock.tone}
-        caption={clock.caption}
-        delay={0.3}
-      />
-    </div>
+    <Note tone="warn">
+      <span className="font-medium text-foreground">{plural(remaining, 'day')}</span> left under
+      BNSS s.230, until {fmtDate(pack.dueOn)}. The clock stops when you acknowledge receipt.
+    </Note>
   );
 }
 
-// ----------------------------------------------------------------- the pack ----
+// ============================================================== the case file ====
 
-/**
- * The watermark, shown as prominently as it is printed.
- *
- * Every page rendered from this pack carries this advocate's identity and a
- * per-recipient token. Saying so on screen is part of the deterrent: a leaked copy
- * points back to the recipient it was served on, and an advocate who does not know
- * that has not been deterred by it.
- */
-function WatermarkPanel({ watermark, pack }) {
+function CaseFile({ caseId, caseDoc }) {
+  const pack = useMyPack(caseId);
+  const acknowledge = useAcknowledgePack();
+  const exhibitDialog = useExhibitDialog();
+
+  if (!caseId) {
+    return (
+      <Panel title="No case selected">
+        <Empty title="Choose a case" icon={Scale}>
+          Open one from the list to read what the court has shared with you.
+        </Empty>
+      </Panel>
+    );
+  }
+  if (pack.isPending) {
+    return (
+      <Panel title="Case file">
+        <DetailSkeleton />
+      </Panel>
+    );
+  }
+
+  // Nothing served is not an error. It is the court not having shared the file yet.
+  if (pack.isError) {
+    const notServed = pack.error?.code === 'NO_DISCLOSURE_PACK_SERVED';
+    return (
+      <Panel title={caseDoc ? `FIR ${caseDoc.firNumber}` : 'Case file'}>
+        {notServed ? (
+          <Empty title="The court has not shared the case file yet" icon={FolderLock}>
+            You are on record for this case, which is a separate thing from being served. When
+            the court shares the file you will see exactly what it contains, and the count and
+            the ground for anything withheld.
+          </Empty>
+        ) : (
+          <Denial error={pack.error} heading="Case file not readable" />
+        )}
+      </Panel>
+    );
+  }
+
+  const p = pack.data;
+  const exhibits = p?.exhibits ?? [];
+  const withheld = p?.withheld ?? [];
+
   return (
-    <div className="surface will-reveal border-warn/40 bg-warn-muted p-6">
-      <div className="flex items-start gap-4">
-        <span className="grid size-10 shrink-0 place-items-center rounded-lg bg-warn/15 text-warn">
-          <FolderLock className="size-5" />
-        </span>
-        <div className="min-w-0 space-y-1">
-          <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            Served copy — watermarked to you
-          </p>
-          <p className="text-base font-semibold">{watermark?.label ?? '—'}</p>
-          <p className="hash">token {watermark?.token ?? '—'}</p>
-          <p className="pt-1 text-xs leading-relaxed text-muted-foreground">
-            Redaction variant {pack?.redactionVariant ?? '—'}
-            {pack?.maskVictimIdentity ? ' · victim identity masked by order' : ''}. Every document
-            rendered from this pack carries this identity and this token.
-          </p>
-        </div>
-      </div>
-    </div>
-  );
-}
+    <div className="space-y-5">
+      <Panel
+        title={caseDoc ? `FIR ${caseDoc.firNumber}` : 'Case file'}
+        actions={
+          !p?.acknowledgedAt && (
+            <Button
+              size="sm"
+              disabled={acknowledge.isPending}
+              onClick={() =>
+                acknowledge.mutate(p.packId, {
+                  onSuccess: () => toast.success('Receipt acknowledged'),
+                  onError: (err) => toast.error(explain(err.code, err.message)),
+                })
+              }
+            >
+              <Check className="size-4" />
+              Acknowledge receipt
+            </Button>
+          )
+        }
+      >
+        <div className="space-y-4">
+          {caseDoc && (
+            <div className="space-y-1">
+              <h3 className="text-lg font-semibold leading-tight">{caseDoc.title}</h3>
+              <div className="flex flex-wrap items-center gap-2">
+                <StageBadge stage={caseDoc.stage} />
+                {caseDoc.cnrNumber && (
+                  <code className="font-mono text-[11px] text-muted-foreground">
+                    CNR {caseDoc.cnrNumber}
+                  </code>
+                )}
+              </div>
+            </div>
+          )}
 
-/** One served exhibit. The laboratory opinion is the only verdict shown here. */
-function ExhibitCard({ exhibit }) {
-  return (
-    <div className="surface surface-lift will-reveal space-y-3 p-6">
-      <div className="space-y-1.5">
-        <p className="font-medium">
-          <span className="font-mono">{exhibit.exhibitCode}</span>
-          {exhibit.title ? ` — ${exhibit.title}` : ''}
-        </p>
-        <div className="flex flex-wrap gap-1.5">
-          <Badge variant="secondary" className="rounded-full">
-            {humanise(exhibit.kind)}
-          </Badge>
-          <Badge variant="outline" className="rounded-full">
-            {exhibit.mimeType ?? '—'}
-          </Badge>
-          <Badge variant="outline" className="rounded-full">
-            {fmtBytes(exhibit.sizeBytes)}
-          </Badge>
-          <Badge variant="outline" className="rounded-full">
-            {humanise(exhibit.courtStatus)}
-          </Badge>
-        </div>
-      </div>
+          <ClockLine pack={p} />
 
-      {exhibit.description && (
-        <p className="text-sm leading-relaxed text-muted-foreground">{exhibit.description}</p>
+          <Facts
+            rows={[
+              ['Shared with you', fmtDate(p?.servedOn)],
+              ['Exhibits in the file', exhibits.length],
+              withheld.length > 0 && ['Withheld', plural(withheld.length, 'exhibit')],
+              p?.redactionVariant && ['Redaction variant', p.redactionVariant],
+              p?.maskVictimIdentity && ['Victim identity', 'Masked'],
+            ]}
+          />
+        </div>
+      </Panel>
+
+      <Panel
+        title="Evidence served on you"
+        description="Open one to read its record, the file itself, and the laboratory's opinion where there is one."
+      >
+        {exhibits.length === 0 ? (
+          <Empty title="The file contains no exhibits" icon={FolderLock}>
+            That is what was served. It is not a filtered view of something larger.
+          </Empty>
+        ) : (
+          <ul className="-mx-5 -my-5 divide-y">
+            {exhibits.map((e) => (
+              <Row
+                key={e.evidenceId}
+                title={e.title}
+                meta={
+                  <>
+                    <code className="font-mono">{e.exhibitCode}</code> · {e.mimeType} ·{' '}
+                    {fmtBytes(e.sizeBytes)}
+                  </>
+                }
+                badge={<ForensicBadge forensic={e.forensic} />}
+                onSelect={() => exhibitDialog.open(e.evidenceId)}
+              />
+            ))}
+          </ul>
+        )}
+      </Panel>
+
+      {withheld.length > 0 && (
+        <Panel title="Material withheld">
+          <p className="mb-3 text-[13px] leading-relaxed text-muted-foreground">
+            The court withheld {plural(withheld.length, 'exhibit')} from this file. You are told
+            that it exists and on what ground — not what it is.
+          </p>
+          <ul className="space-y-2">
+            {withheld.map((w, i) => (
+              <li key={i} className="rounded-lg border border-warn/35 bg-warn-muted/30 p-3 text-[13px]">
+                {w.reason ?? 'No ground recorded.'}
+              </li>
+            ))}
+          </ul>
+        </Panel>
       )}
 
-      <KeyValue
-        rows={[
-          ['Recorded digest', <Hash key="kv" value={exhibit.sha256 ?? exhibit.sha256Server} />],
-          ['Hash algorithm', exhibit.hashAlgorithm ?? 'SHA-256'],
-          ['Captured at', fmtDate(exhibit.capturedAt)],
-        ]}
+      {p?.watermark && (
+        <Disclosure
+          label="Your copy is watermarked"
+          hint="Every page carries a token unique to you."
+        >
+          <p className="text-[13px] leading-relaxed text-muted-foreground">
+            The token below identifies YOUR copy of this file. A leaked page can be traced back
+            to the person it was served on, and that mapping is in an append-only record nobody
+            can edit afterwards — including the court.
+          </p>
+          <Facts
+            dense
+            rows={[
+              ['Watermark', p.watermark.label ?? '—'],
+              ['Token', <code key="t" className="hash">{p.watermark.token}</code>],
+            ]}
+          />
+        </Disclosure>
+      )}
+
+      {/* Review priority is investigative workload ordering. It is never disclosed to
+          a party, so the dialog is asked not to render it — and the server does not
+          send it either. Two independent guarantees, deliberately. */}
+      <ExhibitDialog
+        evidenceId={exhibitDialog.evidenceId}
+        onClose={exhibitDialog.close}
+        showPriority={false}
       />
-
-      {/*
-        Only the laboratory's opinion appears in a served pack. Machine review
-        priority is investigative triage, not disclosable material, and its absence
-        here is the point rather than an omission.
-      */}
-      <ForensicOpinion forensic={exhibit.forensic} />
     </div>
   );
 }
 
-function PackView({ pack }) {
-  const acknowledge = useAcknowledgePack();
-  const remaining = daysUntil(pack.dueOn);
-  const acknowledged = Boolean(pack.acknowledgedAt);
-
-  const onAcknowledge = () => {
-    acknowledge.mutate(pack.packId, {
-      onSuccess: () =>
-        toast.success('Receipt acknowledged.', {
-          description: 'The BNSS s.230 clock is stopped for your copy.',
-        }),
-      onError: (err) => toast.error(err.message ?? 'The acknowledgement was refused.'),
-    });
-  };
-
-  return (
-    <div className="space-y-6">
-      <WatermarkPanel watermark={pack.watermark} pack={pack} />
-
-      {/* The pack is the thing that was served — the one panel here with a beam. */}
-      <Section
-        accent
-        title="Pack"
-        description="What was served, when, and the clock it started. BNSS s.230 requires the accused to have the material within fourteen days of production; acknowledging receipt is what records that it arrived."
-      >
-        <KeyValue
-          rows={[
-            ['CNR', <span key="kv" className="font-mono">{pack.cnrNumber ?? 'not committed'}</span>],
-            ['FIR', <span key="kv" className="font-mono">{pack.firNumber ?? '—'}</span>],
-            [
-              'Status',
-              <Badge key="kv" variant="outline" className="rounded-full border-ok/40 bg-ok-muted text-ok">
-                {humanise(pack.status)}
-              </Badge>,
-            ],
-            ['Served on', fmtDate(pack.servedOn)],
-            ['Due on', fmtDate(pack.dueOn)],
-            ['Exhibits in your set', String(pack.exhibitCount ?? 0)],
-            [
-              'Redaction variant',
-              <span key="kv" className="font-mono">{pack.redactionVariant ?? '—'}</span>,
-            ],
-            ['Victim identity masked', pack.maskVictimIdentity ? 'Yes, by order' : 'No'],
-          ]}
-        />
-
-        {acknowledged ? (
-          <Note>
-            Receipt acknowledged {fmtDate(pack.acknowledgedAt)}. The s.230 clock for your copy
-            stopped at that moment, and the acknowledgement is in the ledger.
-          </Note>
-        ) : remaining === null ? (
-          <Note tone="warn">
-            No due date is recorded on this pack, so the s.230 clock cannot be shown. Acknowledge
-            receipt anyway — the record of when the material reached you is the point.
-          </Note>
-        ) : (
-          <Note tone="warn">
-            {remaining < 0
-              ? `The fourteen-day period ran out ${Math.abs(remaining)} day${Math.abs(remaining) === 1 ? '' : 's'} ago and receipt is still not acknowledged.`
-              : `${remaining} day${remaining === 1 ? '' : 's'} remain under BNSS s.230.`}{' '}
-            The clock stops when you acknowledge receipt, not when the registrar serves.
-          </Note>
-        )}
-
-        <Button onClick={onAcknowledge} disabled={acknowledged || acknowledge.isPending}>
-          <FileCheck2 className="size-4" />
-          {acknowledged
-            ? `Acknowledged ${fmtDate(pack.acknowledgedAt)}`
-            : acknowledge.isPending
-              ? 'Acknowledging…'
-              : 'Acknowledge receipt'}
-        </Button>
-
-        {acknowledge.isError && (
-          <Denial error={acknowledge.error} heading="Acknowledgement refused" />
-        )}
-      </Section>
-
-      <Section
-        title="Exhibits served on you"
-        description="These are the only exhibits accessible to you in this case. Any other exhibit is refused with EXHIBIT_NOT_IN_DISCLOSURE_SET, and the attempt is written to the audit log with your identity and the time."
-      >
-        {(pack.exhibits ?? []).length === 0 ? (
-          <EmptyState title="The served pack contains no exhibits" icon={FolderLock}>
-            A pack was served on you, but it names no material. Raise it with the registry —
-            this is a record you are entitled to have explained.
-          </EmptyState>
-        ) : (
-          <div className="grid gap-4 xl:grid-cols-2">
-            {pack.exhibits.map((exhibit) => (
-              <ExhibitCard key={exhibit.evidenceId} exhibit={exhibit} />
-            ))}
-          </div>
-        )}
-      </Section>
-
-      <Section
-        title="Material withheld"
-        description="You are told that material was withheld and on what ground. It is not named and it is not listable — naming the item would disclose the very thing the registrar ruled should be withheld."
-      >
-        {(pack.withheld ?? []).length === 0 ? (
-          <EmptyState title="Nothing withheld">
-            The registrar excluded no material from the set served on you.
-          </EmptyState>
-        ) : (
-          <Table>
-            <TableHeader>
-              <TableRow className={HEADINGS}>
-                <TableHead>Ground for withholding</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {(pack.withheld ?? []).map((w, i) => (
-                <TableRow key={`${w.reason}-${i}`}>
-                  <TableCell>{w.reason ?? '—'}</TableCell>
-                </TableRow>
-              ))}
-            </TableBody>
-          </Table>
-        )}
-      </Section>
-    </div>
-  );
-}
-
-// -------------------------------------------------------------------- page ----
+// ==================================================================== page ====
 
 export default function CounselPage() {
-  const cases = useCases({ limit: 100 });
-  const [chosenCaseId, setChosenCaseId] = useState(null);
+  const cases = useCases();
+  const list = useMemo(() => cases.data?.cases ?? [], [cases.data]);
+  const [chosen, setChosen] = useState(null);
 
-  const list = cases.data?.cases ?? NO_CASES;
-
-  // Land on a case rather than on a picker: an advocate on one case should not have to
-  // choose it before seeing anything.
-  //
-  // Derived during render rather than written back from an effect. Setting state in an
-  // effect to fill in a default means the first render goes out with nothing selected
-  // and is immediately thrown away — a cascading render, and a visible flash of the
-  // empty state on a page whose empty state says "nothing has been disclosed to you".
-  const caseId = chosenCaseId ?? (list.length ? String(list[0]._id) : null);
-  const setCaseId = setChosenCaseId;
-
-  const pack = useMyPack(caseId);
-
-  const scope = useReveal();
-
-  // NO_DISCLOSURE_PACK_SERVED is not a failure. It means the registrar has not served
-  // yet, which is a normal state of a live case, and rendering it as a red refusal
-  // would teach an advocate to read a routine waiting period as an access denial.
-  const notServedYet = pack.isError && pack.error?.code === 'NO_DISCLOSURE_PACK_SERVED';
+  // Derived rather than corrected by an effect: the advocate lands on their first
+  // case without a render in which nothing is selected.
+  const caseDoc = list.find((c) => String(c._id) === String(chosen)) ?? list[0] ?? null;
+  const selected = caseDoc ? String(caseDoc._id) : null;
+  const ready = cases.isSuccess;
 
   return (
-    <div ref={scope} className="container space-y-8 py-10">
-      <div className="space-y-4">
-        <div className="will-reveal">
-          <Eyebrow>Advocate on record · BNSS s.230 disclosure</Eyebrow>
-        </div>
-        <PageHeader
-          title="Disclosure served on you"
-          lede="Access here follows the court directory. A vakalatnama accepted by the registrar, or a legal aid order, is what puts an advocate on record; Lexx mirrors that record into this register and can neither create nor extend it. What you can open is the set served on you, exhibit by exhibit — not the case file."
-        />
-      </div>
+    <Workspace
+      eyebrow="Legal · counsel"
+      title="Your cases"
+      lede="You see the cases the court record says you are on, and the material the court has shared with you in each."
+      action={<FileVakalatnama />}
+    >
+      {cases.isError && <Denial error={cases.error} heading="Cases not readable" />}
 
-      <CounselFigures cases={cases} list={list} pack={pack} />
+      <CounterRow>
+        <Counter label="Cases you are on" value={ready ? list.length : '—'} />
+      </CounterRow>
 
-      <Section
-        title="Your cases"
-        description="The cases the court directory shows you on record for. This list is built by the server from that record, not from anything chosen here."
-      >
-        {cases.isPending && <TableSkeleton rows={1} cols={2} />}
-        {cases.isError && <Denial error={cases.error} heading="Case list refused" />}
-
-        {cases.isSuccess &&
-          (list.length === 0 ? (
-            <EmptyState title="No case is open to you" icon={Scale}>
-              An advocate appears here only once the registrar has accepted a vakalatnama, or a
-              legal aid order has been made, in a case Lexx holds. Lexx reads that record; it
-              does not grant access of its own.
-            </EmptyState>
-          ) : (
-            <div className="max-w-xl space-y-2">
-              <Label htmlFor="counsel-case">Case</Label>
-              <Select value={caseId ?? undefined} onValueChange={setCaseId}>
-                <SelectTrigger id="counsel-case">
-                  <SelectValue placeholder="Choose a case" />
-                </SelectTrigger>
-                <SelectContent>
-                  {list.map((c) => (
-                    <SelectItem key={String(c._id)} value={String(c._id)}>
-                      {c.cnrNumber ?? c.firNumber}
-                      {c.title ? ` — ${c.title}` : ''}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          ))}
-      </Section>
-
-      {caseId && (
+      {ready && list.length === 0 ? (
+        <Panel title="No case is open to you">
+          <Empty title="You are not on record in any case" icon={Scale}>
+            An advocate comes on record by filing a vakalatnama, which the court then rules on —
+            or by a legal aid order. File one above; until the court accepts it, it grants you
+            nothing, not even the knowledge that the case exists.
+          </Empty>
+          <Separator className="my-5" />
+          <MyFilings />
+        </Panel>
+      ) : (
         <>
-          {pack.isPending && (
-            <div className="space-y-3" aria-busy="true">
-              <Skeleton className="h-24 w-full" />
-              <Skeleton className="h-48 w-full" />
-            </div>
-          )}
+          <SplitView
+            list={
+              <Panel title="On record" bodyClassName="p-0">
+                {cases.isPending && <RowsSkeleton rows={3} />}
+                {list.length > 0 && (
+                  <Rows>
+                    {list.map((c) => (
+                      <Row
+                        key={c._id}
+                        title={c.title}
+                        meta={`FIR ${c.firNumber}`}
+                        badge={<StageBadge stage={c.stage} />}
+                        selected={String(c._id) === String(selected)}
+                        onSelect={() => setChosen(String(c._id))}
+                      />
+                    ))}
+                  </Rows>
+                )}
+              </Panel>
+            }
+            detail={<CaseFile caseId={selected} caseDoc={caseDoc} />}
+          />
 
-          {notServedYet && (
-            <Section
-              title="Nothing served yet"
-              description="You are on record for this case. Service is a separate act by the registrar."
-            >
-              <EmptyState title="No disclosure pack has been served on you" icon={FolderLock}>
-                Until the registrar prepares, approves and serves a pack in this case, there is
-                nothing to disclose to you. A pack served on co-accused counsel is not a pack
-                served on you, and this page will not show it.
-              </EmptyState>
-              <Separator />
-              <Note>
-                This read was written to the audit log with your identity, the case, the reason
-                code and the time. Supervisory users can see it in their own feed — which cuts
-                both ways, and is meant to.
-              </Note>
-            </Section>
-          )}
-
-          {pack.isError && !notServedYet && (
-            <div className="space-y-3">
-              <Denial error={pack.error} heading="Disclosure refused" />
-              <Note>
-                This refusal has been written to the audit log with your identity, the case, the
-                reason code and the time.
-              </Note>
-            </div>
-          )}
-
-          {pack.isSuccess && pack.data && <PackView pack={pack.data} />}
+          <Disclosure
+            label="Your filings"
+            hint="Vakalatnamas you have put before a court, and where each one stands."
+          >
+            <MyFilings />
+          </Disclosure>
         </>
       )}
-    </div>
+    </Workspace>
   );
 }

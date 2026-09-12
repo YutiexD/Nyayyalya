@@ -11,10 +11,11 @@
  *                        resource loaded from the database by the resolver itself.
  *   authorizeCreate()  — the capability check for a resource that does not exist yet.
  *
- * `prepare` uses BOTH: `authorizeCreate(DISCLOSURE_PACK)` establishes that only an
- * investigating officer may author a pack at all, and `authorize(WRITE, CASE)`
- * establishes that it is *their* case, at their station, still open to writes. Either
- * one alone would be a hole.
+ * `share` and `prepare` use BOTH: `authorize(APPROVE, CASE)` establishes that this
+ * is a court seized of this case — APPROVE is court-only, so the investigation cannot
+ * reach disclosure at all — and `authorizeCreate(DISCLOSURE_PACK)` establishes that
+ * it is the presiding judge rather than court staff generally. Either one alone would
+ * be a hole.
  */
 import { Router } from 'express';
 import * as disclosure from '../controllers/disclosure.js';
@@ -27,12 +28,35 @@ const router = Router();
 router.use(...requireSession);
 
 /**
- * The IO proposes the set. Case-scoped WRITE first, so an officer who is not on the
- * case is refused before we even ask whether their role may prepare packs.
+ * THE disclosure route: the court gives the advocates on record the case file.
+ *
+ * Two gates. APPROVE on the case is a COURT_ONLY_ACTION, so every police role, the
+ * laboratory and counsel are refused here by the resolver — the police have no route
+ * to disclosure at all, which is the point. The create capability then limits pack
+ * authorship to the presiding judge rather than to court staff generally.
+ *
+ * It fails closed if the audit trail is broken: serving disclosure is one of the two
+ * acts that must never happen without a reliable record of who authorised it.
+ */
+router.post(
+  '/:caseId/share',
+  requireHealthyAudit,
+  authorize({ action: ACTION.APPROVE, resourceType: RESOURCE_TYPE.CASE, idFrom: 'params.caseId' }),
+  authorizeCreate(RESOURCE_TYPE.DISCLOSURE_PACK, disclosure.packCreateContext),
+  disclosure.shareCaseFile
+);
+
+/**
+ * Settle the set without serving it — the long form of the route above, kept for a
+ * court that wants to fix the exhibit set first and rule on withholdings separately.
+ *
+ * APPROVE, not WRITE, and not READ: it is the court composing a court record about a
+ * case it is seized of. READ would have admitted counsel; WRITE would have admitted
+ * the investigation.
  */
 router.post(
   '/:caseId/prepare',
-  authorize({ action: ACTION.WRITE, resourceType: RESOURCE_TYPE.CASE, idFrom: 'params.caseId' }),
+  authorize({ action: ACTION.APPROVE, resourceType: RESOURCE_TYPE.CASE, idFrom: 'params.caseId' }),
   authorizeCreate(RESOURCE_TYPE.DISCLOSURE_PACK, disclosure.packCreateContext),
   disclosure.preparePack
 );
@@ -42,9 +66,9 @@ router.post(
  * (spec §8 F8 step 2).
  *
  * Two gates, deliberately. READ on the case establishes court scope; the CREATE
- * capability then restricts this to a REGISTRAR. Deciding who is on record for the
- * accused is a registry act — an investigating officer must never be able to make it,
- * even for a case they own.
+ * capability then restricts this to the presiding judge. Deciding who is on record
+ * for the accused is the court's act — an investigating officer must never be able to
+ * make it, even for a case they own.
  */
 router.post(
   '/:caseId/sync-representation',
@@ -54,12 +78,11 @@ router.post(
 );
 
 /**
- * The registrar OR the judge rules on the exclusions and fixes the redaction variant.
+ * The court rules on each withholding and fixes the redaction variant.
  *
- * APPROVE is its own action precisely so this pair can be expressed: WRITE would
- * exclude the judge (who does not author investigative records) and ORDER would
- * exclude the registrar (who does not issue judicial orders). Spec §7 gives approval
- * to both.
+ * APPROVE is its own action so that ruling on what another party prepared stays
+ * distinct from WRITE (authorship, which belongs to the investigation) and from ORDER
+ * (a judicial order, which is a different act again).
  */
 router.post(
   '/:packId/approve',
@@ -71,7 +94,7 @@ router.post(
   disclosure.approvePack
 );
 
-/** Registrar serves it, minting one watermark per recipient. */
+/** The court serves it, minting one unguessable watermark per recipient. */
 router.post(
   '/:packId/serve',
   // Fails closed if the audit trail is broken: serving disclosure is one of the two
@@ -89,14 +112,14 @@ router.post(
  * The court's list of packs on a case.
  *
  * This exists because `approve` and `serve` both take a packId and there was
- * previously no way for the registrar to LEARN one: pack ids travelled out of band,
- * which made a statutory step depend on someone copying a hex string by hand.
+ * previously no way for the court to LEARN one: pack ids travelled out of band, which
+ * made a statutory step depend on someone copying a hex string by hand.
  *
  * Gated on APPROVE, not READ, and that is the whole point. APPROVE is a
- * COURT_ONLY_ACTION, so the resolver refuses it to every police role (including the
- * IO who authored the pack), to FSL, and to counsel — while granting it to the judge
- * and registry staff whose court the case is listed in. A READ gate would have handed
- * the draft pack list, exclusions and all, to the advocate the exclusions are against.
+ * COURT_ONLY_ACTION, so the resolver refuses it to every police role, to FSL, and to
+ * counsel — while granting it to the judge whose court the case is listed in. A READ
+ * gate would have handed the pack list, withholdings and all, to the advocate those
+ * withholdings are against.
  */
 router.get(
   '/case/:caseId/packs',
@@ -106,6 +129,24 @@ router.get(
     idFrom: 'params.caseId',
   }),
   disclosure.listPacksForCase
+);
+
+/**
+ * Trace a leaked copy back to the advocate it was served on.
+ *
+ * The token resolves to a pack and no further; APPROVE on that pack — court-only —
+ * decides who may learn the answer. Declared before '/my-pack/:caseId' only for
+ * readability; the paths do not overlap.
+ */
+router.get(
+  '/trace/:token',
+  disclosure.resolveWatermark,
+  authorize({
+    action: ACTION.APPROVE,
+    resourceType: RESOURCE_TYPE.DISCLOSURE_PACK,
+    idFrom: 'tracedPackId',
+  }),
+  disclosure.traceWatermark
 );
 
 /**

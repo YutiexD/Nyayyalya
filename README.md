@@ -17,7 +17,7 @@ Only the forensic laboratory decides authenticity. The AI decides what gets look
 | **Stack** | Node 20+ · Express · MongoDB · Vite (React) · Solidity |
 | **Anchoring** | **Monad Testnet**, chain ID **10143** — Merkle roots only |
 | **Identity** | Three external authority directories; no self-registration |
-| **Tests** | 455 backend + 36 contract, all passing |
+| **Tests** | 525 backend + 36 contract, all passing |
 | **Dependencies** | `npm audit`: 0 vulnerabilities |
 
 ---
@@ -146,7 +146,7 @@ lexx/
 | `npm run seed` | Build the full demo state **through the real API** |
 | `npm run reset` | Drop `lexx_core` and clear the vault (`--directories` to reseed those too) |
 | `npm run health` | Check MongoDB, all three directories, the API and the RPC |
-| `npm test` | The whole backend suite (455 tests) |
+| `npm test` | The whole backend suite (525 tests) |
 | `npm run test:authz` | Just the authorization matrix |
 | `npm run test:redteam` | Just the adversarial suite |
 | `npm run lint` | ESLint across backend, directories, frontend, scripts |
@@ -161,7 +161,7 @@ lexx/
 
 ## Blockchain — Monad Testnet
 
-Submitting to the chain is **off by default** (`ANCHOR_ENABLED=false`) because it needs a funded key. The batcher itself runs (`ANCHOR_BATCHING_ENABLED=true`), computing and storing Merkle roots with status `DRY_RUN`, so the pipeline is exercised and locally verifiable without one. A `DRY_RUN` root is not evidence of anything on chain, and the verifier says so in those words.
+Submitting to the chain is **off by default in `.env.example`** (`ANCHOR_ENABLED=false`) because it needs a funded key; this project's local `.env` runs with it **on**, and roots are confirmed on Monad Testnet (see the public verifier's *Anchoring history*). Switching it on also submits any earlier DRY_RUN batches, oldest first. The batcher itself runs (`ANCHOR_BATCHING_ENABLED=true`), computing and storing Merkle roots with status `DRY_RUN`, so the pipeline is exercised and locally verifiable without one. A `DRY_RUN` root is not evidence of anything on chain, and the verifier says so in those words.
 
 To anchor for real:
 
@@ -210,7 +210,9 @@ The backend's Merkle implementation is cross-checked against the deployed contra
 
 **2. The ledger is append-only at three levels.** No update or delete route exists; Mongoose middleware refuses every mutating operation; and each entry's hash chains to its predecessor. Only the third one really matters — the first two stop mistakes, the third makes tampering *detectable*.
 
-**3. AI triage and forensic opinion are never the same thing.** Triage produces `HIGH | MEDIUM | LOW` with a statutory disclaimer, is labelled "Review Priority" everywhere, is never written to the chain, and never produces a percentage. Only an FSL examiner produces `AUTHENTIC | MANIPULATED | INCONCLUSIVE`. The separation is enforced by separate vocabularies in `models/enums.js` and asserted by tests.
+**3. AI triage and forensic opinion are never the same thing.** Triage produces `CRITICAL | HIGH | MEDIUM | LOW` with a statutory disclaimer, is labelled "Review Priority" everywhere, is never written to the chain, and never produces a percentage. Only an FSL examiner produces `AUTHENTIC | MANIPULATED | INCONCLUSIVE`. The separation is enforced by separate vocabularies in `models/enums.js` and asserted by tests.
+
+Every exhibit is given a review priority automatically, at ingest, from the file's own metadata, the integrity of its upload, its media type and the gravity of the case. There is no field for it on any form and no endpoint that sets one, so nobody — officer, supervisor, examiner or operator — can push their own work up a laboratory's queue. What was *observed about the file* sets the band; how grave the case is can move it up one place, and never into `CRITICAL`.
 
 ---
 
@@ -218,4 +220,4 @@ The backend's Merkle implementation is cross-checked against the deployed contra
 
 Judge assignment, real DSC/eSign integration, real CCTNS/ICJS connectors, multi-state deployment, HSM-backed keys, a mobile capture app.
 
-Deliberately removed: an admin role, all DELETE endpoints, self-registration, public file URLs.
+Deliberately removed: an admin role, all DELETE endpoints, self-registration, public file URLs — and two workflow roles, the **malkhana custodian** and the **court registrar**. Neither made a decision. The custodian existed to enforce one rule (the officer on a case must not keep that case'''s evidence), which is still enforced against whoever would actually hold the article; the registrar was a second court login standing between a judge'''s decision and its effect. Both were steps the workflow waited on and learned nothing from, so the station keeps its own store and the presiding judge holds the whole of the court'''s authority.

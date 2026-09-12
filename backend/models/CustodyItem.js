@@ -1,5 +1,5 @@
 /**
- * A physical exhibit tracked through the malkhana by QR.
+ * A physical exhibit tracked through the station store by QR.
  *
  * The custody *history* is not stored here — it lives in the ledger, so that it
  * inherits the hash chain and cannot be quietly rewritten. This document holds only

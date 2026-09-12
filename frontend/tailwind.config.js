@@ -65,6 +65,18 @@ export default {
         ok: { DEFAULT: 'hsl(var(--ok))', foreground: 'hsl(var(--ok-foreground))', muted: 'hsl(var(--ok-muted))' },
         warn: { DEFAULT: 'hsl(var(--warn))', foreground: 'hsl(var(--warn-foreground))', muted: 'hsl(var(--warn-muted))' },
         bad: { DEFAULT: 'hsl(var(--bad))', foreground: 'hsl(var(--bad-foreground))', muted: 'hsl(var(--bad-muted))' },
+        info: { DEFAULT: 'hsl(var(--info))', foreground: 'hsl(var(--info-foreground))', muted: 'hsl(var(--info-muted))' },
+        // Review priority. One ramp, four stops, in order of urgency — see globals.css.
+        priority: {
+          critical: 'hsl(var(--p-critical))',
+          'critical-muted': 'hsl(var(--p-critical-muted))',
+          high: 'hsl(var(--p-high))',
+          'high-muted': 'hsl(var(--p-high-muted))',
+          medium: 'hsl(var(--p-medium))',
+          'medium-muted': 'hsl(var(--p-medium-muted))',
+          low: 'hsl(var(--p-low))',
+          'low-muted': 'hsl(var(--p-low-muted))',
+        },
       },
       borderRadius: {
         lg: 'var(--radius)',

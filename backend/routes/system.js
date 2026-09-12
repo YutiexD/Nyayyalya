@@ -44,3 +44,5 @@ searchRouter.get('/', search.search);
  */
 export const anchorRouter = Router();
 anchorRouter.get('/latest', ledger.latestAnchorBatch);
+anchorRouter.get('/recent', ledger.recentAnchorBatches);
+anchorRouter.get('/entry/:seq/:entryHash', ledger.verifyReceipt);

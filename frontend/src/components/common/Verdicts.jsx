@@ -4,9 +4,9 @@
  * Three claims are rendered in this product and they must never look alike, because
  * they are not alike:
  *
- *   ReviewPriority   — machine triage. Labelled "Review Priority", HIGH/MEDIUM/LOW,
+ *   ReviewPriority   — machine triage. Labelled "Review Priority", one of four bands,
  *                      never "verified", never "confidence", never a percentage, and
- *                      never shown without the API's own disclaimer beside it.
+ *                      never shown without the API's own disclaimer within reach.
  *   ForensicOpinion  — a s.79A laboratory's authenticity opinion. Deliberately a
  *                      different shape and weight, attributed to the lab and its
  *                      notification reference, because it is the only authenticity
@@ -17,55 +17,152 @@
  *
  * If these ever start looking similar, the product has begun claiming that an
  * automated score is a forensic finding, which is the single thing it must not do.
+ *
+ * ## The one change this redesign made to that rule
+ *
+ * The disclaimer used to be a paragraph printed under every priority badge, including
+ * in table cells — so it appeared eight times on a screen, and by the third time
+ * nobody was reading any of them. It is now attached to the badge as a tooltip and
+ * stated once, in full, wherever a priority is the subject of the screen
+ * (`PriorityLegend`). It is not optional in either place.
  */
-import { AlertTriangle, ShieldAlert, FlaskConical, Info } from 'lucide-react';
+import { AlertTriangle, FlaskConical, Info, ShieldAlert } from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
+import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { explain } from '@/lib/api';
 import { cn, humanise, fmtDate } from '@/lib/utils';
 
 // ------------------------------------------------------------ machine triage ----
 
+/** Highest first. The one ordering every queue in the client sorts by. */
+export const PRIORITY_ORDER = Object.freeze(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']);
+
+/**
+ * The wording that must accompany every priority.
+ *
+ * A fallback, not a substitute: the API sends its own text and that is what renders.
+ * This exists so a response that somehow arrives without it still cannot put a
+ * machine priority on screen unqualified.
+ */
+export const TRIAGE_DISCLAIMER =
+  'Automated triage only. Not expert opinion under BSA s.39 / IT Act s.79A.';
+
 const PRIORITY_STYLES = {
-  HIGH: 'border-warn/40 bg-warn-muted text-warn',
-  MEDIUM: 'border-border bg-muted text-muted-foreground',
-  LOW: 'border-border bg-muted text-muted-foreground',
+  CRITICAL: 'border-priority-critical/35 bg-priority-critical-muted text-priority-critical',
+  HIGH: 'border-priority-high/35 bg-priority-high-muted text-priority-high',
+  MEDIUM: 'border-priority-medium/35 bg-priority-medium-muted text-priority-medium',
+  LOW: 'border-priority-low/30 bg-priority-low-muted text-priority-low',
+};
+
+/** What each band is actually telling a human to do. */
+export const PRIORITY_MEANING = {
+  CRITICAL: 'Look at this before anything else.',
+  HIGH: 'Look at this first.',
+  MEDIUM: 'Worth a look.',
+  LOW: 'Nothing stood out.',
 };
 
 /**
- * Machine triage. Note what this is NOT allowed to say.
+ * Machine triage, as a badge. Note what this is NOT allowed to say.
  *
  * @param {object} props
- * @param {string} props.priority HIGH | MEDIUM | LOW
+ * @param {string} props.priority CRITICAL | HIGH | MEDIUM | LOW
  * @param {string} [props.disclaimer] the API's own wording, rendered verbatim
  */
-export function ReviewPriority({ priority, disclaimer, className }) {
-  if (!priority) return null;
+export function PriorityBadge({ priority, disclaimer, className }) {
+  if (!priority) {
+    return <span className="text-[13px] text-muted-foreground">—</span>;
+  }
+  const style = PRIORITY_STYLES[priority] ?? PRIORITY_STYLES.LOW;
+
   return (
-    <div className={cn('space-y-1.5', className)}>
-      <div className="flex items-center gap-2">
-        <span className="text-xs uppercase tracking-wide text-muted-foreground">
-          Review Priority
-        </span>
-        <Badge variant="outline" className={cn('font-medium', PRIORITY_STYLES[priority])}>
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <Badge
+          variant="outline"
+          className={cn(
+            'rounded-full px-2.5 py-0 text-[11px] font-semibold uppercase tracking-wide',
+            style,
+            className
+          )}
+        >
           {priority}
         </Badge>
-      </div>
-      {disclaimer && (
-        <p className="max-w-prose text-xs leading-relaxed text-muted-foreground">{disclaimer}</p>
+      </TooltipTrigger>
+      <TooltipContent className="max-w-xs">
+        <p className="font-medium">Review Priority — {humanise(priority)}</p>
+        <p className="mt-0.5">{PRIORITY_MEANING[priority]}</p>
+        <p className="mt-1.5 text-muted-foreground">{disclaimer ?? TRIAGE_DISCLAIMER}</p>
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
+/**
+ * The standing statement about what a review priority is, for the screens where it is
+ * the subject. Printed once per screen, in full, and never abbreviated.
+ */
+export function PriorityLegend({ disclaimer, className }) {
+  return (
+    <p className={cn('text-[13px] leading-relaxed text-muted-foreground text-pretty', className)}>
+      <span className="font-medium text-foreground">Review Priority</span> is computed
+      automatically for every exhibit at the moment it is registered, from its own metadata,
+      the integrity of its upload, its media type and the gravity of the case. Nobody sets it
+      and nobody can raise their own work up the queue.{' '}
+      {disclaimer ?? TRIAGE_DISCLAIMER}
+    </p>
+  );
+}
+
+/**
+ * Why an exhibit landed in its band, in the system's own words.
+ *
+ * The working, shown. A band on its own is a number to be argued with; a band with
+ * "container and stream durations disagree by 19s" underneath it is a statement an
+ * examiner — or a judge — can evaluate.
+ */
+export function PriorityReasons({ triage, limit = 4, className }) {
+  const findings = triage?.indicators ?? [];
+  if (!findings.length) {
+    return (
+      <p className={cn('text-[13px] text-muted-foreground', className)}>
+        Nothing was observed about this file: its capture timestamp, device and content
+        credentials are all present and consistent.
+      </p>
+    );
+  }
+  const shown = findings.slice(0, limit);
+  const rest = findings.length - shown.length;
+
+  return (
+    <ul className={cn('space-y-1.5', className)}>
+      {shown.map((text) => (
+        <li key={text} className="flex gap-2 text-[13px] leading-relaxed">
+          <span aria-hidden className="mt-[7px] size-1 shrink-0 rounded-full bg-muted-foreground" />
+          <span>{text}</span>
+        </li>
+      ))}
+      {rest > 0 && (
+        <li className="pl-3 text-[13px] text-muted-foreground">and {rest} more</li>
       )}
-    </div>
+    </ul>
   );
 }
 
 // -------------------------------------------------------- forensic opinion ----
 
 const OPINION_STYLES = {
-  AUTHENTIC: 'border-ok/40 bg-ok-muted',
-  MANIPULATED: 'border-bad/40 bg-bad-muted',
-  INCONCLUSIVE: 'border-warn/40 bg-warn-muted',
+  AUTHENTIC: 'border-ok/35 bg-ok-muted',
+  MANIPULATED: 'border-bad/35 bg-bad-muted',
+  INCONCLUSIVE: 'border-warn/35 bg-warn-muted',
+};
+
+const OPINION_TEXT = {
+  AUTHENTIC: 'text-ok',
+  MANIPULATED: 'text-bad',
+  INCONCLUSIVE: 'text-warn',
 };
 
 /**
@@ -74,28 +171,56 @@ const OPINION_STYLES = {
  */
 export function ForensicOpinion({ forensic, className }) {
   if (!forensic?.opinion) return null;
+
   return (
-    <Card className={cn('border', OPINION_STYLES[forensic.opinion], className)}>
-      <CardHeader className="pb-3">
-        <CardTitle className="flex items-center gap-2 text-sm font-semibold">
-          <FlaskConical className="size-4" />
+    <div className={cn('rounded-lg border p-4', OPINION_STYLES[forensic.opinion], className)}>
+      <div className="flex items-center gap-2">
+        <FlaskConical aria-hidden className={cn('size-4', OPINION_TEXT[forensic.opinion])} />
+        <p className="text-sm font-semibold">
           Laboratory opinion — {humanise(forensic.opinion)}
-        </CardTitle>
-      </CardHeader>
-      <CardContent className="space-y-1 text-sm">
-        <p className="text-muted-foreground">
-          {forensic.labName ?? 'Forensic Science Laboratory'}
-          {forensic.section79ARef ? ` · s.79A ${forensic.section79ARef}` : ''}
         </p>
-        {forensic.reportedAt && (
-          <p className="text-xs text-muted-foreground">Reported {fmtDate(forensic.reportedAt)}</p>
-        )}
-        <p className="pt-1 text-xs text-muted-foreground">
-          This is the examining laboratory&rsquo;s finding, signed by the examiner. It is not
-          produced by, and cannot be produced by, any automated step in this system.
+      </div>
+      <p className="mt-1.5 text-[13px] text-muted-foreground">
+        {forensic.labName ?? 'Forensic Science Laboratory'}
+        {forensic.examinerName ? ` · ${forensic.examinerName}` : ''}
+        {forensic.section79ARef ? ` · s.79A ${forensic.section79ARef}` : ''}
+        {forensic.reportedAt ? ` · ${fmtDate(forensic.reportedAt)}` : ''}
+      </p>
+      {forensic.examinationSummary && (
+        <p className="mt-2 whitespace-pre-line text-[13px] leading-relaxed">
+          {forensic.examinationSummary}
         </p>
-      </CardContent>
-    </Card>
+      )}
+      <p className="mt-2.5 text-[12px] leading-relaxed text-muted-foreground">
+        Signed by the examining laboratory. It is not produced by, and cannot be produced by,
+        any automated step in this system.
+      </p>
+    </div>
+  );
+}
+
+/** The forensic state of an exhibit as a single word, for a list row. */
+const FORENSIC_BADGE = {
+  AUTHENTIC: 'border-ok/35 bg-ok-muted text-ok',
+  MANIPULATED: 'border-bad/35 bg-bad-muted text-bad',
+  INCONCLUSIVE: 'border-warn/35 bg-warn-muted text-warn',
+};
+
+export function ForensicBadge({ forensic, className }) {
+  const opinion = forensic?.opinion ?? null;
+  const label = opinion ? humanise(opinion) : 'Awaiting review';
+
+  return (
+    <Badge
+      variant="outline"
+      className={cn(
+        'rounded-full px-2.5 py-0 text-[11px] font-medium',
+        opinion ? FORENSIC_BADGE[opinion] : 'border-border bg-muted text-muted-foreground',
+        className
+      )}
+    >
+      {label}
+    </Badge>
   );
 }
 
@@ -117,7 +242,7 @@ export function Denial({ error, heading = 'Access denied', className }) {
       <ShieldAlert className="size-4" />
       <AlertTitle className="flex flex-wrap items-center gap-2">
         {heading}
-        <Badge variant="outline" className="font-mono text-[11px]">
+        <Badge variant="outline" className="font-mono text-[11px] font-normal">
           {code}
         </Badge>
       </AlertTitle>
@@ -134,19 +259,18 @@ export function Denial({ error, heading = 'Access denied', className }) {
   );
 }
 
-/** A neutral note. Used where an empty result needs explaining rather than a blank box. */
+/** A neutral note. Used where an empty result or a constraint needs explaining. */
 export function Note({ children, tone = 'info', className }) {
   const Icon = tone === 'warn' ? AlertTriangle : Info;
+  const tones = {
+    info: 'border-border bg-muted/50 text-muted-foreground',
+    warn: 'border-warn/35 bg-warn-muted text-warn',
+  };
+
   return (
-    <div
-      className={cn(
-        'flex gap-2.5 rounded-md border p-3 text-sm',
-        tone === 'warn' ? 'border-warn/40 bg-warn-muted' : 'border-border bg-muted/50',
-        className
-      )}
-    >
-      <Icon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-      <div className="leading-relaxed text-muted-foreground">{children}</div>
+    <div className={cn('flex gap-2.5 rounded-lg border p-3 text-[13px]', tones[tone], className)}>
+      <Icon aria-hidden className="mt-0.5 size-4 shrink-0" />
+      <div className="leading-relaxed">{children}</div>
     </div>
   );
 }

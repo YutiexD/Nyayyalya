@@ -22,8 +22,6 @@
  * the request. A referral whose s.79A reference was supplied by the referring officer
  * would prove nothing about the lab's notification status.
  */
-import fsp from 'node:fs/promises';
-import path from 'node:path';
 import crypto from 'node:crypto';
 import multer from 'multer';
 import { z } from 'zod';
@@ -42,12 +40,17 @@ import {
   ACTION,
   DECISION,
   DENY_REASON,
+  TRIAGE_PRIORITY_ORDER,
+  TRIAGE_DISCLAIMER,
+  TRIAGE_UI_LABEL,
   values,
 } from '../models/enums.js';
 import { appendEvent } from '../services/ledger.js';
+import { materialiseScopeFilter } from '../services/accessResolver.js';
+import { priorityRankStage } from './evidence.js';
 import { legal } from '../services/directoryClient.js';
-import { sealBuffer } from '../services/envelope.js';
-import { buildStorageKey, resolveObjectPath, ensureVault } from '../services/storage.js';
+import { storeSealedDocument } from '../services/sealedDocument.js';
+import { buildStorageKey } from '../services/storage.js';
 import { sniffMimeType } from '../services/fileType.js';
 import { verifyEcdsaP256 } from '../config/crypto.js';
 import { writeAudit } from '../middleware/audit.js';
@@ -96,27 +99,8 @@ export const reportUpload = multer({
   limits: { fileSize: REPORT_MAX_BYTES, files: 1, fields: 12, fieldSize: 64 * 1024 },
 }).single('report');
 
-/**
- * Sealed-object container: magic | uint32BE header length | JSON envelope | ciphertext.
- *
- * `sealBuffer` returns the ciphertext and the envelope that unwraps it, and the
- * envelope has to live somewhere. Keeping it in the file's own header makes the
- * stored object self-describing, so a report remains readable from the vault alone.
- * The envelope contains only the WRAPPED key, which is useless without MASTER_KEK.
- */
-const SEAL_MAGIC = Buffer.from('LEXXSEAL1', 'utf8');
-
-async function storeSealedReport(plaintext, caseId, storageKey) {
-  const sealed = sealBuffer(plaintext, caseId);
-  const header = Buffer.from(JSON.stringify(sealed.encryption), 'utf8');
-  const headerLength = Buffer.alloc(4);
-  headerLength.writeUInt32BE(header.length, 0);
-
-  await ensureVault();
-  const target = resolveObjectPath(storageKey);
-  await fsp.mkdir(path.dirname(target), { recursive: true });
-  await fsp.writeFile(target, Buffer.concat([SEAL_MAGIC, headerLength, header, sealed.ciphertext]));
-}
+/** Reports are sealed in the vault, self-describing — see services/sealedDocument.js. */
+const storeSealedReport = storeSealedDocument;
 
 // ---------------------------------------------------------------- helpers ----
 
@@ -531,6 +515,334 @@ export async function fileReport(req, res, next) {
   }
 }
 
+// ========================================================== review queue ====
+
+/**
+ * GET /api/fsl/queue
+ *
+ * The laboratory's work, in the order the system says it should be done.
+ *
+ * This is the screen the automatic review priority exists for. Every exhibit that
+ * enters the register is banded at ingest — CRITICAL, HIGH, MEDIUM, LOW — from its
+ * own metadata, its ingest integrity, its media type and the gravity of the case it
+ * belongs to. Nobody sets that band and nobody can raise their own work up the queue.
+ *
+ * Scope is the resolver's: exhibits referred to this laboratory, plus the digital
+ * evidence registered in the state it serves. A session with no laboratory scope gets
+ * an empty queue — which is the access policy answering, not an empty register.
+ *
+ * `state` narrows it to what the examiner is looking for:
+ *   PENDING   — no forensic opinion yet. The default, because it is the work.
+ *   REVIEWED  — an opinion has been recorded.
+ *   ALL
+ */
+export async function reviewQueue(req, res, next) {
+  try {
+    const labId = req.scopeFilter?.__fslLab ?? null;
+    if (!labId) {
+      return res.json({ labId: null, queue: [], counts: emptyCounts(), uiLabel: TRIAGE_UI_LABEL, disclaimer: TRIAGE_DISCLAIMER });
+    }
+
+    const scope = await materialiseScopeFilter(req.user, RESOURCE_TYPE.EVIDENCE);
+    if (!scope) {
+      return res.json({ labId, queue: [], counts: emptyCounts(), uiLabel: TRIAGE_UI_LABEL, disclaimer: TRIAGE_DISCLAIMER });
+    }
+
+    const state = parse(z.enum(['PENDING', 'REVIEWED', 'ALL']).default('PENDING'), req.query.state ?? 'PENDING');
+    const byState = {
+      PENDING: { 'forensic.opinion': null },
+      REVIEWED: { 'forensic.opinion': { $ne: null } },
+      ALL: {},
+    }[state];
+
+    const limit = Math.min(Number(req.query.limit) || 100, 200);
+
+    const [items, counts] = await Promise.all([
+      Evidence.aggregate([
+        { $match: { ...scope, ...byState } },
+        { $addFields: { __rank: priorityRankStage() } },
+        { $sort: { __rank: 1, createdAt: -1 } },
+        { $limit: limit },
+        {
+          $lookup: {
+            from: 'cases',
+            localField: 'caseId',
+            foreignField: '_id',
+            as: '__case',
+            pipeline: [{ $project: { firNumber: 1, title: 1, stationCode: 1, sensitivityClass: 1, stage: 1 } }],
+          },
+        },
+        {
+          $project: {
+            exhibitCode: 1, title: 1, caseId: 1, triage: 1, forensic: 1,
+            mimeType: 1, sizeBytes: 1, kind: 1, createdAt: 1,
+            case: { $first: '$__case' },
+          },
+        },
+      ]),
+      countsFor(scope),
+    ]);
+
+    return res.json({
+      labId,
+      state,
+      queue: items,
+      counts,
+      // The label and the disclaimer travel with the data, so no client can render
+      // this as anything other than what it is.
+      uiLabel: TRIAGE_UI_LABEL,
+      disclaimer: TRIAGE_DISCLAIMER,
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+const emptyCounts = () => ({
+  pending: 0,
+  reviewed: 0,
+  byPriority: Object.fromEntries(TRIAGE_PRIORITY_ORDER.map((p) => [p, 0])),
+});
+
+/**
+ * The four figures on the laboratory's dashboard, counted in the database.
+ *
+ * `byPriority` counts only what is still PENDING: a band with nothing left to do in
+ * it is not a queue, and an examiner reading "6 CRITICAL" needs that to mean six
+ * exhibits waiting rather than six that were dealt with last week.
+ */
+async function countsFor(scope) {
+  const rows = await Evidence.aggregate([
+    { $match: scope },
+    {
+      $group: {
+        _id: {
+          priority: '$triage.priority',
+          reviewed: { $cond: [{ $ifNull: ['$forensic.opinion', false] }, true, false] },
+        },
+        n: { $sum: 1 },
+      },
+    },
+  ]);
+
+  const counts = emptyCounts();
+  for (const row of rows) {
+    if (row._id.reviewed) counts.reviewed += row.n;
+    else {
+      counts.pending += row.n;
+      const band = row._id.priority;
+      if (band && band in counts.byPriority) counts.byPriority[band] += row.n;
+    }
+  }
+  return counts;
+}
+
+// =============================================================== verdict ====
+
+/**
+ * The canonical statement an examiner signs.
+ *
+ * Recomputed by the server from the fields it received, so the signature covers the
+ * verdict itself rather than a digest the client chose. Same discipline as evidence
+ * ingest: the browser hashes, the browser signs, the server recomputes and refuses
+ * anything that does not agree.
+ */
+export const verdictStatement = ({ exhibitCode, opinion, examinationSummary, documentSha256 }) =>
+  ['LEXX-FSL-VERDICT', 'v1', exhibitCode, opinion, examinationSummary, documentSha256 ?? '-'].join('|');
+
+const verdictSchema = z.object({
+  opinion: z.enum(values(FORENSIC_OPINION)),
+  examinationSummary: z.string().trim().min(1).max(5000),
+  verdictSha256: hex64,
+  verdictSignature: z.string().regex(/^[0-9a-f]{128}$/i, 'Signature must be 64 bytes of hex'),
+});
+
+/** A verdict may carry its report, but does not have to. Same 32 MB ceiling. */
+export const verdictUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: REPORT_MAX_BYTES, files: 1, fields: 12, fieldSize: 64 * 1024 },
+}).single('report');
+
+/**
+ * POST /api/evidence/:id/forensic-verdict   (FSL examiner)
+ *
+ * The whole of the laboratory's act, in one step.
+ *
+ * The formal pipeline — refer, accept, report — still exists and is still the right
+ * shape when a station puts named questions to a named laboratory about a physical
+ * article it has sent. But it made the SIMPLE case impossible: an examiner looking at
+ * the review queue, seeing a CRITICAL exhibit that nobody had thought to refer, and
+ * wanting to record what they found. Three roles and two round trips stood between
+ * them and a sentence. This is that sentence.
+ *
+ * What does NOT change:
+ *   - the vocabulary is AUTHENTIC / MANIPULATED / INCONCLUSIVE and nothing else
+ *   - only an FSL examiner can reach it, and only for evidence in their scope
+ *   - the opinion is signed on the examiner's own device before it is sent
+ *   - it is written to the ledger, so it is in the case's history forever
+ *   - `triage` is not read and not written here: the two claims stay separate
+ *
+ * `forensic.basis` records which route produced the opinion, because a court reading
+ * the record is entitled to know whether a report document stands behind it.
+ */
+export async function recordVerdict(req, res, next) {
+  try {
+    const evidence = req.resource;
+    const body = parse(verdictSchema, req.body);
+
+    const labId = req.user.scope?.labId ?? null;
+    if (!labId) {
+      throw Forbidden(
+        DENY_REASON.NO_OPEN_REFERRAL_TO_YOUR_LAB,
+        'This session carries no laboratory scope, so it cannot record a forensic opinion'
+      );
+    }
+
+    // The laboratory's identity is a directory fact — its name and its s.79A
+    // notification reference are what make the opinion admissible, and neither may
+    // come from the request.
+    const lab = await legal.getLab(labId);
+    if (!lab) throw NotFound('LAB_NOT_FOUND', 'No such laboratory in the FSL directory');
+
+    // ---- an optional report document ----
+    let documentSha256 = null;
+    let storageKey = null;
+    if (req.file) {
+      const sniffed = sniffMimeType(req.file.buffer.subarray(0, 32));
+      if (sniffed !== 'application/pdf') {
+        throw BadRequest('REPORT_MUST_BE_PDF', 'A forensic report must be filed as a PDF', {
+          detected: sniffed,
+        });
+      }
+      documentSha256 = crypto.createHash('sha256').update(req.file.buffer).digest('hex');
+      storageKey = buildStorageKey(documentSha256, evidence._id);
+      await storeSealedReport(req.file.buffer, evidence.caseId, storageKey);
+    }
+
+    // ---- the signature must cover this verdict, and be this examiner's ----
+    const statement = verdictStatement({
+      exhibitCode: evidence.exhibitCode,
+      opinion: body.opinion,
+      examinationSummary: body.examinationSummary,
+      documentSha256,
+    });
+    const computed = crypto.createHash('sha256').update(statement, 'utf8').digest('hex');
+
+    if (computed !== body.verdictSha256.toLowerCase()) {
+      throw BadRequest(
+        'VERDICT_HASH_MISMATCH',
+        'The digest you signed is not the digest of the verdict that arrived',
+        { computed, declared: body.verdictSha256.toLowerCase() }
+      );
+    }
+
+    const signer = await User.findById(req.user.userId).lean();
+    if (!signer?.publicKeyJwk) {
+      throw BadRequest('NO_REGISTERED_KEY', 'No signing key is registered for this account');
+    }
+    if (!verifyEcdsaP256(signer.publicKeyJwk, body.verdictSignature, computed)) {
+      await appendEvent({
+        eventType: LEDGER_EVENT.INTEGRITY_EXCEPTION,
+        caseId: evidence.caseId,
+        subjectId: evidence._id,
+        subjectType: SUBJECT_TYPE.EVIDENCE,
+        actorUserId: req.user.userId,
+        actorRole: req.user.role,
+        payload: {
+          stage: 'FSL_VERDICT',
+          reason: 'SIGNATURE_INVALID',
+          exhibitCode: evidence.exhibitCode,
+          labId,
+          signerFingerprint: signer.publicKeyFingerprint,
+        },
+      });
+      throw BadRequest(
+        'SIGNATURE_INVALID',
+        'The signature does not verify against your registered key. The verdict was rejected and the attempt logged.'
+      );
+    }
+
+    // ---- record it ----
+    const reportedAt = new Date();
+    await Evidence.updateOne(
+      { _id: evidence._id },
+      {
+        $set: {
+          'forensic.status': FORENSIC_STATUS.REPORT_FILED,
+          'forensic.labId': lab.labCode,
+          'forensic.labName': lab.name,
+          'forensic.section79ARef': lab.section79ANotificationRef ?? null,
+          'forensic.examinerUserId': req.user.userId,
+          'forensic.examinerName': req.user.name,
+          'forensic.opinion': body.opinion,
+          'forensic.examinationSummary': body.examinationSummary,
+          'forensic.reportedAt': reportedAt,
+          'forensic.basis': 'DIRECT_REVIEW',
+          ...(storageKey ? { 'forensic.reportFileKey': storageKey } : {}),
+          ...(documentSha256 ? { 'forensic.reportSha256': documentSha256 } : {}),
+          'forensic.reportSignature': body.verdictSignature.toLowerCase(),
+        },
+      }
+    );
+
+    // Any referral this laboratory still holds open on the exhibit is answered by the
+    // opinion — leaving it OPEN would show the same work as outstanding on one screen
+    // and finished on another.
+    await Referral.updateMany(
+      {
+        evidenceId: evidence._id,
+        labId,
+        status: { $in: [REFERRAL_STATUS.OPEN, REFERRAL_STATUS.ACCEPTED] },
+      },
+      { $set: { status: REFERRAL_STATUS.REPORTED, reportedAt } }
+    );
+
+    const entry = await appendEvent({
+      eventType: LEDGER_EVENT.FSL_REPORT_FILED,
+      caseId: evidence.caseId,
+      subjectId: evidence._id,
+      subjectType: SUBJECT_TYPE.EVIDENCE,
+      actorUserId: req.user.userId,
+      actorRole: req.user.role,
+      actorSignature: body.verdictSignature.toLowerCase(),
+      actorPubKeyFingerprint: signer.publicKeyFingerprint,
+      payload: {
+        exhibitCode: evidence.exhibitCode,
+        labId: lab.labCode,
+        labName: lab.name,
+        section79ARef: lab.section79ANotificationRef ?? null,
+        examinerAuthorityId: req.user.authorityId,
+        basis: 'DIRECT_REVIEW',
+        reportSha256: documentSha256,
+        // The only authenticity vocabulary in the system, produced by the only party
+        // entitled to produce it.
+        opinion: body.opinion,
+      },
+    });
+
+    return res.status(201).json({
+      forensic: {
+        opinion: body.opinion,
+        examinationSummary: body.examinationSummary,
+        labId: lab.labCode,
+        labName: lab.name,
+        section79ARef: lab.section79ANotificationRef ?? null,
+        examinerName: req.user.name,
+        reportSha256: documentSha256,
+        reportedAt,
+        basis: 'DIRECT_REVIEW',
+      },
+      ledgerSeq: entry.seq,
+      entryHash: entry.entryHash,
+      basisNote: documentSha256
+        ? 'Recorded with a signed report document, and it is the source for Part B of the BSA s.63 certificate.'
+        : 'Recorded as a signed forensic opinion without a separate report document. It is the source for Part B of the BSA s.63 certificate, and it is independent of automated triage.',
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
 export default {
   reportUpload,
   referralContext,
@@ -538,4 +850,8 @@ export default {
   listReferrals,
   acceptReferral,
   fileReport,
+  reviewQueue,
+  verdictUpload,
+  recordVerdict,
+  verdictStatement,
 };

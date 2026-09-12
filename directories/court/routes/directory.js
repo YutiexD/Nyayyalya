@@ -3,16 +3,19 @@
  *
  *   GET  /directory/judge/:judgeCode            verify judge
  *   GET  /directory/judge/:judgeCode/court      ROSTER LOOKUP → which court today
+ *   GET  /directory/courts?districtCode=        the courts of a district
  *   GET  /directory/court/:code                 court details + designations
  *   GET  /directory/listing/by-fir/:firNumber   CNR + court for a case
+ *   POST /directory/listing                     SIMULATED chargesheet registration (demo only)
  *   GET  /directory/vakalatnama?enrolmentNo=    cases this advocate is on record for
  *   GET  /directory/legal-aid?enrolmentNo=      legal aid assignments
- *   POST /directory/vakalatnama                 SIMULATED registrar filing (demo only)
+ *   POST /directory/vakalatnama                 SIMULATED court filing (demo only)
  *   GET  /directory/registry-staff/:staffCode   verify registry user
  *
  * POST /directory/vakalatnama is the single write endpoint in all three
- * directories. It is an act of the court registry, not of Lexx — Lexx has no
- * credential that reaches it and the read-only guard blocks every other method.
+ * directories. It is an act of the court, not of Lexx: Lexx relays the presiding
+ * judge's acceptance to it and nothing else, and the read-only guard blocks every
+ * other method.
  */
 import { Router } from 'express';
 import { route } from '../../common/app.js';
@@ -139,6 +142,21 @@ export function directoryRouter(config = {}) {
   );
 
   // ------------------------------------------------------------------ court ----
+
+  /**
+   * The courts of one district. The jurisdiction router picks from this list; it
+   * used to ask for `/court/:code` with a DISTRICT code, which never matched a court,
+   * so every case was told "no court in this district holds the required designation".
+   */
+  router.get(
+    '/courts',
+    route(async (req, res) => {
+      const districtCode = identifier(req.query.districtCode, 'districtCode', PATTERNS.DASHED_CODE);
+      const courts = await Court.find({ districtCode }).sort({ code: 1 }).lean();
+      res.json({ districtCode, count: courts.length, courts: courts.map(courtView) });
+    })
+  );
+
   router.get(
     '/court/:code',
     route(async (req, res) => {
@@ -174,6 +192,86 @@ export function directoryRouter(config = {}) {
   router.get('/listing/by-fir/:firNumber/:year', listingHandler);
   router.get('/listing/by-fir/:firNumber', listingHandler);
 
+  /**
+   * SIMULATED REGISTRY REGISTRATION — a chargesheet being registered by the court.
+   *
+   * When a police report is filed before a court, the court's registry registers the
+   * case and allots it a CNR. eCourts owns that act. This stands in for it, under the
+   * same three labels as the vakalatnama simulator below: refused unless simulated
+   * filings are enabled, `simulated: true` on every response, and exactly one caller
+   * in Lexx (`POST /api/cases/:id/file-chargesheet`, once the jurisdiction router has
+   * picked the court from THIS directory's own list).
+   *
+   * Idempotent on the FIR: a case already registered answers with its existing
+   * listing and CNR rather than a second one, because one FIR is one case before the
+   * court however many times the filing is retried.
+   */
+  router.post(
+    '/listing',
+    route(async (req, res) => {
+      if (!config.allowSimulatedFilings) {
+        throw new DirectoryError(
+          403,
+          'SIMULATED_FILING_DISABLED',
+          'This endpoint simulates a court registry registering a chargesheet and is disabled in this environment. In a real deployment the registration is made in eCourts, not here.'
+        );
+      }
+
+      const body = objectBody(req.body);
+      const firNumber = identifier(body.firNumber, 'firNumber', PATTERNS.FIR_NUMBER);
+      const stationCode = identifier(body.stationCode, 'stationCode', PATTERNS.DASHED_CODE);
+      const courtCode = identifier(body.courtCode, 'courtCode', PATTERNS.DASHED_CODE);
+      const caseCategory = freeText(body.caseCategory, 'caseCategory', { max: 60 });
+
+      const court = await Court.findOne({ code: courtCode }).lean();
+      if (!court) throw NotFound('COURT_NOT_FOUND', 'No court with that code.');
+
+      const view = (listing, created) => ({
+        simulated: true,
+        notice:
+          'Simulated registry registration. This stands in for a chargesheet registered in eCourts; it is not a filing of record.',
+        created,
+        cnrNumber: listing.cnrNumber,
+        firNumber: listing.firNumber,
+        stationCode: listing.stationCode,
+        caseCategory: listing.caseCategory,
+        listedOn: listing.listedOn,
+        stage: listing.stage,
+        court: courtView(court),
+      });
+
+      const existing = await CaseListing.findOne({ firNumber }).lean();
+      if (existing) {
+        const existingCourt = await Court.findById(existing.courtId).lean();
+        return res.status(200).json({ ...view(existing, false), court: courtView(existingCourt) });
+      }
+
+      // CNR: state (2) + establishment (4) + serial (6) + year (4). The serial is the
+      // next free one in this register, checked rather than assumed.
+      const year = new Date().getUTCFullYear();
+      const establishment = `${court.stateCode}GB01`.slice(0, 6);
+      let serial = (await CaseListing.countDocuments()) + 1235;
+      let cnrNumber;
+      for (;;) {
+        cnrNumber = `${establishment}${String(serial).padStart(6, '0')}${year}`;
+        if (!(await CaseListing.exists({ cnrNumber }))) break;
+        serial += 1;
+      }
+
+      const created = await CaseListing.create({
+        cnrNumber,
+        firNumber,
+        stationCode,
+        courtId: court._id,
+        caseCategory,
+        listedOn: new Date(),
+        stage: 'FILED',
+      });
+
+      res.status(201).json(view(created.toObject(), true));
+    })
+  );
+
   // ----------------------------------------------------------- vakalatnamas ----
   router.get(
     '/vakalatnama',
@@ -204,7 +302,7 @@ export function directoryRouter(config = {}) {
             appearingFor: v.appearingFor,
             partyName: v.partyName,
             filedOn: v.filedOn,
-            acceptedByRegistrar: v.acceptedByRegistrar,
+            acceptedBy: v.acceptedBy,
             acceptedOn: v.acceptedOn,
             status: v.status,
             firNumber: listing?.firNumber ?? null,
@@ -220,7 +318,7 @@ export function directoryRouter(config = {}) {
    * SIMULATED REGISTRY FILING — not a real vakalatnama.
    *
    * The one write endpoint in the three directories. In the real world eCourts owns
-   * this act: a registrar accepts a vakalatnama and the advocate is on record. Here it
+   * this act: the court accepts a vakalatnama and the advocate is on record. Here it
    * exists so the demo can show that happening, because the grant it produces is what
    * later unlocks disclosure for that advocate inside Lexx.
    *
@@ -232,9 +330,13 @@ export function directoryRouter(config = {}) {
    *      authentication in front of it, this would put any advocate on record for any
    *      listed case.
    *   2. Every response carries `simulated: true` and a `notice`.
-   *   3. Lexx has no code path that calls it. The core API only ever READS
-   *      /directory/vakalatnama; this is allow-listed by name in the read-only guard
-   *      so that a human (or the seed) can drive the demo.
+   *   3. Lexx calls it from exactly one place: when the PRESIDING JUDGE accepts a
+   *      vakalatnama that an advocate filed through Lexx, the acceptance is relayed
+   *      here — with the judge's own code, which this endpoint verifies against its
+   *      own judges AND against the roster order placing them in the court this case
+   *      is listed before — BEFORE Lexx grants anything. The court register records
+   *      the appearance; Lexx then mirrors it. In a real deployment this relay is the
+   *      eCourts e-filing interface, not this simulator.
    */
   router.post(
     '/vakalatnama',
@@ -243,7 +345,7 @@ export function directoryRouter(config = {}) {
         throw new DirectoryError(
           403,
           'SIMULATED_FILING_DISABLED',
-          'This endpoint simulates a court registrar filing a vakalatnama and is disabled in this environment. In a real deployment the filing is made in eCourts, not here.'
+          'This endpoint simulates a court recording a vakalatnama and is disabled in this environment. In a real deployment the filing is made in eCourts, not here.'
         );
       }
 
@@ -257,29 +359,35 @@ export function directoryRouter(config = {}) {
       );
       const appearingFor = enumValue(body.appearingFor, 'appearingFor', APPEARING_FOR);
       const partyName = freeText(body.partyName, 'partyName', { max: 120 });
-      const acceptedByRegistrar = identifier(
-        body.acceptedByRegistrar,
-        'acceptedByRegistrar',
-        PATTERNS.DASHED_CODE
-      );
+      const acceptedBy = identifier(body.acceptedBy, 'acceptedBy', PATTERNS.DASHED_CODE);
 
-      // The filing registrar must be a real, serving officer of this registry, and
-      // the case must actually be listed. Neither fact comes from the request body.
+      // The case must actually be listed, and the judge taking the advocate on record
+      // must be the judge the ROSTER puts in that court today. Neither fact comes
+      // from the request body.
       const listing = await CaseListing.findOne({ cnrNumber }).lean();
       if (!listing) {
         throw NotFound('LISTING_NOT_FOUND', 'No case is listed under that CNR number.');
       }
-      const registrar = await RegistryStaff.findOne({ staffCode: acceptedByRegistrar }).lean();
-      if (!registrar || registrar.role !== 'REGISTRAR' || registrar.serviceStatus !== 'ACTIVE') {
-        throw NotFound(
-          'REGISTRAR_NOT_FOUND',
-          'No serving registrar with that staff code in this registry.'
-        );
+
+      const judge = await Judge.findOne({ judgeCode: acceptedBy }).lean();
+      if (!judge || judge.serviceStatus !== 'ACTIVE') {
+        throw NotFound('JUDGE_NOT_FOUND', 'No serving judge with that code.');
       }
-      if (String(registrar.courtId) !== String(listing.courtId)) {
+
+      // Same validity window as the roster lookup above: a judge who has rotated out
+      // of this court cannot take an advocate on record in it, and the register is
+      // where that is decided rather than anywhere in Lexx.
+      const now = new Date();
+      const roster = await Roster.findOne({
+        judgeId: judge._id,
+        courtId: listing.courtId,
+        validFrom: { $lte: now },
+        $or: [{ validTo: null }, { validTo: { $gte: now } }],
+      }).lean();
+      if (!roster) {
         throw Conflict(
-          'REGISTRAR_OUT_OF_COURT_SCOPE',
-          'That registrar does not serve the court this case is listed before.'
+          'JUDGE_OUT_OF_COURT_SCOPE',
+          'No roster order in force places that judge in the court this case is listed before.'
         );
       }
 
@@ -295,14 +403,13 @@ export function directoryRouter(config = {}) {
         );
       }
 
-      const now = new Date();
       const created = await Vakalatnama.create({
         cnrNumber,
         advocateEnrolmentNo,
         appearingFor,
         partyName,
         filedOn: now,
-        acceptedByRegistrar: registrar.staffCode,
+        acceptedBy: judge.judgeCode,
         acceptedOn: now,
         status: 'ACCEPTED',
       });
@@ -310,13 +417,13 @@ export function directoryRouter(config = {}) {
       res.status(201).json({
         simulated: true,
         notice:
-          'Simulated registry filing. This stands in for a vakalatnama accepted in eCourts; it is not a filing of record.',
+          'Simulated court filing. This stands in for a vakalatnama accepted in eCourts; it is not a filing of record.',
         cnrNumber: created.cnrNumber,
         advocateEnrolmentNo: created.advocateEnrolmentNo,
         appearingFor: created.appearingFor,
         partyName: created.partyName,
         filedOn: created.filedOn,
-        acceptedByRegistrar: created.acceptedByRegistrar,
+        acceptedBy: created.acceptedBy,
         acceptedOn: created.acceptedOn,
         status: created.status,
       });

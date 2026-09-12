@@ -49,6 +49,8 @@ import {
   RESOURCE_TYPE,
   ACTION,
   DECISION,
+  TRIAGE_PRIORITY_ORDER,
+  TRIAGE_DISCLAIMER,
 } from '../models/enums.js';
 import { appendEvent, verifyChain } from '../services/ledger.js';
 import { generateDek, wrapDek, unwrapDek } from '../services/envelope.js';
@@ -64,7 +66,7 @@ import { validateUpload } from '../services/fileType.js';
 import { triageEvidence } from '../services/triage.js';
 import { merkleRoot, merkleProof, verifyProof } from '../services/merkle.js';
 import { verifyEcdsaP256, sha256Hex, randomBase64Url } from '../config/crypto.js';
-import { materialiseScopeFilter } from '../services/accessResolver.js';
+import { materialiseScopeFilter, seesTriage } from '../services/accessResolver.js';
 import { writeAudit } from '../middleware/audit.js';
 import { BadRequest, NotFound, Forbidden } from '../utils/errors.js';
 import { loggerFor } from '../utils/logger.js';
@@ -301,12 +303,31 @@ export async function uploadEvidence(req, res, next) {
         parsedMetadata = {}; // malformed client metadata is ignored, never fatal
       }
     }
+    /**
+     * Every exhibit gets a review priority, automatically, here — the one place a
+     * file becomes a record. Nobody is asked for it and nobody can supply it: the
+     * request has no field for a priority, and there is no endpoint that sets one.
+     *
+     * The model reads the case as well as the file. Both facts come from the server
+     * (the case was loaded by the resolver; the ingest results were computed above),
+     * so nothing a client could send changes where an exhibit lands in the queue.
+     */
     const triage = triageEvidence({
       mimeType: typeCheck.mimeType,
       sizeBytes: req.file.size,
       metadata: parsedMetadata,
       originalFilename: req.file.originalname,
       capturedAt: body.capturedAt ?? null,
+      kind: EVIDENCE_KIND.DIGITAL,
+      sourceType: body.sourceType,
+      // Both are true by the time we reach here — an upload that failed either check
+      // was refused above and never became a record. They are passed anyway so the
+      // model has one shape, and so a future ingest path that quarantines rather than
+      // refuses lands at CRITICAL without a second code path deciding that.
+      hashMatched: true,
+      signatureValid: true,
+      sensitivityClass: caseDoc.sensitivityClass,
+      maxPunishmentYears: caseDoc.maxPunishmentYears,
     });
 
     // ---- 6. the immutable record ----
@@ -426,10 +447,30 @@ export async function uploadEvidence(req, res, next) {
 
 // ================================================================== reads ====
 
+/**
+ * Middleware for GET /api/evidence/by-code/:code — locates the exhibit and stops.
+ * No access decision here; `authorize` runs next on the id it found.
+ */
+export async function evidenceIdFromCode(req, res, next) {
+  try {
+    const code = String(req.params.code ?? '').trim().toUpperCase();
+    if (!/^EX-[0-9]{1,12}-[0-9]{1,6}$/.test(code)) {
+      throw NotFound('RESOURCE_NOT_FOUND', 'Resource not found');
+    }
+    const found = await Evidence.findOne({ exhibitCode: code }).select('_id').lean();
+    if (!found) throw NotFound('RESOURCE_NOT_FOUND', 'Resource not found');
+    req.lookupEvidenceId = String(found._id);
+    return next();
+  } catch (err) {
+    return next(err);
+  }
+}
+
 /** GET /api/evidence/:id — metadata only. */
 export async function getEvidence(req, res) {
   const e = { ...req.resource };
   delete e.encryption; // never expose wrapped keys or IVs
+  if (!seesTriage(req.user)) delete e.triage; // never disclosed to a party
   return res.json({ evidence: e });
 }
 
@@ -454,7 +495,7 @@ export async function listEvidence(req, res, next) {
     }
 
     const items = await Evidence.find(query)
-      .select('-encryption')
+      .select(seesTriage(req.user) ? '-encryption' : '-encryption -triage')
       .sort({ createdAt: -1 })
       .limit(Math.min(Number(req.query.limit) || 100, 200))
       .lean();
@@ -771,6 +812,25 @@ export async function streamEvidence(req, res, next) {
 
 // ================================================================= triage ====
 
+/**
+ * The `$switch` that turns a priority string into a sortable rank.
+ *
+ * A Mongo sort on the string orders CRITICAL, HIGH, LOW, MEDIUM — alphabetically,
+ * which is not the order anybody means — and a `$limit` after that would drop MEDIUM
+ * before LOW. The rank has to exist before the sort, so it is computed here and
+ * derived from TRIAGE_PRIORITY_ORDER rather than written out by hand: adding a band
+ * to the enum must not silently leave a queue sorting it last.
+ */
+export const priorityRankStage = (field = '$triage.priority') => ({
+  $switch: {
+    branches: TRIAGE_PRIORITY_ORDER.map((priority, rank) => ({
+      case: { $eq: [field, priority] },
+      then: rank,
+    })),
+    default: TRIAGE_PRIORITY_ORDER.length,
+  },
+});
+
 /** GET /api/evidence/queue/triage — sorted by review priority. */
 export async function triageQueue(req, res, next) {
   try {
@@ -780,6 +840,9 @@ export async function triageQueue(req, res, next) {
     // the disclosure view is careful never to show them.
     const scope = await materialiseScopeFilter(req.user, RESOURCE_TYPE.EVIDENCE);
     if (!scope) return res.json({ queue: [], disclaimer: null });
+    // The queue IS triage. A party is never shown it — not even the order it puts
+    // their served exhibits in.
+    if (!seesTriage(req.user)) return res.json({ queue: [], disclaimer: null });
 
     // Rank, sort and bound in the database.
     //
@@ -791,20 +854,7 @@ export async function triageQueue(req, res, next) {
     const limit = Math.min(Number(req.query.limit) || 100, 200);
     const items = await Evidence.aggregate([
       { $match: { ...scope, 'triage.priority': { $ne: null } } },
-      {
-        $addFields: {
-          __rank: {
-            $switch: {
-              branches: [
-                { case: { $eq: ['$triage.priority', 'HIGH'] }, then: 0 },
-                { case: { $eq: ['$triage.priority', 'MEDIUM'] }, then: 1 },
-                { case: { $eq: ['$triage.priority', 'LOW'] }, then: 2 },
-              ],
-              default: 9,
-            },
-          },
-        },
-      },
+      { $addFields: { __rank: priorityRankStage() } },
       { $sort: { __rank: 1, createdAt: -1 } },
       { $limit: limit },
       {
@@ -820,7 +870,7 @@ export async function triageQueue(req, res, next) {
       // The label and the disclaimer travel with the data, so no client can render
       // this as anything other than what it is.
       uiLabel: 'Review Priority',
-      disclaimer: items[0]?.triage?.disclaimer ?? null,
+      disclaimer: items[0]?.triage?.disclaimer ?? TRIAGE_DISCLAIMER,
     });
   } catch (err) {
     return next(err);
@@ -837,4 +887,5 @@ export default {
   createStreamToken,
   streamEvidence,
   triageQueue,
+  priorityRankStage,
 };

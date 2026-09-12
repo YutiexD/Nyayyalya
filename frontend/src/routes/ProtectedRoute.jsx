@@ -10,7 +10,7 @@
  * call they make. Nothing here is a security boundary.
  *
  * What it IS for: a stale tab should show a sign-in screen, not a wall of 401s; and a
- * malkhana custodian who follows a link to the court view should land somewhere they
+ * station officer who follows a link to the court view should land somewhere they
  * can work rather than on a page where every panel is a denial. Both are usability
  * problems, and both are worth fixing in the client.
  */

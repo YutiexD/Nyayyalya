@@ -48,3 +48,5 @@ Thumbs.db
 
 # Reference copy of the pre-React client, kept during the rewrite
 frontend-legacy/
+PRESENTATION.md 
+WORKFLOW.md 

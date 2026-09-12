@@ -2,7 +2,7 @@
  * Physical custody: QR labels, the two-scan handshake, and gap detection.
  *
  * Run against the REAL directory services, because the identities that hold custody
- * — an IO, a malkhana custodian, an SHO — are directory facts, and a stubbed
+ * — an IO, the officer who keeps the store, an SHO — are directory facts, and a stubbed
  * directory would let a test pass while the real scoping was broken.
  *
  * The claims under test, in one line each:
@@ -40,7 +40,7 @@ let server;
 // Seeded by the directory services.
 const IO = 'UP-GZB-4471';
 const SHO = 'UP-GZB-4402';
-const MALKHANA = 'UP-GZB-4455';
+const STORE = 'UP-GZB-4455';
 const DISTRICT_SP = 'UP-GZB-9001';
 const EXAMINER = 'FSL-LKO-0091';
 const ADVOCATE_NOT_ON_RECORD = 'UP/9876/2019';
@@ -125,9 +125,9 @@ const accept = (session, itemId, payload) =>
 // ================================================== BEAT 4: the two scans ====
 
 describe('the two-scan custody handshake', () => {
-  it('moves an exhibit from the seizing officer to the malkhana', async () => {
+  it('moves an exhibit from the seizing officer into the station store', async () => {
     const { io, caseId } = await openCase();
-    const malkhana = await activateUser(server, MALKHANA);
+    const store = await activateUser(server, STORE);
     const { item } = await seizeItem(io, caseId);
 
     expect(item.status).toBe(CUSTODY_STATUS.SEIZED);
@@ -135,8 +135,8 @@ describe('the two-scan custody handshake', () => {
 
     // ---- scan one: the holder proposes the handover ----
     const initiated = await initiate(io, item.id, {
-      toUserId: malkhana.user.userId,
-      reason: 'Deposit into malkhana rack B14',
+      toUserId: store.user.userId,
+      reason: 'Deposit into station store rack B14',
       toStatus: CUSTODY_STATUS.IN_STORE,
       toLocation: CUSTODY_LOCATION.MALKHANA,
     });
@@ -151,7 +151,7 @@ describe('the two-scan custody handshake', () => {
     expect(stored.pendingTransfer.tokenHash).toMatch(/^[0-9a-f]{64}$/);
 
     // ---- scan two: the receiver accepts ----
-    const accepted = await accept(malkhana, item.id, {
+    const accepted = await accept(store, item.id, {
       transferToken: initiated.body.transferToken,
       sealIntact: true,
     });
@@ -159,29 +159,29 @@ describe('the two-scan custody handshake', () => {
     expect(accepted.status).toBe(200);
     expect(accepted.body.item.status).toBe(CUSTODY_STATUS.IN_STORE);
     expect(accepted.body.item.currentLocation).toBe(CUSTODY_LOCATION.MALKHANA);
-    expect(accepted.body.item.currentHolderUserId).toBe(malkhana.user.userId);
+    expect(accepted.body.item.currentHolderUserId).toBe(store.user.userId);
     expect(accepted.body.item.pendingTransfer).toBeNull();
     expect(accepted.body.frozen).toBe(false);
   });
 
   it('refuses a replayed transfer token', async () => {
     const { io, caseId } = await openCase();
-    const malkhana = await activateUser(server, MALKHANA);
+    const store = await activateUser(server, STORE);
     const { item } = await seizeItem(io, caseId);
 
     const initiated = await initiate(io, item.id, {
-      toUserId: malkhana.user.userId,
-      reason: 'Deposit into malkhana',
+      toUserId: store.user.userId,
+      reason: 'Deposit into the station store',
       toStatus: CUSTODY_STATUS.IN_STORE,
       toLocation: CUSTODY_LOCATION.MALKHANA,
     });
     const token = initiated.body.transferToken;
 
-    const first = await accept(malkhana, item.id, { transferToken: token, sealIntact: true });
+    const first = await accept(store, item.id, { transferToken: token, sealIntact: true });
     expect(first.status).toBe(200);
 
     // The same token, a second time. The handshake is consumed atomically.
-    const replay = await accept(malkhana, item.id, { transferToken: token, sealIntact: true });
+    const replay = await accept(store, item.id, { transferToken: token, sealIntact: true });
     expect(replay.status).toBe(403);
     expect(replay.body.error.code).toBe('TRANSFER_TOKEN_INVALID');
 
@@ -192,12 +192,12 @@ describe('the two-scan custody handshake', () => {
 
   it('refuses an expired transfer token', async () => {
     const { io, caseId } = await openCase();
-    const malkhana = await activateUser(server, MALKHANA);
+    const store = await activateUser(server, STORE);
     const { item } = await seizeItem(io, caseId);
 
     const initiated = await initiate(io, item.id, {
-      toUserId: malkhana.user.userId,
-      reason: 'Deposit into malkhana',
+      toUserId: store.user.userId,
+      reason: 'Deposit into the station store',
       toStatus: CUSTODY_STATUS.IN_STORE,
       toLocation: CUSTODY_LOCATION.MALKHANA,
     });
@@ -208,7 +208,7 @@ describe('the two-scan custody handshake', () => {
       { $set: { 'pendingTransfer.expiresAt': new Date(Date.now() - 1000) } }
     );
 
-    const res = await accept(malkhana, item.id, {
+    const res = await accept(store, item.id, {
       transferToken: initiated.body.transferToken,
       sealIntact: true,
     });
@@ -221,13 +221,13 @@ describe('the two-scan custody handshake', () => {
 
   it('refuses acceptance by anyone but the intended recipient', async () => {
     const { io, caseId } = await openCase();
-    const malkhana = await activateUser(server, MALKHANA);
+    const store = await activateUser(server, STORE);
     const sho = await activateUser(server, SHO);
     const { item } = await seizeItem(io, caseId);
 
     const initiated = await initiate(io, item.id, {
-      toUserId: malkhana.user.userId,
-      reason: 'Deposit into malkhana',
+      toUserId: store.user.userId,
+      reason: 'Deposit into the station store',
       toStatus: CUSTODY_STATUS.IN_STORE,
       toLocation: CUSTODY_LOCATION.MALKHANA,
     });
@@ -248,11 +248,11 @@ describe('the two-scan custody handshake', () => {
   it('refuses a transfer initiated by someone who is not holding the item', async () => {
     const { io, caseId } = await openCase();
     const sho = await activateUser(server, SHO);
-    const malkhana = await activateUser(server, MALKHANA);
+    const store = await activateUser(server, STORE);
     const { item } = await seizeItem(io, caseId);
 
     const res = await initiate(sho, item.id, {
-      toUserId: malkhana.user.userId,
+      toUserId: store.user.userId,
       reason: 'Supervisor moving it on the officer’s behalf',
       toStatus: CUSTODY_STATUS.IN_STORE,
       toLocation: CUSTODY_LOCATION.MALKHANA,
@@ -325,9 +325,9 @@ describe('a QR label identifies an item and authorises nothing (ADR-011)', () =>
 // ============================================== the custody state machine ====
 
 describe('the custody state machine', () => {
-  it('refuses a jump that skips the malkhana', async () => {
+  it('refuses a jump that skips the station store', async () => {
     const { io, caseId } = await openCase();
-    const examinerHolder = await activateUser(server, MALKHANA);
+    const examinerHolder = await activateUser(server, STORE);
     const { item } = await seizeItem(io, caseId);
 
     const res = await initiate(io, item.id, {
@@ -339,28 +339,28 @@ describe('the custody state machine', () => {
 
     expect(res.status).toBe(409);
     expect(res.body.error.code).toBe('ILLEGAL_CUSTODY_TRANSITION');
-    // Everything routes through IN_STORE — that is what a malkhana is for.
+    // Everything routes through IN_STORE — that is what a store is for.
     expect(res.body.error.details.via).toContain(CUSTODY_STATUS.IN_STORE);
   });
 
   it('permits the lawful route through the store', async () => {
     const { io, caseId } = await openCase();
-    const malkhana = await activateUser(server, MALKHANA);
+    const store = await activateUser(server, STORE);
     const sho = await activateUser(server, SHO);
     const { item } = await seizeItem(io, caseId);
 
     const toStore = await initiate(io, item.id, {
-      toUserId: malkhana.user.userId,
+      toUserId: store.user.userId,
       reason: 'Deposit',
       toStatus: CUSTODY_STATUS.IN_STORE,
       toLocation: CUSTODY_LOCATION.MALKHANA,
     });
-    await accept(malkhana, item.id, {
+    await accept(store, item.id, {
       transferToken: toStore.body.transferToken,
       sealIntact: true,
     });
 
-    const toFsl = await initiate(malkhana, item.id, {
+    const toFsl = await initiate(store, item.id, {
       toUserId: sho.user.userId,
       reason: 'Carriage to State FSL, Lucknow',
       toStatus: CUSTODY_STATUS.AT_FSL,
@@ -382,18 +382,18 @@ describe('the custody state machine', () => {
 describe('a broken seal freezes custody', () => {
   it('records an integrity exception, freezes the item, and blocks the next transfer', async () => {
     const { io, caseId } = await openCase();
-    const malkhana = await activateUser(server, MALKHANA);
+    const store = await activateUser(server, STORE);
     const sho = await activateUser(server, SHO);
     const { item } = await seizeItem(io, caseId);
 
     const initiated = await initiate(io, item.id, {
-      toUserId: malkhana.user.userId,
-      reason: 'Deposit into malkhana',
+      toUserId: store.user.userId,
+      reason: 'Deposit into the station store',
       toStatus: CUSTODY_STATUS.IN_STORE,
       toLocation: CUSTODY_LOCATION.MALKHANA,
     });
 
-    const accepted = await accept(malkhana, item.id, {
+    const accepted = await accept(store, item.id, {
       transferToken: initiated.body.transferToken,
       sealIntact: false,
     });
@@ -412,7 +412,7 @@ describe('a broken seal freezes custody', () => {
     expect(exception.payload.reason).toBe('SEAL_BROKEN');
 
     // And the item cannot move again.
-    const next = await initiate(malkhana, item.id, {
+    const next = await initiate(store, item.id, {
       toUserId: sho.user.userId,
       reason: 'Carriage to FSL',
       toStatus: CUSTODY_STATUS.AT_FSL,
@@ -424,7 +424,7 @@ describe('a broken seal freezes custody', () => {
     // A scan still resolves the label — it just offers nothing to do.
     const scan = await auth(
       request(server).get(`/api/custody/scan/${encodeURIComponent(item.qrPayload)}`),
-      malkhana
+      store
     );
     expect(scan.status).toBe(200);
     expect(scan.body.item.frozen).toBe(true);
@@ -432,7 +432,7 @@ describe('a broken seal freezes custody', () => {
   });
 });
 
-// ========================================= the IO / malkhana separation ====
+// ======================================= the IO / store-keeper separation ====
 
 describe('the IO of a case cannot be the store keeper for its own evidence', () => {
   it('refuses at initiation when the IO would take the item into the store', async () => {
@@ -440,7 +440,7 @@ describe('the IO of a case cannot be the store keeper for its own evidence', () 
     const { item } = await seizeItem(io, caseId);
 
     const res = await initiate(io, item.id, {
-      // The officer booking their own case's exhibit into the malkhana, under
+      // The officer booking their own case's exhibit into the station store, under
       // their own custody. Seizing it was fine; storing it is not.
       toUserId: io.user.userId,
       reason: 'Keeping it in my own locker',
@@ -454,12 +454,12 @@ describe('the IO of a case cannot be the store keeper for its own evidence', () 
 
   it('refuses at acceptance when the case is reassigned mid-handover', async () => {
     const { io, caseId } = await openCase();
-    const malkhana = await activateUser(server, MALKHANA);
+    const store = await activateUser(server, STORE);
     const { item } = await seizeItem(io, caseId);
 
     const initiated = await initiate(io, item.id, {
-      toUserId: malkhana.user.userId,
-      reason: 'Deposit into malkhana',
+      toUserId: store.user.userId,
+      reason: 'Deposit into the station store',
       toStatus: CUSTODY_STATUS.IN_STORE,
       toLocation: CUSTODY_LOCATION.MALKHANA,
     });
@@ -468,9 +468,9 @@ describe('the IO of a case cannot be the store keeper for its own evidence', () 
     // The case is reassigned to the very person about to take the item into store.
     // The rule is about who ends up holding it, so it is re-checked here and not
     // only at initiation.
-    await Case.updateOne({ _id: caseId }, { $set: { ioUserId: malkhana.user.userId } });
+    await Case.updateOne({ _id: caseId }, { $set: { ioUserId: store.user.userId } });
 
-    const res = await accept(malkhana, item.id, {
+    const res = await accept(store, item.id, {
       transferToken: initiated.body.transferToken,
       sealIntact: true,
     });
@@ -487,16 +487,16 @@ describe('the IO of a case cannot be the store keeper for its own evidence', () 
 describe('every custody movement is in the ledger', () => {
   it('writes creation, initiation and transfer, and the chain still verifies', async () => {
     const { io, caseId } = await openCase();
-    const malkhana = await activateUser(server, MALKHANA);
+    const store = await activateUser(server, STORE);
     const { item } = await seizeItem(io, caseId);
 
     const initiated = await initiate(io, item.id, {
-      toUserId: malkhana.user.userId,
-      reason: 'Deposit into malkhana rack B14',
+      toUserId: store.user.userId,
+      reason: 'Deposit into station store rack B14',
       toStatus: CUSTODY_STATUS.IN_STORE,
       toLocation: CUSTODY_LOCATION.MALKHANA,
     });
-    await accept(malkhana, item.id, {
+    await accept(store, item.id, {
       transferToken: initiated.body.transferToken,
       sealIntact: true,
     });
@@ -540,18 +540,18 @@ describe('every custody movement is in the ledger', () => {
 describe('gap detection reports what is wrong, not that something is', () => {
   it('finds an illegal state jump and a missing event, and leaves a good chain alone', async () => {
     const { io, caseId } = await openCase();
-    const malkhana = await activateUser(server, MALKHANA);
+    const store = await activateUser(server, STORE);
     const sho = await activateUser(server, SHO);
 
     // ---- a clean item: seized, then properly deposited ----
     const clean = await seizeItem(io, caseId, { description: 'Sealed CD-R of CCTV footage' });
     const initiated = await initiate(io, clean.item.id, {
-      toUserId: malkhana.user.userId,
+      toUserId: store.user.userId,
       reason: 'Deposit',
       toStatus: CUSTODY_STATUS.IN_STORE,
       toLocation: CUSTODY_LOCATION.MALKHANA,
     });
-    await accept(malkhana, clean.item.id, {
+    await accept(store, clean.item.id, {
       transferToken: initiated.body.transferToken,
       sealIntact: true,
     });
@@ -646,13 +646,15 @@ describe('input validation and jurisdiction', () => {
     expect(await CustodyItem.countDocuments()).toBe(0);
   });
 
-  it('refuses a malkhana custodian the right to open a custody item', async () => {
-    // Custodians hold items; they do not create the record of a seizure they did
-    // not make. The capability check lives in the resolver, not here.
+  it('refuses a station officer the right to book in another officer’s seizure', async () => {
+    // Keeping the store is not the same as making the record of a seizure. The
+    // officer who keeps the store holds items; they do not author the entry for a
+    // seizure they did not make, on a case that is not theirs. The capability check
+    // lives in the resolver, not here.
     const { caseId } = await openCase();
-    const malkhana = await activateUser(server, MALKHANA);
+    const store = await activateUser(server, STORE);
 
-    const res = await auth(request(server).post('/api/custody/items'), malkhana).send({
+    const res = await auth(request(server).post('/api/custody/items'), store).send({
       caseId,
       description: 'Item booked in by the store keeper',
       sealNumber: 'SEAL-GZB-2',
@@ -675,6 +677,9 @@ describe('input validation and jurisdiction', () => {
  * `custody_items` has no `ioUserId` field — only a case does — so the query could
  * never match a single document. An investigating officer's custody view was
  * permanently empty, and silently so: a valid 200 with nothing in it.
+ *
+ * The register is now the STATION's, which is what a store is; the filter is
+ * `stationCode`, a field the collection really has.
  */
 describe('GET /api/custody/items — the custody register', () => {
   it('lists the items an IO seized on their own case', async () => {
@@ -688,12 +693,12 @@ describe('GET /api/custody/items — the custody register', () => {
     expect(res.body.items[0].itemCode).toMatch(/^IT-/);
   });
 
-  it('lets the malkhana custodian see the items at their own station', async () => {
+  it('lets another officer at the station see what is in the station store', async () => {
     const { io, caseId } = await openCase();
     await seizeItem(io, caseId);
 
-    const custodian = await activateUser(server, MALKHANA);
-    const res = await auth(request(server).get('/api/custody/items'), custodian);
+    const keeper = await activateUser(server, STORE);
+    const res = await auth(request(server).get('/api/custody/items'), keeper);
     expect(res.status).toBe(200);
     expect(res.body.total).toBe(1);
   });
@@ -749,18 +754,21 @@ describe('GET /api/custody/items — the custody register', () => {
   });
 
   /**
-   * The one that matters. `scopeFilterFor(IO, CUSTODY_ITEM)` returned
-   * `{ ioUserId, stationCode }`, and `custody_items` has no `ioUserId` path —
-   * only a case does. Because `shared/mongo.js` sets `strictQuery: true`, Mongoose
-   * does not error on that: it SILENTLY DROPS the unknown condition, leaving
-   * `{ stationCode }`.
+   * The custody register is the STATION's register, and the scoping term must be a
+   * field the collection actually has.
    *
-   * So the term that restricts an officer to their own cases vanished, and an IO
-   * listing custody items got every item at their station — including items booked
-   * on another officer's investigation. Not an empty list, which someone would have
-   * noticed: a plausible, over-broad one.
+   * The rule changed with the malkhana custodian: an article in the station store is
+   * kept by the station, so any officer posted there can see it, receive it and hand
+   * it on. What has NOT changed is the trap underneath. `scopeFilterFor` once
+   * returned `{ ioUserId, stationCode }` for custody, and `custody_items` has no
+   * `ioUserId` path — only a case does. With `strictQuery: true`, Mongoose does not
+   * error on that; it SILENTLY DROPS the unknown condition. If the same mistake were
+   * made with `stationCode`, the register would quietly widen to every station in the
+   * country, and it would look plausible rather than empty.
+   *
+   * So: everything at my station, and nothing beyond it.
    */
-  it('does NOT show an IO custody items from another officer’s case at the same station', async () => {
+  it('shows an officer the whole station register, and nothing from another station', async () => {
     const { io, caseId } = await openCase();
     await seizeItem(io, caseId);
 
@@ -792,9 +800,76 @@ describe('GET /api/custody/items — the custody register', () => {
       createdBy: new mongoose.Types.ObjectId(),
     });
 
+    // ...and a third, at a DIFFERENT station, which must never appear.
+    const farCase = await Case.create({
+      firNumber: '0888/2026',
+      firDate: new Date(),
+      title: 'Another station entirely',
+      stationCode: 'UP-GZB-OTHER',
+      districtCode: 'UP-GZB',
+      stateCode: 'UP',
+      maxPunishmentYears: 3,
+      ioUserId: new mongoose.Types.ObjectId(),
+      ioAuthorityId: 'UP-GZB-0001',
+      createdBy: new mongoose.Types.ObjectId(),
+    });
+    await CustodyItem.create({
+      itemCode: 'IT-08882026-001',
+      caseId: farCase._id,
+      description: 'Another station’s item',
+      sealNumber: 'SEAL-GZB-80001',
+      sealIntact: true,
+      stationCode: 'UP-GZB-OTHER',
+      districtCode: 'UP-GZB',
+      status: CUSTODY_STATUS.SEIZED,
+      currentLocation: CUSTODY_LOCATION.FIELD,
+      currentHolderUserId: new mongoose.Types.ObjectId(),
+      qrPayload: 'demo-qr-payload-not-used-by-this-test',
+      createdBy: new mongoose.Types.ObjectId(),
+    });
+
     const res = await auth(request(server).get('/api/custody/items'), io);
     expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect(res.body.total, 'the IO must see only their own case’s items').toBe(1);
-    expect(res.body.items.map((i) => i.itemCode)).not.toContain('IT-07772026-001');
+
+    const codes = res.body.items.map((i) => i.itemCode);
+    // The station's register: both items booked at UP-GZB-KVN, whoever is running
+    // the case they belong to.
+    expect(codes, 'the station register is station-wide').toContain('IT-07772026-001');
+    // But the station boundary is real, and the term that expresses it is not silently
+    // dropped.
+    expect(codes, 'another station’s store is not this officer’s business').not.toContain(
+      'IT-08882026-001'
+    );
+    expect(res.body.total).toBe(2);
+  });
+});
+
+// ============================================== who can receive it next =====
+
+describe('GET /api/custody/items/:id/recipients — named receivers, not ids', () => {
+  it('offers another station officer for the store, and never the IO as its own store keeper', async () => {
+    const { io, caseId } = await openCase();
+    await activateUser(server, STORE);
+    const { item } = await seizeItem(io, caseId);
+
+    const res = await auth(request(server).get(`/api/custody/items/${item.id}/recipients`), io);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.nextStates).toEqual([CUSTODY_STATUS.IN_STORE]);
+
+    const byId = new Map(res.body.candidates.map((c) => [c.authorityId, c]));
+    expect(byId.get(STORE)?.forStates).toEqual([CUSTODY_STATUS.IN_STORE]);
+    // The officer running the case is never offered as the keeper of its own evidence.
+    expect(byId.has(IO)).toBe(false);
+  });
+
+  it('carries the FIR, the holder and the scan link on every register row', async () => {
+    const { io, caseId } = await openCase();
+    const { item, body } = await seizeItem(io, caseId);
+
+    expect(item.firNumber).toBe(FIR);
+    expect(item.currentHolder.authorityId).toBe(IO);
+    expect(new URL(item.labelUrl).pathname).toBe('/scan');
+    expect(new URL(item.labelUrl).searchParams.get('label')).toBe(body.qr.payload);
+    expect(body.qr.printable.sealNumber).toBe('SEAL-GZB-88231');
   });
 });
