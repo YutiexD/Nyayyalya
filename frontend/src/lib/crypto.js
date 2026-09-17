@@ -34,10 +34,10 @@
  * unexportable.
  */
 
-const DB_NAME = 'lexx';
+const DB_NAME = 'nyayyalya';
 const DB_VERSION = 1;
 const STORE = 'keys';
-const KEYPAIR_ID = 'lexx_keypair';
+const KEYPAIR_ID = 'nyayyalya_keypair';
 
 const ALGORITHM = Object.freeze({ name: 'ECDSA', namedCurve: 'P-256' });
 const SIGN_PARAMS = Object.freeze({ name: 'ECDSA', hash: 'SHA-256' });

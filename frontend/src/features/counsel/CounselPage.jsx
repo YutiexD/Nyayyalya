@@ -12,8 +12,8 @@
  *
  * ## The two boundaries, both deliberate, both visible
  *
- * **Being on record** is a fact of the COURT record, not of Lexx. A vakalatnama the
- * court accepts, or a legal aid order, puts an advocate on record; Lexx mirrors that
+ * **Being on record** is a fact of the COURT record, not of Nyayyalya. A vakalatnama the
+ * court accepts, or a legal aid order, puts an advocate on record; Nyayyalya mirrors that
  * and can neither create nor extend it. An empty case list is the access policy
  * answering, not an empty database.
  *

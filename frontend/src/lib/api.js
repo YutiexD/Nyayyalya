@@ -18,9 +18,9 @@
  * understand is a bug, not a security feature.
  */
 
-const ACCESS_KEY = 'lexx.access';
-const REFRESH_KEY = 'lexx.refresh';
-const SESSION_KEY = 'lexx.session';
+const ACCESS_KEY = 'nyayyalya.access';
+const REFRESH_KEY = 'nyayyalya.refresh';
+const SESSION_KEY = 'nyayyalya.session';
 
 let accessToken = null;
 let refreshInFlight = null;
@@ -148,7 +148,7 @@ export const REASON_TEXT = Object.freeze({
     'The investigating officer cannot be the store keeper for evidence in their own case.',
   RESOURCE_NOT_FOUND: 'No such record, or none you are entitled to see.',
   NO_MATCHING_POLICY: 'No access policy covers this combination of role and record.',
-  USER_NOT_ACTIVE: 'This account is not active in Lexx.',
+  USER_NOT_ACTIVE: 'This account is not active in Nyayyalya.',
   AUDIT_NOT_PERMITTED: 'Your role cannot read the audit feed.',
   AUDIT_UNAVAILABLE:
     'This action is refused because the audit trail cannot currently be written. Serving disclosure and filing a forensic report are not permitted to happen unrecorded. Tell an operator, and try again once /readyz reports the audit writer healthy.',
@@ -159,13 +159,13 @@ export const REASON_TEXT = Object.freeze({
 
   // --- identity and session ---
   IDENTITY_NOT_VERIFIED:
-    'This identity is not present, or not active, in its authority directory. Lexx cannot create an account that the directory does not vouch for.',
+    'This identity is not present, or not active, in its authority directory. Nyayyalya cannot create an account that the directory does not vouch for.',
   IDENTITY_NOT_IN_DIRECTORY: 'No such identifier exists in the authority directory.',
   IDENTITY_NOT_ACTIVE: 'The directory holds this identity but does not show it as active.',
   DIRECTORY_REVERIFICATION_FAILED:
     'Your authority record no longer permits access. A transfer, suspension or roster change removes access at the next sign-in.',
   DIRECTORY_UNAVAILABLE:
-    'The authority directory is unreachable, so access cannot be verified. Lexx fails closed rather than guessing.',
+    'The authority directory is unreachable, so access cannot be verified. Nyayyalya fails closed rather than guessing.',
   SELF_REGISTRATION_DISABLED: 'Accounts are provisioned by your authority directory.',
   ACCOUNT_EXISTS: 'This account is already activated. Sign in instead.',
   ACCOUNT_NOT_ACTIVATED: 'This account has not been activated yet.',
@@ -194,7 +194,7 @@ export const REASON_TEXT = Object.freeze({
 
   // --- representation (vakalatnama) ---
   CNR_NOT_FOUND:
-    'No case before a court carries that CNR number in Lexx. A vakalatnama can only be filed in a case that has been committed to a court.',
+    'No case before a court carries that CNR number in Nyayyalya. A vakalatnama can only be filed in a case that has been committed to a court.',
   VAKALATNAMA_ALREADY_FILED:
     'A filing for this appearance is already before the court. Wait for it to be ruled on.',
   ALREADY_ON_RECORD: 'You are already on record for this party in this case.',
@@ -202,7 +202,7 @@ export const REASON_TEXT = Object.freeze({
   DOCUMENT_HASH_MISMATCH:
     'The document that arrived does not hash to what your browser computed, so the filing was refused.',
   COURT_REGISTER_REFUSED:
-    'The court register did not record this appearance, so nothing changed in Lexx. The filing is still pending.',
+    'The court register did not record this appearance, so nothing changed in Nyayyalya. The filing is still pending.',
   VAKALATNAMA_NOT_PENDING: 'This filing has already been ruled on.',
   ADVOCATE_NOT_ACTIVE: 'The filing advocate no longer holds an active account.',
 
@@ -225,7 +225,7 @@ export const REASON_TEXT = Object.freeze({
   NOT_THE_REPORTING_EXAMINER: 'Part B may only be signed by the examiner who filed the report.',
 
   // --- custody ---
-  INVALID_OR_FORGED_TAG: 'That label does not carry a valid Lexx signature. It is not a label this system printed.',
+  INVALID_OR_FORGED_TAG: 'That label does not carry a valid Nyayyalya signature. It is not a label this system printed.',
   TRANSFER_TOKEN_INVALID: 'That handover code is not valid for this item.',
   TRANSFER_TOKEN_EXPIRED: 'That handover code has expired. The holder must start the handover again.',
   TRANSFER_WRONG_RECIPIENT: 'This handover was addressed to someone else.',

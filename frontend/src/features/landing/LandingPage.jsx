@@ -5,11 +5,6 @@
  * exactly four, state who is accountable for each, and then say plainly what the system
  * does NOT claim — because the credibility of an evidence register in front of a court
  * comes from the boundary of its claims, not their size.
- *
- * The motion is there to guide reading order and nothing else: the headline arrives
- * first, the flow diagram animates the path a file actually takes, and the figures
- * count because they are counts. Nothing loops except the beam, and the beam is a
- * diagram.
  */
 import { useNavigate } from 'react-router-dom';
 import {
@@ -30,6 +25,7 @@ import {
 
 import { Button } from '@/components/ui/button';
 import { ShimmerButton } from '@/components/ui/shimmer-button';
+import { LenticularCarousel } from '@/components/ui/lenticular-card';
 
 import {
   Backdrop,
@@ -38,7 +34,6 @@ import {
   FeatureCard,
   PipelineBeam,
 } from '@/components/common/Premium';
-import { useReveal } from '@/hooks/useGsap';
 
 /**
  * The four claims. Each names the mechanism and, in `limit`, what it does not prove —
@@ -63,7 +58,7 @@ const CLAIMS = [
   {
     icon: FileSearch,
     title: 'Disclosure scoped per exhibit',
-    body: 'An advocate sees the set served on them and nothing else. Access follows the court record — a vakalatnama accepted by the court, or a legal aid order — which Lexx mirrors and cannot create. Material outside the served set is refused by reason code, and the refusal is logged.',
+    body: 'An advocate sees the set served on them and nothing else. Access follows the court record — a vakalatnama accepted by the court, or a legal aid order — which Nyayyalya mirrors and cannot create. Material outside the served set is refused by reason code, and the refusal is logged.',
     limit:
       'Completeness of the case file. It proves what was served on whom; what was withheld is a decision the court ruled on, not one the system made.',
   },
@@ -85,97 +80,83 @@ const FLOW = [
 
 export default function LandingPage() {
   const navigate = useNavigate();
-  const scope = useReveal();
-
   return (
-    <div ref={scope}>
+    <div>
       {/* --------------------------------------------------------------- hero */}
-      <section className="relative overflow-hidden">
+      <section className="-mt-20 relative overflow-hidden">
         <Backdrop />
-        <div className="container relative flex flex-col items-center py-24 text-center sm:py-32">
-          <div className="will-reveal">
-            <Eyebrow>Digital evidence register · Indian criminal justice chain</Eyebrow>
+        <div className="container relative flex flex-col items-center pb-28 pt-32 text-center sm:pb-36 sm:pt-36">
+          <Eyebrow>Digital evidence register · Indian criminal justice chain</Eyebrow>
+
+          <h1 className="mt-6 max-w-4xl text-balance text-display-sm sm:text-display lg:text-display-lg">
+            Evidence that can be checked,
+            <br />
+            <span className="text-gradient">not merely trusted.</span>
+          </h1>
+
+          <p className="mt-6 max-w-2xl text-balance text-base leading-relaxed text-muted-foreground sm:text-lg">
+            A register for digital evidence from the officer who seizes a device, through the
+            station store and the laboratory, to the court, the advocate on record and anyone holding
+            a printed certificate. Hashed and signed before a byte is sent. Nothing deleted, ever.
+          </p>
+
+          <div className="mt-9 flex flex-wrap items-center justify-center gap-3">
+            <ShimmerButton
+              onClick={() => navigate('/login')}
+              shimmerColor="#d4e9e2"
+              background="hsl(var(--primary))"
+              className="h-11 px-6 text-sm font-medium text-primary-foreground shadow-elev-2"
+            >
+              <ShieldCheck className="mr-2 size-4" />
+              Sign in
+            </ShimmerButton>
+            <Button
+              variant="outline"
+              size="lg"
+              className="h-11 rounded-full px-6"
+              onClick={() => navigate('/verify')}
+            >
+              <ScanSearch className="size-4" />
+              Public verifier
+              <ArrowRight className="size-4" />
+            </Button>
           </div>
 
-          <div className="will-reveal">
-            <h1 className="mt-6 max-w-4xl text-balance text-display-sm sm:text-display lg:text-display-lg">
-              Evidence that can be checked,
-              <br />
-              <span className="text-gradient">not merely trusted.</span>
-            </h1>
-          </div>
-
-          <div className="will-reveal">
-            <p className="mt-6 max-w-2xl text-balance text-base leading-relaxed text-muted-foreground sm:text-lg">
-              A register for digital evidence from the officer who seizes a device, through the
-              station store and the laboratory, to the court, the advocate on record and anyone holding
-              a printed certificate. Hashed and signed before a byte is sent. Nothing deleted, ever.
-            </p>
-          </div>
-
-          <div className="will-reveal">
-            <div className="mt-9 flex flex-wrap items-center justify-center gap-3">
-              <ShimmerButton
-                onClick={() => navigate('/login')}
-                shimmerColor="#a5b4fc"
-                background="hsl(var(--primary))"
-                className="h-11 px-6 text-sm font-medium text-primary-foreground shadow-elev-2"
-              >
-                <ShieldCheck className="mr-2 size-4" />
-                Sign in
-              </ShimmerButton>
-              <Button
-                variant="outline"
-                size="lg"
-                className="h-11 rounded-full px-6"
-                onClick={() => navigate('/verify')}
-              >
-                <ScanSearch className="size-4" />
-                Public verifier
-                <ArrowRight className="size-4" />
-              </Button>
-            </div>
-          </div>
-
-          <div className="will-reveal">
-            <p className="mt-5 text-xs text-muted-foreground">
-              The verifier needs no account. That is deliberate: a check you have to be let in to
-              run is not an independent check.
-            </p>
-          </div>
+          <p className="mt-5 text-xs text-muted-foreground">
+            The verifier needs no account. That is deliberate: a check you have to be let in to
+            run is not an independent check.
+          </p>
         </div>
 
         {/* The path a file takes, drawn. */}
         <div className="container relative pb-20">
-          <div className="will-reveal">
-            <div className="surface mx-auto max-w-4xl px-6 py-8 sm:px-10">
-              <PipelineBeam nodes={FLOW} />
-            </div>
+          <div className="surface mx-auto max-w-4xl px-6 py-8 sm:px-10">
+            <PipelineBeam nodes={FLOW} />
           </div>
         </div>
       </section>
 
       {/* -------------------------------------------------------------- stats */}
-      <section className="container -mt-6 pb-16">
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-          <StatCard className="will-reveal" label="Backend tests" value={453} icon={FileCheck2} tone="accent" caption="Unit, integration, an authorization matrix and a red-team suite that attacks the API assuming a hostile client." />
-          <StatCard className="will-reveal" label="Contract tests" value={36} icon={Link2} tone="accent" caption="Anti-replay, access control, Merkle proofs and second-preimage resistance on the anchoring contract." delay={0.1} />
-          <StatCard className="will-reveal" label="Independent checks" value={4} icon={ShieldCheck} tone="ok" caption="File, signature, ledger chain and anchored root — each recomputed from first principles, never read from a stored flag." delay={0.2} />
-          <StatCard className="will-reveal" label="Evidence bytes on-chain" value={0} icon={Ban} tone="ok" caption="Only a Merkle root is ever published. No file, no name, no case identifier, no AI score." delay={0.3} />
-        </div>
+      <section className="container -mt-6 pb-20">
+        <LenticularCarousel>
+          <StatCard className="" label="Backend tests" value={453} icon={FileCheck2} tone="accent" caption="Unit, integration, an authorization matrix and a red-team suite that attacks the API assuming a hostile client." />
+          <StatCard className="" label="Contract tests" value={36} icon={Link2} tone="accent" caption="Anti-replay, access control, Merkle proofs and second-preimage resistance on the anchoring contract." delay={0.1} />
+          <StatCard className="" label="Independent checks" value={4} icon={ShieldCheck} tone="ok" caption="File, signature, ledger chain and anchored root — each recomputed from first principles, never read from a stored flag." delay={0.2} />
+          <StatCard className="" label="Evidence bytes on-chain" value={0} icon={Ban} tone="ok" caption="Only a Merkle root is ever published. No file, no name, no case identifier, no AI score." delay={0.3} />
+        </LenticularCarousel>
       </section>
 
       {/* ------------------------------------------------------------ problem */}
-      <section className="container pb-16">
+      <section className="container pb-20">
         <div className="grid gap-10 lg:grid-cols-[1fr_1.4fr] lg:gap-16">
-          <div className="will-reveal">
+          <div>
             <Eyebrow>The problem</Eyebrow>
             <h2 className="mt-4 text-balance text-3xl font-semibold tracking-tight">
               Digital evidence is trivially copyable and trivially alterable, and the chain it
               travels along is long.
             </h2>
           </div>
-          <div className="will-reveal space-y-4 text-base leading-relaxed text-muted-foreground">
+          <div className="space-y-4 text-base leading-relaxed text-muted-foreground">
             <p>
               A phone seized at a scene passes through a seizing officer, a station store, one or more
               investigating officers, a forensic science laboratory, a court registry and counsel
@@ -185,16 +166,16 @@ export default function LandingPage() {
             <p>
               The Bharatiya Sakshya Adhiniyam asks for a certificate. The Bharatiya Nagarik
               Suraksha Sanhita asks that the accused be served the material. Neither says how
-              anyone checks. LEXX is the check — and it is built so that the checking does not
-              require trusting LEXX.
+              anyone checks. Nyayyalya is the check — and it is built so that the checking does not
+              require trusting Nyayyalya.
             </p>
           </div>
         </div>
       </section>
 
       {/* ------------------------------------------------------------- claims */}
-      <section className="container pb-16">
-        <div className="mb-8 will-reveal">
+      <section className="container pb-20">
+        <div className="mb-8">
           <Eyebrow>Four claims, each with its limit</Eyebrow>
           <h2 className="mt-4 text-balance text-3xl font-semibold tracking-tight">
             What the register proves — and, beside each, what it does not.
@@ -208,8 +189,7 @@ export default function LandingPage() {
               title={c.title}
               limit={c.limit}
               highlight={c.highlight}
-              className="will-reveal"
-            >
+                         >
               {c.body}
             </FeatureCard>
           ))}
@@ -217,8 +197,8 @@ export default function LandingPage() {
       </section>
 
       {/* ------------------------------------------------------ not claimed */}
-      <section className="container pb-16">
-        <div className="surface will-reveal relative overflow-hidden border-gradient p-8 sm:p-10">
+      <section className="container pb-20">
+        <div className="surface relative overflow-hidden border-gradient p-8 sm:p-10">
           <div className="grid gap-6 md:grid-cols-[auto_1fr] md:gap-10">
             <span className="grid size-12 place-items-center rounded-xl bg-bad-muted text-bad">
               <FlaskConical className="size-6" />
@@ -228,7 +208,7 @@ export default function LandingPage() {
                 What the system does not claim
               </h2>
               <p className="max-w-3xl text-base leading-relaxed text-muted-foreground">
-                No automated step in LEXX ever determines whether evidence is authentic. Machine
+                No automated step in Nyayyalya ever determines whether evidence is authentic. Machine
                 triage produces one field — a review priority for a human queue — labelled that
                 way in the API, in the database and on screen, never as a percentage and never
                 with the word “verified” beside it. An opinion on authenticity comes from a
@@ -237,7 +217,7 @@ export default function LandingPage() {
               </p>
               <p className="text-sm text-muted-foreground">
                 Three claims, three different people: the officer signed what they uploaded, the
-                laboratory examined it, the ledger proves nothing changed since. LEXX makes none
+                laboratory examined it, the ledger proves nothing changed since. Nyayyalya makes none
                 of these claims itself. It makes each one checkable.
               </p>
             </div>
@@ -248,11 +228,11 @@ export default function LandingPage() {
       {/* ---------------------------------------------------------------- cta */}
       <section className="relative overflow-hidden border-t">
         <Backdrop dots={false} />
-        <div className="container relative flex flex-col items-center gap-5 py-20 text-center">
-          <h2 className="will-reveal text-balance text-3xl font-semibold tracking-tight">
+        <div className="container relative flex flex-col items-center gap-5 py-24 text-center">
+          <h2 className="text-balance text-3xl font-semibold tracking-tight">
             Open the register, or check a certificate without one.
           </h2>
-          <div className="will-reveal flex flex-wrap items-center justify-center gap-3">
+          <div className="flex flex-wrap items-center justify-center gap-3">
             <Button size="lg" className="h-11 rounded-full px-6" onClick={() => navigate('/login')}>
               <ShieldCheck className="size-4" />
               Sign in

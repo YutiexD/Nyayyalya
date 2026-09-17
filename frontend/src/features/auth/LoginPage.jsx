@@ -4,7 +4,7 @@
  * Four steps, and the fourth is the one worth explaining.
  *
  *   1 IDENTIFY      — the directory is asked whether this identifier exists and is
- *                     active. Lexx holds no identities of its own, so this is the
+ *                     active. Nyayyalya holds no identities of its own, so this is the
  *                     only place a person can enter the system, and the role and
  *                     jurisdiction that come back are read-only facts.
  *   2 VERIFY PHONE  — a one-time code to the number the DIRECTORY holds, not to any
@@ -215,11 +215,11 @@ export default function LoginPage() {
   };
 
   return (
-    <section className="relative overflow-hidden">
+    <section className="-mt-20 relative overflow-hidden">
     <Backdrop />
     {/* The reveal scope is the whole grid, not the copy column: the sign-in card is a
         reveal target too, and a target outside the scope is never revealed. */}
-    <div ref={scope} className="container relative grid min-h-[calc(100vh-10rem)] items-center gap-10 py-12 lg:grid-cols-[1.05fr_1fr] lg:gap-16">
+    <div ref={scope} className="container relative grid min-h-[calc(100vh-10rem)] items-center gap-10 pb-16 pt-32 lg:grid-cols-[1.05fr_1fr] lg:gap-16">
       {/* The standing explanation. It is the same on every step, because it is the
           architectural claim the whole product rests on. */}
       <div className="space-y-6">
@@ -233,9 +233,9 @@ export default function LoginPage() {
             <span className="text-gradient">not merely trusted.</span>
           </h1>
         </div>
-        <div className="space-y-4 border-l-2 border-border pl-5 text-sm leading-relaxed text-muted-foreground">
+        <div className="space-y-4 border-l-2 border-primary/40 pl-5 text-sm leading-relaxed text-muted-foreground">
           <p className="will-reveal">
-            Lexx holds no identities of its own. Officers exist in the police directory, judges and court staff
+            Nyayyalya holds no identities of its own. Officers exist in the police directory, judges and court staff
             in the court directory, advocates and examiners in the Bar Council and
             FSL directory. We verify against them and can create none of them.
           </p>
@@ -265,13 +265,13 @@ export default function LoginPage() {
               {step === 4 && 'Register this device'}
             </CardTitle>
             <CardDescription>
-              {step === 1 && 'Lexx checks your authority directory before it does anything else.'}
+              {step === 1 && 'Nyayyalya checks your authority directory before it does anything else.'}
               {step === 2 &&
                 'The code goes to the phone number your authority directory holds — not to a number entered here.'}
               {step === 3 &&
                 (activating
                   ? 'Your role and jurisdiction are taken from the directory record. Nothing on this form can change them.'
-                  : 'Lexx re-checks your directory record on every sign-in, so a transfer, suspension or roster change takes effect immediately.')}
+                  : 'Nyayyalya re-checks your directory record on every sign-in, so a transfer, suspension or roster change takes effect immediately.')}
               {step === 4 &&
                 'You are signed in, but the signing key in this browser is not the one on record for your account.'}
             </CardDescription>

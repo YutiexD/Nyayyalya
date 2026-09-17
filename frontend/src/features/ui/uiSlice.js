@@ -8,18 +8,15 @@
 import { createSlice } from '@reduxjs/toolkit';
 import { sessionCleared, sessionEstablished } from '@/features/auth/authSlice';
 
-const THEME_KEY = 'lexx.theme';
+const THEME_KEY = 'nyayyalya.theme';
 
-/** Explicit choice first, then the OS preference. Never guess and never persist a guess. */
+/** Explicit choice first, otherwise default to light. */
 function initialTheme() {
   try {
     const stored = localStorage.getItem(THEME_KEY);
     if (stored === 'light' || stored === 'dark') return stored;
   } catch {
-    /* private mode: fall through to the OS preference */
-  }
-  if (typeof window !== 'undefined' && window.matchMedia?.('(prefers-color-scheme: dark)').matches) {
-    return 'dark';
+    /* private mode */
   }
   return 'light';
 }

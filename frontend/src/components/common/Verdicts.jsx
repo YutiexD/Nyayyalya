@@ -173,7 +173,7 @@ export function ForensicOpinion({ forensic, className }) {
   if (!forensic?.opinion) return null;
 
   return (
-    <div className={cn('rounded-lg border p-4', OPINION_STYLES[forensic.opinion], className)}>
+    <div className={cn('rounded-xl border p-4', OPINION_STYLES[forensic.opinion], className)}>
       <div className="flex items-center gap-2">
         <FlaskConical aria-hidden className={cn('size-4', OPINION_TEXT[forensic.opinion])} />
         <p className="text-sm font-semibold">
@@ -268,7 +268,7 @@ export function Note({ children, tone = 'info', className }) {
   };
 
   return (
-    <div className={cn('flex gap-2.5 rounded-lg border p-3 text-[13px]', tones[tone], className)}>
+    <div className={cn('flex gap-2.5 rounded-xl border p-3 text-[13px]', tones[tone], className)}>
       <Icon aria-hidden className="mt-0.5 size-4 shrink-0" />
       <div className="leading-relaxed">{children}</div>
     </div>

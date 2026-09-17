@@ -67,7 +67,7 @@ const OPINIONS = [
  * the opinion and the summary cannot be changed between signing and sending.
  */
 const verdictStatement = ({ exhibitCode, opinion, examinationSummary, documentSha256 }) =>
-  ['LEXX-FSL-VERDICT', 'v1', exhibitCode, opinion, examinationSummary, documentSha256 ?? '-'].join('|');
+  ['NYAYALAY-FSL-VERDICT', 'v1', exhibitCode, opinion, examinationSummary, documentSha256 ?? '-'].join('|');
 
 // =============================================================== the queue ====
 

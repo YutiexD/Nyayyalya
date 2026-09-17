@@ -1,25 +1,16 @@
 /**
  * The application shell.
  *
- * ## What changed, and why
- *
- * The header used to carry the user's name, their role badge, their authority id and
- * their full jurisdictional scope — "Station UP-GZB-KVN · District UP-GZB" — on every
- * screen, permanently. The reasoning was sound (this system's central claim is that
- * access follows the authority directory, so showing the scope makes that claim
- * visible rather than asserted) but the execution put four lines of identity metadata
- * in the top-right corner of every screen, competing with the work.
- *
- * The claim is still made, in the same words, one click away: the identity button
- * opens a panel with the role, the authority id and the full scope. That is the right
- * depth for something a user reads once at sign-in and then trusts — and it gives the
- * header back to navigation, which is what a header is for.
- *
- * Navigation is role-aware and deliberately short. Most roles see two items.
+ * A resizable navbar that smoothly shrinks to a floating pill on scroll,
+ * frosted glass, four compact items (brand, verifier, theme, identity).
+ * Workspace and scan navigation are available through the brand-mark
+ * home link and the workspace screen itself.
  */
+import { useCallback, useRef, useState } from 'react';
+import { flushSync } from 'react-dom';
 import { Link, NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { useDispatch, useSelector } from 'react-redux';
-import { AlertTriangle, LogOut, Moon, ScanLine, ShieldCheck, Sun } from 'lucide-react';
+import { AlertTriangle, LogOut, Moon, ShieldCheck, Sun } from 'lucide-react';
 
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
@@ -33,52 +24,74 @@ import {
 } from '@/components/ui/tooltip';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 
+import {
+  Navbar,
+  NavBody,
+  NavSpacer,
+  MobileNav,
+  MobileNavHeader,
+  MobileNavToggle,
+  MobileNavMenu,
+} from '@/components/ui/resizable-navbar';
 import { BrandMark } from '@/components/common/Premium';
 import { Facts } from '@/components/common/Shell';
 import { selectSession, sessionCleared, selectDeviceKeyMismatch } from '@/features/auth/authSlice';
 import { selectTheme, themeToggled } from '@/features/ui/uiSlice';
-import { signOut, HOME_FOR_ROLE, ROLE_LABEL, SCAN_ROLES } from '@/lib/api';
+import { signOut, HOME_FOR_ROLE, ROLE_LABEL } from '@/lib/api';
 import { cn } from '@/lib/utils';
+import { useSmoothScroll } from '@/hooks/useSmoothScroll';
 
 function ThemeToggle() {
   const theme = useSelector(selectTheme);
   const dispatch = useDispatch();
+  const ref = useRef(null);
   const next = theme === 'dark' ? 'light' : 'dark';
+
+  const toggle = useCallback(async () => {
+    if (!document.startViewTransition) {
+      dispatch(themeToggled());
+      return;
+    }
+
+    await document.startViewTransition(() => {
+      flushSync(() => {
+        const root = document.documentElement;
+        root.classList.toggle('dark', next === 'dark');
+        root.style.colorScheme = next;
+        dispatch(themeToggled());
+      });
+    }).ready;
+
+    document.documentElement.animate(
+      [
+        { opacity: 0, transform: 'scale(0.8) rotate(5deg)' },
+        { opacity: 1, transform: 'scale(1) rotate(0deg)' },
+      ],
+      {
+        duration: 480,
+        easing: 'cubic-bezier(0.68, -0.55, 0.265, 1.55)',
+        pseudoElement: '::view-transition-new(root)',
+      },
+    );
+  }, [dispatch, next]);
 
   return (
     <Tooltip>
       <TooltipTrigger asChild>
-        <Button
-          variant="ghost"
-          size="icon"
+        <button
+          ref={ref}
+          type="button"
           aria-label={`Switch to ${next} theme`}
-          onClick={() => dispatch(themeToggled())}
-          className="size-8 rounded-full"
+          onClick={toggle}
+          className="grid size-8 place-items-center rounded-full text-muted-foreground transition-all duration-200 hover:scale-110 hover:bg-secondary/70 hover:text-foreground active:scale-95"
         >
           {theme === 'dark' ? <Sun className="size-4" /> : <Moon className="size-4" />}
-        </Button>
+        </button>
       </TooltipTrigger>
-      <TooltipContent>Switch to {next} theme</TooltipContent>
+      <TooltipContent side="bottom" sideOffset={8} className="rounded-full px-3 py-1">
+        {next === 'dark' ? 'Dark mode' : 'Light mode'}
+      </TooltipContent>
     </Tooltip>
-  );
-}
-
-function NavItem({ to, children }) {
-  return (
-    <NavLink to={to}>
-      {({ isActive }) => (
-        <span
-          className={cn(
-            'inline-flex h-8 items-center rounded-full px-3.5 text-[13px] font-medium transition-colors',
-            isActive
-              ? 'bg-secondary text-foreground'
-              : 'text-muted-foreground hover:bg-secondary/60 hover:text-foreground'
-          )}
-        >
-          {children}
-        </span>
-      )}
-    </NavLink>
   );
 }
 
@@ -108,17 +121,9 @@ function Identity({ session, onSignOut }) {
       <PopoverTrigger asChild>
         <button
           type="button"
-          className="flex items-center gap-2 rounded-full py-1 pl-1 pr-2.5 transition-colors hover:bg-secondary/70"
+          className="grid size-8 shrink-0 place-items-center rounded-full bg-primary text-[11px] font-bold text-primary-foreground transition-all hover:scale-105 active:scale-95"
         >
-          <span className="grid size-7 shrink-0 place-items-center rounded-full bg-secondary text-[11px] font-semibold">
-            {initials}
-          </span>
-          <span className="hidden text-left sm:block">
-            <span className="block text-[13px] font-medium leading-tight">{name}</span>
-            <span className="block text-[11px] leading-tight text-muted-foreground">
-              {ROLE_LABEL[session.role] ?? session.role}
-            </span>
-          </span>
+          {initials}
         </button>
       </PopoverTrigger>
 
@@ -140,9 +145,8 @@ function Identity({ session, onSignOut }) {
         <div className="space-y-2">
           <p className="label-xs">Authority scope</p>
           <Facts dense rows={scopeRows(session.scope)} />
-          {/* The product's central claim, made where somebody has asked to see it. */}
           <p className="text-[12px] leading-relaxed text-muted-foreground">
-            Read from your authority directory when you signed in. Lexx cannot set or widen
+            Read from your authority directory when you signed in. Nyayyalya cannot set or widen
             it, and a transfer or roster change removes access at your next sign-in.
           </p>
         </div>
@@ -159,6 +163,7 @@ function Identity({ session, onSignOut }) {
 }
 
 export function AppLayout() {
+  useSmoothScroll();
   const session = useSelector(selectSession);
   const keyMismatch = useSelector(selectDeviceKeyMismatch);
   const dispatch = useDispatch();
@@ -172,49 +177,110 @@ export function AppLayout() {
   };
 
   const home = session ? HOME_FOR_ROLE[session.role] : null;
-  const canScan = session && SCAN_ROLES.includes(session.role);
+  const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
   return (
     <TooltipProvider delayDuration={250}>
       <div className="flex min-h-screen flex-col bg-background">
-        <header className="surface-glass sticky top-0 z-40 border-b">
-          <div className="container flex h-14 max-w-7xl items-center gap-5">
-            <Link to={home ?? '/'} className="flex shrink-0 items-center gap-2.5">
+        {/* ─── resizable navbar ─── */}
+        <Navbar>
+          {/* Desktop */}
+          <NavBody>
+            {/* 1 — Brand mark + Nyayyalya */}
+            <Link
+              to="/"
+              className="relative z-20 flex items-center gap-2 rounded-full py-1 pl-1.5 pr-3 transition-colors hover:bg-secondary/60"
+            >
               <BrandMark size="sm" />
-              <span className="text-[15px] font-semibold tracking-tight">LEXX</span>
+              <span className="text-sm font-semibold tracking-[-0.01em]">Nyayyalya</span>
             </Link>
 
-            <nav className="hidden items-center gap-0.5 md:flex">
-              {home && <NavItem to={home}>Workspace</NavItem>}
-              {canScan && (
-                <NavItem to="/scan">
-                  <ScanLine className="mr-1.5 size-3.5" />
-                  Scan a label
-                </NavItem>
-              )}
-              <NavItem to="/verify">
-                <ShieldCheck className="mr-1.5 size-3.5" />
-                Public verifier
-              </NavItem>
-            </nav>
+            {/* Spacer: fills gap at full-width, disappears in the collapsed pill */}
+            <NavSpacer />
 
-            <div className="ml-auto flex items-center gap-1.5">
+            {/* Right side items */}
+            <div className="flex items-center gap-1">
+              <span className="mx-0.5 h-5 w-px bg-border/50" aria-hidden />
+
+              {/* 2 — Public verifier (icon only) */}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <NavLink to="/verify">
+                    {({ isActive }) => (
+                      <span
+                        className={cn(
+                          'grid size-8 place-items-center rounded-full transition-all duration-200 hover:scale-110 active:scale-95',
+                          isActive
+                            ? 'bg-secondary text-foreground'
+                            : 'text-muted-foreground hover:bg-secondary/60 hover:text-foreground',
+                        )}
+                      >
+                        <ShieldCheck className="size-4" />
+                      </span>
+                    )}
+                  </NavLink>
+                </TooltipTrigger>
+                <TooltipContent side="bottom" sideOffset={8} className="rounded-full px-3 py-1">
+                  Public verifier
+                </TooltipContent>
+              </Tooltip>
+
+              {/* 3 — Theme toggle */}
               <ThemeToggle />
+
+              <span className="mx-0.5 h-5 w-px bg-border/50" aria-hidden />
+
+              {/* 4 — Sign in / Identity */}
               {session ? (
                 <Identity session={session} onSignOut={onSignOut} />
               ) : (
                 pathname !== '/login' && (
-                  <Button asChild size="sm" className="rounded-full px-4">
+                  <Button asChild size="sm" className="h-8 rounded-full px-4 text-xs">
                     <Link to="/login">Sign in</Link>
                   </Button>
                 )
               )}
             </div>
-          </div>
-        </header>
+          </NavBody>
+
+          {/* Mobile */}
+          <MobileNav>
+            <MobileNavHeader>
+              <Link to="/" className="flex items-center gap-2">
+                <BrandMark size="sm" />
+                <span className="text-sm font-semibold tracking-[-0.01em]">Nyayyalya</span>
+              </Link>
+              <MobileNavToggle
+                isOpen={isMobileMenuOpen}
+                onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)}
+              />
+            </MobileNavHeader>
+            <MobileNavMenu isOpen={isMobileMenuOpen} onClose={() => setIsMobileMenuOpen(false)}>
+              <NavLink to="/verify" onClick={() => setIsMobileMenuOpen(false)} className="flex items-center gap-2 text-muted-foreground">
+                <ShieldCheck className="size-4" />
+                <span>Public verifier</span>
+              </NavLink>
+              <div className="flex items-center gap-2">
+                <ThemeToggle />
+                <span className="text-sm text-muted-foreground">Toggle theme</span>
+              </div>
+              {!session && pathname !== '/login' && (
+                <Button asChild size="sm" className="w-full">
+                  <Link to="/login" onClick={() => setIsMobileMenuOpen(false)}>Sign in</Link>
+                </Button>
+              )}
+              {session && (
+                <Button variant="outline" size="sm" className="w-full" onClick={() => { onSignOut(); setIsMobileMenuOpen(false); }}>
+                  <LogOut className="size-3.5" />
+                  Sign out
+                </Button>
+              )}
+            </MobileNavMenu>
+          </MobileNav>
+        </Navbar>
 
         {keyMismatch && (
-          <div className="container max-w-7xl pt-4">
+          <div className="container max-w-7xl pt-24">
             <Alert variant="destructive">
               <AlertTriangle className="size-4" />
               <AlertTitle>This browser&rsquo;s signing key is not registered</AlertTitle>
@@ -226,14 +292,14 @@ export function AppLayout() {
           </div>
         )}
 
-        <main className="flex-1">
+        <main className="flex-1 pt-20">
           <Outlet />
         </main>
 
-        <footer className="border-t py-5">
-          <div className="container flex max-w-7xl flex-col gap-1 text-[12px] text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+        <footer className="bg-[#1E3932] text-white border-t-0 py-8">
+          <div className="container flex max-w-7xl flex-col gap-1 text-[12px] text-white/70 sm:flex-row sm:items-center sm:justify-between">
             <p>
-              LEXX — evidence register for the criminal justice chain. Ledger roots anchored to
+              Nyayyalya — evidence register for the criminal justice chain. Ledger roots anchored to
               Monad Testnet; no evidence, personal data or case identifiers are ever published.
             </p>
             <p className="shrink-0">Prototype. Directory services are simulated.</p>

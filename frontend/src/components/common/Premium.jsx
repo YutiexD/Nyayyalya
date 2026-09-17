@@ -12,13 +12,14 @@
  * would look like a landing page for a crypto exchange, which is the opposite of what
  * a court should feel looking at it.
  */
-import { createRef, forwardRef, useEffect, useRef, useState } from 'react';
+import { createRef, forwardRef, useEffect, useId, useRef, useState } from 'react';
 import { ShieldCheck } from 'lucide-react';
 
 import { DotPattern } from '@/components/ui/dot-pattern';
 import { AnimatedBeam } from '@/components/ui/animated-beam';
 import { BorderBeam } from '@/components/ui/border-beam';
 import { AnimatedShinyText } from '@/components/ui/animated-shiny-text';
+import { LenticularCard } from '@/components/ui/lenticular-card';
 import { cn } from '@/lib/utils';
 import { useCountUp } from '@/hooks/useGsap';
 
@@ -28,7 +29,7 @@ import { useCountUp } from '@/hooks/useGsap';
  * both themes rather than switched per theme, because a beam that changed colour on
  * toggle would draw the eye to the toggle instead of the flow.
  */
-export const ACCENT_HEX = Object.freeze({ from: '#6366f1', to: '#22d3ee' });
+export const ACCENT_HEX = Object.freeze({ from: '#006241', to: '#00754A' });
 
 // ----------------------------------------------------------------- backdrop ----
 
@@ -120,29 +121,29 @@ function CountUp({ value, delay = 0 }) {
  */
 export function StatCard({ label, value, suffix, caption, icon: Icon, tone, className, delay = 0 }) {
   return (
-    <div className={cn('surface surface-lift relative overflow-hidden p-5', className)}>
+    <LenticularCard className={cn('surface relative overflow-hidden rounded-2xl p-6', className)}>
       <div className="flex items-start justify-between gap-3">
-        <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">{label}</p>
+        <p className="text-[11px] font-semibold uppercase tracking-[0.08em] text-muted-foreground">{label}</p>
         {Icon && (
           <span
             className={cn(
-              'grid size-8 place-items-center rounded-md bg-muted text-muted-foreground',
-              tone === 'ok' && 'bg-ok-muted text-ok',
-              tone === 'warn' && 'bg-warn-muted text-warn',
-              tone === 'bad' && 'bg-bad-muted text-bad',
-              tone === 'accent' && 'bg-accent-gradient-soft text-accent-from'
+              'grid size-9 place-items-center rounded-full border border-border/60 bg-muted/50 text-muted-foreground',
+              tone === 'ok' && 'border-ok/30 bg-ok-muted/60 text-ok',
+              tone === 'warn' && 'border-warn/30 bg-warn-muted/60 text-warn',
+              tone === 'bad' && 'border-bad/30 bg-bad-muted/60 text-bad',
+              tone === 'accent' && 'border-accent-from/20 bg-accent-gradient-soft text-accent-from'
             )}
           >
-            <Icon className="size-4" />
+            <Icon className="size-[18px]" strokeWidth={1.75} />
           </span>
         )}
       </div>
-      <p className="mt-3 flex items-baseline gap-1 text-3xl font-semibold tracking-tight tabular">
+      <p className="mt-4 flex items-baseline gap-1 text-4xl font-semibold tracking-tight tabular">
         {typeof value === 'number' ? <CountUp value={value} delay={delay} /> : value}
         {suffix && <span className="text-base font-medium text-muted-foreground">{suffix}</span>}
       </p>
-      {caption && <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{caption}</p>}
-    </div>
+      {caption && <p className="mt-auto pt-3 text-[13px] leading-relaxed text-muted-foreground">{caption}</p>}
+    </LenticularCard>
   );
 }
 
@@ -153,21 +154,37 @@ export function StatCard({ label, value, suffix, caption, icon: Icon, tone, clas
  * point. `highlight` adds a travelling border beam — reserve it for one card per row.
  */
 export function FeatureCard({ icon: Icon, title, children, limit, highlight, className }) {
+  const noiseId = useId();
   return (
-    <div className={cn('surface surface-lift relative flex flex-col gap-3 overflow-hidden p-6', className)}>
+    <div className={cn(
+      'surface relative flex flex-col overflow-hidden transition-all duration-300',
+      'hover:-translate-y-1 hover:shadow-elev-2',
+      highlight && 'border-accent-from/30',
+      className,
+    )}>
+      <svg aria-hidden className="pointer-events-none absolute inset-0 h-full w-full opacity-[0.035] mix-blend-soft-light dark:opacity-[0.07]">
+        <filter id={noiseId}>
+          <feTurbulence type="fractalNoise" baseFrequency="0.65" numOctaves="4" stitchTiles="stitch" />
+        </filter>
+        <rect width="100%" height="100%" filter={`url(#${noiseId})`} />
+      </svg>
       {highlight && (
         <BorderBeam size={120} duration={9} colorFrom={ACCENT_HEX.from} colorTo={ACCENT_HEX.to} />
       )}
-      <span className="grid size-10 place-items-center rounded-lg bg-accent-gradient-soft text-accent-from">
-        <Icon className="size-5" />
-      </span>
-      <h3 className="text-base font-semibold">{title}</h3>
-      <p className="text-sm leading-relaxed text-muted-foreground">{children}</p>
+      <div className="relative flex flex-1 flex-col gap-4 p-7">
+        <span className="grid size-11 place-items-center rounded-xl border border-border/60 bg-accent-gradient-soft text-accent-from shadow-sm">
+          <Icon className="size-5" strokeWidth={1.75} />
+        </span>
+        <h3 className="text-lg font-semibold tracking-tight">{title}</h3>
+        <p className="text-sm leading-relaxed text-muted-foreground">{children}</p>
+      </div>
       {limit && (
-        <p className="mt-auto border-t pt-3 text-xs leading-relaxed text-muted-foreground">
-          <span className="font-medium text-foreground/80">What it does not prove. </span>
-          {limit}
-        </p>
+        <div className="relative mt-auto border-t border-border/60 bg-muted/40 px-7 py-4">
+          <p className="text-xs leading-relaxed text-muted-foreground">
+            <span className="font-semibold text-foreground/70">What it does not prove. </span>
+            {limit}
+          </p>
+        </div>
       )}
     </div>
   );

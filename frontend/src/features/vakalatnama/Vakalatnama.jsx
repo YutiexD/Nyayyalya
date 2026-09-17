@@ -124,7 +124,7 @@ export function FileVakalatnama() {
             How you come on record. The signed PDF is hashed and signed in this browser with
             your registered key before it is sent. Filing grants you nothing — the court the
             case is listed before rules on it, and the court register records the appearance
-            before Lexx opens the case to you.
+            before Nyayyalya opens the case to you.
           </DialogDescription>
         </DialogHeader>
 

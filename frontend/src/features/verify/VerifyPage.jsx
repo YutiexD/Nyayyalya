@@ -70,7 +70,7 @@ function verificationTokenFrom(raw) {
 }
 
 /**
- * The token a Lexx certificate PDF carries in its own metadata (`Keywords`), written
+ * The token a Nyayyalya certificate PDF carries in its own metadata (`Keywords`), written
  * as plain ASCII outside the compressed page streams. Reading it lets a holder check
  * a PDF somebody handed them with nothing but the file.
  */
@@ -256,7 +256,7 @@ function CertificateResult({ result, reVerifyUrl, copyFile }) {
                   <p className="text-xs text-muted-foreground">
                     {s.part === 'A'
                       ? 'Signed by the person who produced the record (usually the investigating officer), with the key held in their own browser, on their exhibit screen.'
-                      : 'Signed by the examiner whose laboratory report Part B reproduces, on their laboratory screen. Filled only from a filed report — never written by Lexx.'}
+                      : 'Signed by the examiner whose laboratory report Part B reproduces, on their laboratory screen. Filled only from a filed report — never written by Nyayyalya.'}
                   </p>
                 </div>
               );
@@ -350,7 +350,7 @@ function CertificateSection() {
     const token = read.token ?? verificationTokenFrom(raw);
     if (!token) {
       setFileProblem(
-        'This PDF carries no Lexx verification token in its metadata (older certificates do not). Paste the token from the QR printed on it, and the file will be compared as well.'
+        'This PDF carries no Nyayyalya verification token in its metadata (older certificates do not). Paste the token from the QR printed on it, and the file will be compared as well.'
       );
       check.reset();
       return;
@@ -634,7 +634,7 @@ function ReceiptSection() {
                 !r.anchored
                   ? 'Entries are gathered into a Merkle batch every few minutes; check again shortly.'
                   : r.onChainVerified
-                    ? 'The LexxAnchor contract on Monad Testnet itself confirmed this entry against the root it holds.'
+                    ? 'The NyayyalyaAnchor contract on Monad Testnet itself confirmed this entry against the root it holds.'
                     : r.txHash
                       ? 'The entry proves into a root that was written on chain.'
                       : 'The root was computed here but not submitted — internal consistency only.'
@@ -681,7 +681,7 @@ function AnchorHistory() {
       {d.contractExplorerUrl && (
         <Button asChild variant="outline" size="sm">
           <a href={d.contractExplorerUrl} target="_blank" rel="noreferrer noopener">
-            <ExternalLink className="size-4" /> LexxAnchor contract on the explorer
+            <ExternalLink className="size-4" /> NyayyalyaAnchor contract on the explorer
           </a>
         </Button>
       )}
@@ -904,7 +904,7 @@ export default function VerifyPage() {
           the page is for before a single form appears. */}
       <section className="relative overflow-hidden">
         <Backdrop />
-        <div className="container relative flex flex-col items-center py-14 text-center sm:py-16">
+        <div className="container relative flex flex-col items-center py-16 text-center sm:py-20">
           <div className="will-reveal">
             <Eyebrow>Public · no account, no session, no request for your identity</Eyebrow>
           </div>
@@ -920,8 +920,8 @@ export default function VerifyPage() {
         </div>
       </section>
 
-      <div className="container space-y-8 pb-12">
-      <div className="grid gap-6 lg:grid-cols-2">
+      <div className="container space-y-8 pb-16">
+      <div className="grid gap-8 lg:grid-cols-2">
         <div className="space-y-6">
           <CertificateSection />
           <ReceiptSection />

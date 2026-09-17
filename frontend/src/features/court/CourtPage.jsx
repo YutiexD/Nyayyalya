@@ -68,7 +68,7 @@ import { cn, fmtDate, humanise } from '@/lib/utils';
  *
  * An advocate files a vakalatnama; it arrives here as a pending filing with the
  * document attached. The court reads the document and either takes them on record or
- * refuses with a reason. Acceptance is written to the COURT REGISTER first — Lexx
+ * refuses with a reason. Acceptance is written to the COURT REGISTER first — Nyayyalya
  * mirrors that record and never invents an advocate's authority — and only then does
  * the case open to them.
  */
@@ -213,10 +213,10 @@ function CounselPanel({ caseId, caseDoc }) {
 
       <Disclosure
         label="Check the court register"
-        hint="Legal-aid orders and appearances filed outside Lexx are mirrored from the court directory."
+        hint="Legal-aid orders and appearances filed outside Nyayyalya are mirrored from the court directory."
       >
         <p className="text-[13px] leading-relaxed text-muted-foreground">
-          Lexx never grants a lawyer access on its own authority. This re-reads the court
+          Nyayyalya never grants a lawyer access on its own authority. This re-reads the court
           directory and mirrors what it says — an accepted vakalatnama, or a BNSS s.341 legal
           aid order — adding grants the register shows and revoking those it no longer does.
         </p>

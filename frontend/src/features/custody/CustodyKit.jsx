@@ -2,7 +2,7 @@
  * Physical custody, as every role that touches a sealed article sees it.
  *
  *   The label  — what gets printed and stuck on the evidence bag: a QR that opens the
- *                item in Lexx, and the particulars a person checks against the bag by
+ *                item in Nyayyalya, and the particulars a person checks against the bag by
  *                eye (item code, seal number, FIR, identifiers, who seized it).
  *   The scan   — resolve a label, see where the item is, and act on it: hand it over
  *                (scan one of two) or accept it (scan two of two).
@@ -58,7 +58,7 @@ export function Pill({ tone = 'neutral', children }) {
 
 /**
  * Read a label payload out of whatever was scanned or pasted: the raw
- * `LEXX:v1:…` text a desk scanner types, or the `/scan?label=…` link a phone camera
+ * `NYAYALAY:v1:…` text a desk scanner types, or the `/scan?label=…` link a phone camera
  * opens. Both carry the same signed payload.
  */
 export function labelPayloadFrom(raw) {
@@ -116,8 +116,8 @@ export async function printCustodyLabel(item) {
   .foot { grid-column: 1 / -1; font-size: 5.8pt; border-top: 0.6pt solid #000; padding-top: .8mm; }
   .payload { font: 5.2pt/1.2 ui-monospace, Consolas, monospace; word-break: break-all; }
 </style></head><body><div class="label">
-  <div class="head"><span class="brand">LEXX · CUSTODY LABEL</span><span class="code">${escapeHtml(item.itemCode)}</span></div>
-  <div class="qr">${qr ? `<img src="${qr}" alt="QR">` : ''}<div class="hint">Scan to open in LEXX</div></div>
+  <div class="head"><span class="brand">Nyayyalya · CUSTODY LABEL</span><span class="code">${escapeHtml(item.itemCode)}</span></div>
+  <div class="qr">${qr ? `<img src="${qr}" alt="QR">` : ''}<div class="hint">Scan to open in Nyayyalya</div></div>
   <table>
     ${row('Article', item.description)}
     <tr class="seal"><th>Seal no.</th><td>${escapeHtml(item.sealNumber)}</td></tr>
@@ -182,7 +182,7 @@ export function CustodyLabelCard({ item, compact = false }) {
           </Button>
         </div>
         <p className="text-xs text-muted-foreground">
-          The QR opens this item in Lexx from any phone. The copied text is what &ldquo;Resolve a
+          The QR opens this item in Nyayyalya from any phone. The copied text is what &ldquo;Resolve a
           label&rdquo; takes when there is no camera.
         </p>
       </div>
@@ -331,7 +331,7 @@ function IssuedHandover({ issued, onDismiss }) {
           </p>
           <p className="text-xs leading-relaxed text-muted-foreground">
             The receiver signs in on their own device, scans this item&rsquo;s label, and enters
-            this code with the seal condition. Lexx keeps only the code&rsquo;s hash, so this is
+            this code with the seal condition. Nyayyalya keeps only the code&rsquo;s hash, so this is
             the only time it can be shown.
           </p>
         </div>
@@ -413,8 +413,8 @@ function InitiateHandover({ item, onIssued }) {
       </div>
       {candidates.length === 0 && (
         <Note tone="warn">
-          Nobody with a Lexx account can receive this item into {humanise(toStatus)} yet. A
-          receiver appears here once they have signed in to Lexx at least once.
+          Nobody with a Nyayyalya account can receive this item into {humanise(toStatus)} yet. A
+          receiver appears here once they have signed in to Nyayyalya at least once.
         </Note>
       )}
       <div className="space-y-1.5">
@@ -684,7 +684,7 @@ export function ScanPanel({ initial, onItem, showChain = true }) {
             id="scan-input"
             value={raw}
             onChange={(e) => setRaw(e.target.value)}
-            placeholder="LEXX:v1:IT-…  or the …/scan?label=… link from the QR"
+            placeholder="NYAYALAY:v1:IT-…  or the …/scan?label=… link from the QR"
             className="font-mono"
           />
           <Button type="submit" disabled={scan.isPending || !raw.trim()}>

@@ -51,7 +51,7 @@ import { cn } from '@/lib/utils';
  */
 export function Workspace({ eyebrow, title, lede, action, children, className }) {
   return (
-    <div className={cn('container max-w-7xl space-y-8 py-8 sm:py-10', className)}>
+    <div className={cn('container max-w-7xl space-y-8 py-10 sm:py-12', className)}>
       <header className="flex flex-wrap items-start justify-between gap-x-6 gap-y-4">
         <div className="min-w-0 space-y-1.5">
           {eyebrow && <p className="label-xs">{eyebrow}</p>}
@@ -137,7 +137,7 @@ export function Counter({ label, value, tone = 'neutral', active, onClick, class
       type={onClick ? 'button' : undefined}
       onClick={onClick}
       className={cn(
-        'flex min-w-[6.5rem] flex-1 flex-col gap-0.5 rounded-lg border px-3.5 py-2.5 text-left transition-colors',
+        'flex min-w-[6.5rem] flex-1 flex-col gap-0.5 rounded-xl border px-3.5 py-2.5 text-left transition-colors',
         onClick && 'hover:bg-muted/60',
         active ? 'border-ring/50 bg-muted/70' : 'border-border bg-card',
         className
@@ -223,7 +223,7 @@ export function Disclosure({ label, hint, defaultOpen = false, children, classNa
   const id = useId();
 
   return (
-    <div className={cn('rounded-lg border', className)}>
+    <div className={cn('rounded-xl border', className)}>
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -304,7 +304,7 @@ export function Empty({ title, children, icon: Icon, action, className }) {
   return (
     <div
       className={cn(
-        'flex flex-col items-center gap-2 rounded-lg border border-dashed px-6 py-10 text-center',
+        'flex flex-col items-center gap-2 rounded-xl border border-dashed px-6 py-10 text-center',
         className
       )}
     >
@@ -389,7 +389,7 @@ export function Digest({ value, label, block = true, className }) {
   if (!value) return <span className="text-muted-foreground">—</span>;
   return (
     <span
-      className={cn('hash', block && 'block rounded-md bg-muted/60 p-2', className)}
+      className={cn('hash', block && 'block rounded-lg bg-muted/60 p-2.5', className)}
       title={label}
     >
       {value}

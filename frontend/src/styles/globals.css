@@ -1,23 +1,19 @@
+@import 'lenis/dist/lenis.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 /**
- * Design tokens.
+ * Design tokens — Starbucks-inspired green palette.
  *
  * ## What this palette is for
  *
- * People use this product for a whole shift. An officer books evidence into it, an
- * examiner reads a queue in it, a judge reads a case file in it. So the base is
- * deliberately QUIET: warm-neutral paper, hairline borders, one restrained indigo for
- * anything interactive, and semantic colour reserved for the four things that carry
- * meaning — a review priority, a forensic opinion, an integrity result, a refusal.
- *
- * The previous sheet had a luminous indigo-to-cyan gradient available everywhere, and
- * it ended up everywhere: on cards, on beams, on stat tiles, on section borders. The
- * gradient survives, but it is now spent in one place — the brand mark — because an
- * accent that appears six times on a screen has stopped being an accent and become a
- * texture, and texture is what made these screens tiring to read.
+ * A four-tier green system: Starbucks Green (#006241) anchors dark bands and headings,
+ * Green Accent (#00754A) drives CTAs and interactive elements, House Green (#1E3932)
+ * backs the dark theme, and a warm cream (#f2f0eb) provides the light canvas. Semantic
+ * colour is reserved for the four things that carry meaning — a review priority, a
+ * forensic opinion, an integrity result, a refusal.
  *
  * ## The rules a component can rely on
  *
@@ -29,9 +25,9 @@
  */
 @layer base {
   :root {
-    /* Warm-neutral paper rather than blue-white: easier to sit in front of, and it
-       makes the one cool accent read as deliberate. */
-    --background: 40 22% 97%;
+    /* Warm cream canvas — Starbucks neutral-warm (#f2f0eb). White cards float on it,
+       and the green accent reads as deliberate against this warmth. */
+    --background: 40 24% 93%;
     --foreground: 225 25% 14%;
 
     --card: 0 0% 100%;
@@ -40,28 +36,28 @@
     --popover: 0 0% 100%;
     --popover-foreground: 225 25% 14%;
 
-    --primary: 230 45% 32%;
-    --primary-foreground: 40 30% 98%;
+    --primary: 155 100% 23%;
+    --primary-foreground: 0 0% 100%;
 
     --secondary: 40 14% 93%;
     --secondary-foreground: 225 22% 22%;
 
     --muted: 40 14% 94%;
-    --muted-foreground: 225 8% 46%;
+    --muted-foreground: 0 0% 42%;
 
     --accent: 40 14% 93%;
     --accent-foreground: 225 22% 22%;
 
-    --destructive: 0 62% 45%;
-    --destructive-foreground: 40 30% 98%;
+    --destructive: 6 82% 43%;
+    --destructive-foreground: 0 0% 100%;
 
     --border: 38 12% 88%;
     --input: 38 12% 86%;
-    --ring: 230 55% 48%;
+    --ring: 155 100% 23%;
 
-    /* The one flourish. Spent on the brand mark, and almost nowhere else. */
-    --accent-from: 232 60% 52%;
-    --accent-to: 200 65% 46%;
+    /* The green gradient. Starbucks Green to Green Accent. */
+    --accent-from: 161 100% 19%;
+    --accent-to: 155 100% 23%;
 
     /* ---- meaning, not decoration ------------------------------------------
        ok    a check that passed, an opinion of AUTHENTIC
@@ -97,81 +93,82 @@
     --p-low: 225 6% 48%;
     --p-low-muted: 40 12% 94%;
 
-    --radius: 0.625rem;
+    --radius: 0.75rem;
 
-    /* Depth without a drop shadow. Two layers, both very low alpha. */
-    --shadow-1: 0 1px 1px hsl(225 25% 14% / 0.03), 0 1px 2px hsl(225 25% 14% / 0.04);
-    --shadow-2: 0 1px 2px hsl(225 25% 14% / 0.04), 0 6px 16px -8px hsl(225 25% 14% / 0.10);
-    --shadow-3: 0 2px 4px hsl(225 25% 14% / 0.04), 0 16px 32px -16px hsl(225 25% 14% / 0.14);
+    /* Starbucks card shadows — material-inspired, low-drama. */
+    --shadow-1: 0 0 0.5px rgba(0,0,0,0.14), 0 1px 1px rgba(0,0,0,0.24);
+    --shadow-2: 0 1px 3px rgba(0,0,0,0.1), 0 2px 2px rgba(0,0,0,0.06), 0 0 2px rgba(0,0,0,0.07);
+    --shadow-3: 0 2px 4px rgba(0,0,0,0.08), 0 8px 12px rgba(0,0,0,0.14);
     --glow: 0 0 0 1px hsl(var(--ring) / 0.22), 0 6px 20px -8px hsl(var(--ring) / 0.25);
   }
 
   .dark {
-    /* Not black. A very dark blue-grey, so white text sits on it without the halo
-       that pure black gives at small sizes. */
-    --background: 226 24% 9%;
-    --foreground: 220 18% 92%;
+    /* Deeper House Green — almost charcoal with a green soul. The extra depth gives
+       cards real lift and makes the green accent feel deliberate, not overwhelming. */
+    --background: 170 18% 10%;
+    --foreground: 40 10% 94%;
 
-    --card: 226 22% 12%;
-    --card-foreground: 220 18% 92%;
+    /* Cards are warmer and clearly separated from the deep background. */
+    --card: 168 10% 16%;
+    --card-foreground: 40 8% 92%;
 
-    --popover: 226 22% 12%;
-    --popover-foreground: 220 18% 92%;
+    --popover: 168 12% 17%;
+    --popover-foreground: 40 8% 92%;
 
-    /* Lifted, not dimmed: on a dark surface the navy has to come forward to read as
-       an accent at all. */
-    --primary: 228 72% 72%;
-    --primary-foreground: 226 30% 10%;
+    /* The green accent pops against the darker, less-saturated surfaces. */
+    --primary: 155 72% 48%;
+    --primary-foreground: 170 28% 8%;
 
-    --secondary: 226 16% 18%;
-    --secondary-foreground: 220 18% 92%;
+    /* Utility surfaces are desaturated — breaks the green monotony. */
+    --secondary: 174 6% 19%;
+    --secondary-foreground: 40 6% 90%;
 
-    --muted: 226 16% 16%;
-    --muted-foreground: 220 10% 62%;
+    --muted: 174 5% 13%;
+    --muted-foreground: 38 6% 58%;
 
-    --accent: 226 16% 18%;
-    --accent-foreground: 220 18% 92%;
+    --accent: 174 6% 19%;
+    --accent-foreground: 40 6% 90%;
 
-    --destructive: 358 58% 55%;
+    --destructive: 6 70% 55%;
     --destructive-foreground: 0 80% 98%;
 
-    --border: 226 14% 20%;
-    --input: 226 14% 22%;
-    --ring: 228 70% 62%;
+    --border: 170 6% 20%;
+    --input: 170 6% 22%;
+    --ring: 155 68% 42%;
 
-    --accent-from: 232 74% 66%;
-    --accent-to: 196 72% 56%;
+    --accent-from: 161 85% 28%;
+    --accent-to: 155 85% 33%;
 
     --ok: 158 48% 52%;
     --ok-foreground: 158 60% 8%;
-    --ok-muted: 158 34% 15%;
+    --ok-muted: 160 26% 14%;
 
     --warn: 34 80% 58%;
     --warn-foreground: 32 90% 8%;
-    --warn-muted: 34 40% 16%;
+    --warn-muted: 34 30% 14%;
 
     --bad: 358 70% 63%;
     --bad-foreground: 0 80% 8%;
-    --bad-muted: 358 40% 17%;
+    --bad-muted: 358 30% 15%;
 
     --info: 220 70% 68%;
     --info-foreground: 220 60% 8%;
-    --info-muted: 220 40% 18%;
+    --info-muted: 220 30% 16%;
 
     --p-critical: 358 70% 63%;
-    --p-critical-muted: 358 40% 17%;
+    --p-critical-muted: 358 30% 15%;
     --p-high: 30 82% 60%;
-    --p-high-muted: 30 40% 16%;
+    --p-high-muted: 30 30% 14%;
     --p-medium: 218 72% 68%;
-    --p-medium-muted: 218 38% 18%;
+    --p-medium-muted: 218 28% 16%;
     --p-low: 220 10% 60%;
-    --p-low-muted: 226 14% 18%;
+    --p-low-muted: 220 10% 16%;
 
-    /* In the dark, depth is a highlight on the top edge rather than a shadow below. */
-    --shadow-1: inset 0 1px 0 hsl(220 30% 100% / 0.03), 0 1px 2px hsl(0 0% 0% / 0.3);
-    --shadow-2: inset 0 1px 0 hsl(220 30% 100% / 0.04), 0 6px 16px -8px hsl(0 0% 0% / 0.5);
-    --shadow-3: inset 0 1px 0 hsl(220 30% 100% / 0.05), 0 16px 32px -16px hsl(0 0% 0% / 0.6);
-    --glow: 0 0 0 1px hsl(var(--ring) / 0.3), 0 6px 24px -8px hsl(var(--ring) / 0.3);
+    /* Top-edge highlights are slightly more visible on the deeper background. */
+    --shadow-1: inset 0 1px 0 hsl(40 20% 100% / 0.04), 0 1px 3px hsl(0 0% 0% / 0.4);
+    --shadow-2: inset 0 1px 0 hsl(40 20% 100% / 0.06), 0 6px 16px -8px hsl(0 0% 0% / 0.55);
+    --shadow-3: inset 0 1px 0 hsl(40 20% 100% / 0.07), 0 16px 32px -16px hsl(0 0% 0% / 0.65);
+    --glow: 0 0 0 1px hsl(var(--ring) / 0.25), 0 6px 24px -8px hsl(var(--ring) / 0.25);
   }
 }
 
@@ -195,12 +192,13 @@
        that reflows as it changes is a count nobody trusts. */
     font-feature-settings: 'cv11', 'ss01', 'tnum';
     font-variation-settings: 'opsz' 32;
+    letter-spacing: -0.01em;
   }
 
   h1,
   h2,
   h3 {
-    letter-spacing: -0.015em;
+    letter-spacing: -0.01em;
   }
 
   ::selection {
@@ -298,6 +296,12 @@
     -webkit-mask-image: linear-gradient(to bottom, black 55%, transparent 100%);
     mask-image: linear-gradient(to bottom, black 55%, transparent 100%);
   }
+
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation: none;
+    mix-blend-mode: normal;
+  }
 }
 
 @layer utilities {
@@ -305,6 +309,8 @@
      of finished layout before the timeline runs. The reveal removes the class. */
   .will-reveal {
     opacity: 0;
+    transform: translateY(40px) scale(0.97);
+    will-change: opacity, transform;
   }
 
   .text-balance {

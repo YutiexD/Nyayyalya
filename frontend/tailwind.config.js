@@ -1,14 +1,13 @@
 /**
- * Tailwind configuration.
+ * Tailwind configuration — Starbucks-inspired green design system.
  *
  * Colours are declared as CSS variables in src/styles/globals.css and referenced
  * through `hsl(var(--token))` here, which is what lets one class list serve both
  * light and dark without a single `dark:` variant on a colour.
  *
- * The palette is deliberately restrained: one navy accent carried over from the
- * previous client, a neutral surface ramp, and semantic tokens for the three verdicts
- * this product renders (ok / warn / bad). An evidence register should look like a
- * government record, not a dashboard.
+ * The palette uses a four-tier Starbucks green system: Starbucks Green (#006241),
+ * Green Accent (#00754A), House Green (#1E3932), and warm cream (#f2f0eb). Semantic
+ * tokens for the three verdicts (ok / warn / bad) are unchanged.
  */
 import animate from 'tailwindcss-animate';
 
@@ -57,6 +56,13 @@ export default {
           DEFAULT: 'hsl(var(--card))',
           foreground: 'hsl(var(--card-foreground))',
         },
+        // Starbucks brand colours — fixed hex values for direct use.
+        'starbucks-green': '#006241',
+        'green-accent': '#00754A',
+        'house-green': '#1E3932',
+        'gold': '#cba258',
+        'neutral-warm': '#f2f0eb',
+        'ceramic': '#edebe9',
         // The three verdicts. Named for what they mean, not what colour they are, so
         // a component never has to decide what "green" implies.
         // The accent gradient's two ends, usable as plain colours too (icons, rings).
@@ -79,12 +85,14 @@ export default {
         },
       },
       borderRadius: {
-        lg: 'var(--radius)',
-        md: 'calc(var(--radius) - 2px)',
-        sm: 'calc(var(--radius) - 4px)',
+        lg: '0.75rem',
+        md: 'calc(0.75rem - 2px)',
+        sm: 'calc(0.75rem - 4px)',
+        pill: '50px',
+        full: '9999px',
       },
       fontFamily: {
-        sans: ['Inter', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'sans-serif'],
+        sans: ['Inter', 'Manrope', 'ui-sans-serif', 'system-ui', '-apple-system', 'Segoe UI', 'Roboto', 'sans-serif'],
         mono: ['ui-monospace', 'SFMono-Regular', 'JetBrains Mono', 'Menlo', 'Consolas', 'monospace'],
       },
       fontSize: {

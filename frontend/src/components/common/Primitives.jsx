@@ -113,7 +113,7 @@ export function TableSkeleton({ rows = 4, cols = 4 }) {
 /** An empty result, explained. A blank box reads as a failure; this does not. */
 export function EmptyState({ title, children, icon: Icon }) {
   return (
-    <div className="flex flex-col items-center gap-2 rounded-md border border-dashed py-10 text-center">
+    <div className="flex flex-col items-center gap-2 rounded-lg border border-dashed py-10 text-center">
       {Icon && <Icon className="size-6 text-muted-foreground" />}
       <p className="text-sm font-medium">{title}</p>
       {children && (
