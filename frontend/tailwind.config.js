@@ -19,8 +19,10 @@ export default {
   theme: {
     container: {
       center: true,
-      padding: '1.5rem',
-      screens: { '2xl': '1400px' },
+      padding: { DEFAULT: '1rem', sm: '1.5rem', lg: '2rem' },
+      // Application content never runs wider than this. Long lines of case metadata are
+      // harder to scan, not easier.
+      screens: { '2xl': '1280px' },
     },
     extend: {
       colors: {
@@ -62,6 +64,11 @@ export default {
         // The accent gradient's two ends, usable as plain colours too (icons, rings).
         'accent-from': 'hsl(var(--accent-from))',
         'accent-to': 'hsl(var(--accent-to))',
+        // `success` / `warning` / `danger` are aliases of ok / warn / bad, for authors who
+        // think in those words. Same variables, so the two can never drift apart.
+        success: { DEFAULT: 'hsl(var(--ok))', foreground: 'hsl(var(--ok-foreground))', muted: 'hsl(var(--ok-muted))' },
+        warning: { DEFAULT: 'hsl(var(--warn))', foreground: 'hsl(var(--warn-foreground))', muted: 'hsl(var(--warn-muted))' },
+        danger: { DEFAULT: 'hsl(var(--bad))', foreground: 'hsl(var(--bad-foreground))', muted: 'hsl(var(--bad-muted))' },
         ok: { DEFAULT: 'hsl(var(--ok))', foreground: 'hsl(var(--ok-foreground))', muted: 'hsl(var(--ok-muted))' },
         warn: { DEFAULT: 'hsl(var(--warn))', foreground: 'hsl(var(--warn-foreground))', muted: 'hsl(var(--warn-muted))' },
         bad: { DEFAULT: 'hsl(var(--bad))', foreground: 'hsl(var(--bad-foreground))', muted: 'hsl(var(--bad-muted))' },
@@ -88,6 +95,17 @@ export default {
         mono: ['ui-monospace', 'SFMono-Regular', 'JetBrains Mono', 'Menlo', 'Consolas', 'monospace'],
       },
       fontSize: {
+        // The application type scale. Use these rather than arbitrary pixel sizes:
+        //   text-title    page title            24px semibold
+        //   text-section  panel / section title 16px semibold
+        //   text-body     reading text          15px
+        //   text-meta     secondary lines       13px
+        //   text-label    field labels, eyebrows 12px
+        title: ['1.5rem', { lineHeight: '2rem', letterSpacing: '-0.015em', fontWeight: '600' }],
+        section: ['1rem', { lineHeight: '1.5rem', letterSpacing: '-0.005em', fontWeight: '600' }],
+        body: ['0.9375rem', { lineHeight: '1.5rem' }],
+        meta: ['0.8125rem', { lineHeight: '1.25rem' }],
+        label: ['0.75rem', { lineHeight: '1rem' }],
         // A hash is read character by character off a projector; it gets its own size
         // and never inherits body leading.
         hash: ['0.8125rem', { lineHeight: '1.5', letterSpacing: '0.01em' }],
@@ -104,9 +122,10 @@ export default {
         glow: 'var(--glow)',
       },
       backgroundImage: {
-        'accent-gradient': 'linear-gradient(100deg, hsl(var(--accent-from)), hsl(var(--accent-to)))',
-        'accent-gradient-soft':
-          'linear-gradient(100deg, hsl(var(--accent-from) / 0.12), hsl(var(--accent-to) / 0.12))',
+        // Kept for compatibility. Both ends now resolve to the same restrained accent, so
+        // anything still using these renders as a flat tint rather than a gradient.
+        'accent-gradient': 'linear-gradient(hsl(var(--primary)), hsl(var(--primary)))',
+        'accent-gradient-soft': 'linear-gradient(hsl(var(--primary) / 0.08), hsl(var(--primary) / 0.08))',
       },
       transitionTimingFunction: {
         // One easing for every hover and reveal, so nothing feels "off" beside its neighbour.

@@ -1,9 +1,8 @@
 /**
  * Route table.
  *
- * Every role view is lazy: an advocate never downloads the officer's upload pipeline
- * or the FSL report form, which keeps the first paint after sign-in small and means a
- * change to one role's screen does not invalidate everyone else's cached bundle.
+ * Every role view is lazy: an advocate never downloads the officer's upload form or the
+ * FSL verdict form, which keeps the first paint after sign-in small.
  *
  * The public verifier is deliberately OUTSIDE the protected tree and carries no
  * session logic at all. It is the one surface a person with no account is meant to
@@ -16,7 +15,7 @@ import { AppLayout } from '@/components/layout/AppLayout';
 import { ProtectedRoute, PublicOnlyRoute } from '@/routes/ProtectedRoute';
 import { RouteFallback } from '@/components/layout/RouteFallback';
 import { ErrorBoundaryPage } from '@/components/layout/ErrorBoundaryPage';
-import { ROLES_FOR_ROUTE, SCAN_ROLES } from '@/lib/api';
+import { ROLES_FOR_ROUTE } from '@/lib/api';
 
 const Landing = lazy(() => import('@/features/landing/LandingPage'));
 const Login = lazy(() => import('@/features/auth/LoginPage'));
@@ -26,7 +25,6 @@ const Court = lazy(() => import('@/features/court/CourtPage'));
 const Lab = lazy(() => import('@/features/lab/LabPage'));
 const Counsel = lazy(() => import('@/features/counsel/CounselPage'));
 const Verify = lazy(() => import('@/features/verify/VerifyPage'));
-const Scan = lazy(() => import('@/features/custody/ScanPage'));
 
 /** Wrap a lazy element so every route shares one loading and one error treatment. */
 const page = (Element) => (
@@ -67,11 +65,6 @@ export const router = createBrowserRouter([
       {
         element: <ProtectedRoute roles={ROLES_FOR_ROUTE['/counsel']} />,
         children: [{ path: '/counsel', element: page(Counsel) }],
-      },
-      {
-        // Where the QR on a printed custody label lands.
-        element: <ProtectedRoute roles={SCAN_ROLES} />,
-        children: [{ path: '/scan', element: page(Scan) }],
       },
 
       { path: '*', element: <Navigate to="/" replace /> },

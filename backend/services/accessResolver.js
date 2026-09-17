@@ -27,14 +27,13 @@ import {
   WRITABLE_CASE_STAGES,
   CLOSED_CASE_STAGES,
   ADVOCATE_ROLES,
-  DISCLOSURE_STATUS,
   REFERRAL_STATUS,
+  CUSTODY_STATUS,
 } from '../models/enums.js';
 import { Case } from '../models/Case.js';
 import { Evidence } from '../models/Evidence.js';
 import { CustodyItem } from '../models/CustodyItem.js';
 import { Referral } from '../models/Referral.js';
-import { DisclosurePack } from '../models/DisclosurePack.js';
 import { Certificate } from '../models/Certificate.js';
 import { CaseAccessGrant } from '../models/CaseAccessGrant.js';
 import { VakalatnamaFiling } from '../models/VakalatnamaFiling.js';
@@ -58,12 +57,11 @@ const COURT_ONLY_ACTIONS = new Set([ACTION.ORDER, ACTION.APPROVE]);
  *
  * Not the case, and not an exhibit: those are the investigation's, and a court that
  * could edit them would be a party to the case rather than the tribunal over it. What
- * the court writes are its own records — the disclosure it serves, the certificates
- * it issues, the representation it records, and the articles its evidence room takes
- * in. Everything else it does to a case it does with ORDER or APPROVE.
+ * the court writes are its own records — the certificates it issues, the
+ * representation it records, and the articles its evidence room takes in. Everything
+ * else it does to a case it does with ORDER or APPROVE.
  */
 const COURT_WRITABLE = new Set([
-  RESOURCE_TYPE.DISCLOSURE_PACK,
   RESOURCE_TYPE.CERTIFICATE,
   RESOURCE_TYPE.VAKALATNAMA,
   RESOURCE_TYPE.CUSTODY_ITEM,
@@ -122,12 +120,6 @@ async function loadResource(resourceType, resourceId) {
       if (!referral) return { resource: null, caseDoc: null };
       const caseDoc = await Case.findById(referral.caseId).lean();
       return { resource: referral, caseDoc };
-    }
-    case RESOURCE_TYPE.DISCLOSURE_PACK: {
-      const pack = await DisclosurePack.findById(resourceId).lean();
-      if (!pack) return { resource: null, caseDoc: null };
-      const caseDoc = await Case.findById(pack.caseId).lean();
-      return { resource: pack, caseDoc };
     }
     case RESOURCE_TYPE.CERTIFICATE: {
       const cert = await Certificate.findById(resourceId).lean();
@@ -236,12 +228,8 @@ async function evaluate({ user, action, resourceType, resource, caseDoc }) {
      * so any officer posted there can receive it, hold it and hand it on — being the
      * investigating officer on some other case is neither here nor there.
      *
-     * Making this case-scoped instead would recreate the problem the custodian role
-     * was invented to solve and then remove the role that solved it: the only person
-     * who could take an article into the store would be the very officer whose case
-     * it belongs to, which is the one thing IO_CANNOT_HOLD_OWN_CASE_EVIDENCE forbids.
-     * That rule is enforced per handover in the custody controller, against whoever
-     * would actually end up holding the article.
+     * Every officer at the station can record where an article went; the ledger
+     * records which officer did, with the reason and the seal's condition.
      */
     if (resourceType === RESOURCE_TYPE.CUSTODY_ITEM) {
       if (COURT_ONLY_ACTIONS.has(action)) return deny(DENY_REASON.READ_ONLY_ROLE);
@@ -314,64 +302,49 @@ async function evaluate({ user, action, resourceType, resource, caseDoc }) {
   // ============================================================= COURT =======
   if (user.authority === AUTHORITY.COURT) {
     if (!caseDoc) return deny(DENY_REASON.RESOURCE_NOT_FOUND);
+    if (user.role !== ROLE.COURT) return deny(DENY_REASON.NO_MATCHING_POLICY);
 
     /**
-     * The presiding judge holds the whole of the court's authority.
+     * The court is one role, scoped to the district court establishment.
      *
-     * There used to be a REGISTRAR between the judge and the case: the judge ruled,
-     * the registrar served, and neither could do the other's half. On paper that is a
-     * separation of duties; in this product it was a second login that had to be
-     * performed before an advocate could see a single page, and every demo and every
-     * real user hit it as an unexplained dead end. The court is one authority here,
-     * and it acts.
+     * It used to be scoped to a single bench (`courtId`), with two separate court
+     * roles. A chargesheet is routed by the jurisdiction router to whichever bench the
+     * statute points at — a Magistrate for FIR 0124/2026, the Sessions court for FIR
+     * 0123/2026 — and a case filed before one bench was invisible from every other
+     * court login. So a correctly filed case could sit on no court screen at all.
      *
-     * The judge therefore holds ORDER (which is theirs alone), APPROVE (ruling on
-     * what the investigation prepared) and WRITE against the court's own records —
-     * service, representation, certificates. What they do not hold is authorship of
-     * the investigation: writes to a case still with the police are refused, because
-     * a court that could add to the police file is not a court.
+     * Now every court identity in the district sees every case listed before any court
+     * in the district, and the case itself says which court it is before. `districtCode`
+     * comes from the court directory at sign-in; a case with no `courtId` is still with
+     * the police and before no court, which is refused exactly as before (ADR-015).
      */
-    if (user.role === ROLE.JUDGE) {
-      // scope.courtId came from the ROSTER at login. Lexx never assigns it.
-      // A case with no courtId is still under investigation and before no court —
-      // denying it is legally correct, not a gap. (ADR-015)
-      if (!caseDoc.courtId || !scope.courtId || caseDoc.courtId !== scope.courtId) {
-        return deny(DENY_REASON.CASE_NOT_LISTED_IN_YOUR_COURT);
-      }
-      // A closed case is read-only for the court too, including for the judge who
-      // closed it. Re-opening is a fresh order on a fresh listing, not an edit.
-      if (CLOSED_CASE_STAGES.includes(caseDoc.stage) && !READ_ACTIONS.has(action)) {
-        return deny(DENY_REASON.CASE_IS_CLOSED);
-      }
-      // A judge does not investigate. WRITE is authorship, and against a CASE or an
-      // EVIDENCE record authorship belongs to the police — a court that could
-      // recompute a case's jurisdiction or alter an exhibit's record would not be a
-      // court. What the judge writes is the COURT's own records: the disclosure it
-      // serves, the certificates it issues, the representation it records, and the
-      // articles its evidence room receives.
-      if (action === ACTION.WRITE && !COURT_WRITABLE.has(resourceType)) {
-        return deny(DENY_REASON.READ_ONLY_ROLE);
-      }
-      return allow();
+    if (!caseDoc.courtId || !scope.districtCode || caseDoc.districtCode !== scope.districtCode) {
+      return deny(DENY_REASON.CASE_NOT_LISTED_IN_YOUR_COURT);
     }
 
-    /**
-     * The court's evidence room. It receives and holds physical articles produced in
-     * court, and reads the case it holds them for. It rules on nothing.
-     */
-    if (user.role === ROLE.EVIDENCE_CUSTODIAN) {
-      if (!caseDoc.courtId || !scope.courtId || caseDoc.courtId !== scope.courtId) {
-        return deny(DENY_REASON.OUT_OF_COURT_SCOPE);
-      }
+    // Physical articles produced in court: the court may record where an article it
+    // holds goes next (back to the store, returned, destroyed), and nothing else.
+    if (resourceType === RESOURCE_TYPE.CUSTODY_ITEM) {
       if (COURT_ONLY_ACTIONS.has(action)) return deny(DENY_REASON.READ_ONLY_ROLE);
-      // Its writes are custodial — the two-scan handshake on an article it receives.
-      if (action === ACTION.WRITE && !CUSTODIAL_WRITES.has(resourceType)) {
-        return deny(DENY_REASON.READ_ONLY_ROLE);
+      if (action === ACTION.WRITE && resource.status !== CUSTODY_STATUS.IN_COURT) {
+        return deny(DENY_REASON.ARTICLE_NOT_WITH_YOU);
       }
       return allow();
     }
 
-    return deny(DENY_REASON.NO_MATCHING_POLICY);
+    // A closed case is read-only for the court too. Re-opening is a fresh order on a
+    // fresh listing, not an edit.
+    if (CLOSED_CASE_STAGES.includes(caseDoc.stage) && !READ_ACTIONS.has(action)) {
+      return deny(DENY_REASON.CASE_IS_CLOSED);
+    }
+
+    // A court does not investigate. WRITE is authorship, and against a CASE or an
+    // EVIDENCE record authorship belongs to the police. What the court writes is its
+    // own records; everything it does to a case it does with ORDER or APPROVE.
+    if (action === ACTION.WRITE && !COURT_WRITABLE.has(resourceType)) {
+      return deny(DENY_REASON.READ_ONLY_ROLE);
+    }
+    return allow();
   }
 
   // =============================================================== FSL ======
@@ -446,29 +419,26 @@ async function evaluate({ user, action, resourceType, resource, caseDoc }) {
     }
 
     if (resourceType === RESOURCE_TYPE.CUSTODY_ITEM) {
-      // A sealed article sent for examination has to be RECEIVED by the laboratory,
-      // and the two-scan handshake needs the receiver to act on the item. Same rule as
-      // the case: only while this lab holds a live referral in the item's case. WRITE
-      // here is the handshake alone — the controller still requires the examiner to
-      // be the named recipient or the current holder before anything moves.
-      //
-      // REPORTED counts too: a laboratory that has filed its report still holds the
-      // article and has to hand it back. Stopping at ACCEPTED left the examiner as the
-      // holder of an item they could no longer even open, so it sat AT_FSL for good.
+      // A laboratory sees an article that is AT the laboratory in its own state, or any
+      // article in a case where it holds a referral. It may record a movement only of
+      // an article currently with it — sending it back to the store or on to court.
+      const atLab = resource.status === CUSTODY_STATUS.AT_FSL;
       const referral = await Referral.findOne({
         caseId: resource.caseId,
         labId: scope.labId,
         status: { $in: LAB_CUSTODY_REFERRAL_STATUSES },
       }).lean();
-      if (!referral) return deny(DENY_REASON.NO_OPEN_REFERRAL_TO_YOUR_LAB);
+      if (!referral && !(atLab && inLabState(caseDoc))) {
+        return deny(DENY_REASON.NO_OPEN_REFERRAL_TO_YOUR_LAB);
+      }
       if (COURT_ONLY_ACTIONS.has(action)) return deny(DENY_REASON.READ_ONLY_ROLE);
+      if (action === ACTION.WRITE && !atLab) return deny(DENY_REASON.ARTICLE_NOT_WITH_YOU);
       return allow();
     }
 
     if (resourceType === RESOURCE_TYPE.CERTIFICATE) {
-      // Part B is the examiner's own statement; they may read and sign it. Reachable
-      // through a referral, or — since a verdict can now be recorded without one —
-      // through the same jurisdiction rule the exhibit itself follows.
+      // The examiner reads and verifies the system-issued certificate. Reachable
+      // through a referral, or through the same jurisdiction rule the exhibit follows.
       const referral = await Referral.findOne({
         evidenceId: resource.evidenceId,
         labId: scope.labId,
@@ -504,71 +474,25 @@ async function evaluate({ user, action, resourceType, resource, caseDoc }) {
     const { grant, reason } = await liveGrantFor(user.userId, caseDoc._id, roles);
     if (!grant) return deny(reason);
 
-    // Being on record gets you the case. It does not get you every exhibit in it.
-    if (resourceType === RESOURCE_TYPE.EVIDENCE) {
-      const pack = await DisclosurePack.findOne({
-        caseId: caseDoc._id,
-        status: DISCLOSURE_STATUS.SERVED,
-      }).lean();
-      if (!pack) return deny(DENY_REASON.NO_DISCLOSURE_PACK_SERVED);
-
-      // Served to THIS advocate specifically — a pack served on co-accused counsel
-      // is not served on them.
-      const servedToUser = (pack.servedTo ?? []).some((s) => sameId(s.userId, user.userId));
-      if (!servedToUser) return deny(DENY_REASON.NO_DISCLOSURE_PACK_SERVED);
-
-      const inSet = (pack.exhibitIds ?? []).some((id) => sameId(id, resource._id));
-      if (!inSet) return deny(DENY_REASON.EXHIBIT_NOT_IN_DISCLOSURE_SET);
-
-      return allowReadOnly(action);
-    }
-
-    if (resourceType === RESOURCE_TYPE.DISCLOSURE_PACK) {
-      if (resource.status !== DISCLOSURE_STATUS.SERVED) {
-        return deny(DENY_REASON.NO_DISCLOSURE_PACK_SERVED);
-      }
-      const servedToUser = (resource.servedTo ?? []).some((s) => sameId(s.userId, user.userId));
-      if (!servedToUser) return deny(DENY_REASON.NO_DISCLOSURE_PACK_SERVED);
-
-      // Acknowledging receipt stops the BNSS s.230 clock. It is the one thing counsel
-      // may change, it changes only their own entry, and it is deliberately NOT the
-      // general WRITE that advocates must never hold.
-      if (action === ACTION.ACKNOWLEDGE) return allow();
-
-      return allowReadOnly(action);
-    }
-
-    // A certificate is a statement ABOUT an exhibit: it carries the exhibit code, the
-    // evidence hash, the source device's make/model/serial/IMEI and the lab's opinion.
-    // Handing one over for an exhibit that was deliberately withheld from this
-    // advocate's pack would disclose exactly what the exclusion was meant to withhold.
-    // So a certificate is scoped to the SAME served set as the evidence it describes,
-    // not to the case grant alone.
-    if (resourceType === RESOURCE_TYPE.CERTIFICATE) {
-      const pack = await DisclosurePack.findOne({
-        caseId: caseDoc._id,
-        status: DISCLOSURE_STATUS.SERVED,
-      }).lean();
-      if (!pack) return deny(DENY_REASON.NO_DISCLOSURE_PACK_SERVED);
-
-      const servedToUser = (pack.servedTo ?? []).some((s) => sameId(s.userId, user.userId));
-      if (!servedToUser) return deny(DENY_REASON.NO_DISCLOSURE_PACK_SERVED);
-
-      const inSet = (pack.exhibitIds ?? []).some((id) => sameId(id, resource.evidenceId));
-      if (!inSet) return deny(DENY_REASON.EXHIBIT_NOT_IN_DISCLOSURE_SET);
-
-      return allowReadOnly(action);
-    }
-
+    /**
+     * Being on record IS the disclosure.
+     *
+     * A court that has accepted counsel onto a case has decided that counsel may see
+     * it. Counsel used to wait on a second, manual act — a disclosure pack composed and
+     * served by the court — before a single exhibit opened, and that was the step that
+     * went missing in practice. Now the live grant is the whole test: the case, every
+     * exhibit in it, and the s.63 certificate of each, read-only.
+     *
+     * What stays refused: every mutation (allowReadOnly), every case counsel are not on
+     * record for (the grant check above), and physical custody, which is a police and
+     * court matter. Machine analysis of an exhibit is never sent to counsel; the
+     * controllers strip it with `seesTriage`.
+     */
     if (resourceType === RESOURCE_TYPE.CUSTODY_ITEM) {
-      // Physical custody is a police and court matter; counsel see it through
-      // disclosure, not directly.
-      return deny(DENY_REASON.EXHIBIT_NOT_IN_DISCLOSURE_SET);
+      return deny(DENY_REASON.NO_MATCHING_POLICY);
     }
 
-    // Anything else a LEGAL user reaches is read-only at most. Note that every
-    // resource type carrying exhibit-level detail is handled explicitly ABOVE this
-    // line — a new such type must be added there, not left to fall through here.
+    // CASE, EVIDENCE, CERTIFICATE: read, verify and download only.
     return allowReadOnly(action);
   }
 
@@ -595,27 +519,12 @@ const CREATE_CAPABILITY = Object.freeze({
    */
   [RESOURCE_TYPE.REFERRAL]: (u) => u.authority === AUTHORITY.POLICE && u.role === ROLE.SHO,
   /**
-   * Disclosure is the COURT's act, start to finish.
-   *
-   * It used to begin with the investigating officer proposing a set and asking to
-   * withhold parts of it. That put the police on both sides of a question they are a
-   * party to, and it made the defence's access wait on a form the investigation had
-   * to remember to fill in. The court holds the case file once the chargesheet is
-   * filed; deciding what the defence gets from it is the court's to decide, and the
-   * police have no route to it at all.
-   */
-  [RESOURCE_TYPE.DISCLOSURE_PACK]: (u) =>
-    u.authority === AUTHORITY.COURT && u.role === ROLE.JUDGE,
-  [RESOURCE_TYPE.CERTIFICATE]: (u) =>
-    (u.authority === AUTHORITY.POLICE && u.role === ROLE.IO) ||
-    (u.authority === AUTHORITY.COURT && u.role === ROLE.JUDGE),
-  /**
    * Putting an advocate on record mirrors a fact the COURT asserted (an accepted
    * vakalatnama or a legal-aid order). An investigating officer must never be able to
    * decide who represents the accused.
    */
   [RESOURCE_TYPE.CASE_ACCESS_GRANT]: (u) =>
-    u.authority === AUTHORITY.COURT && u.role === ROLE.JUDGE,
+    u.authority === AUTHORITY.COURT && u.role === ROLE.COURT,
   /**
    * Lifting a freeze after a broken seal is the station supervisor's call — the person
    * who does not hold the article and answers for the chain. Nobody else can unfreeze.
@@ -632,28 +541,17 @@ const CREATE_CAPABILITY = Object.freeze({
  * Almost everything created under a case is authorship, so it needs WRITE — and is
  * therefore correctly refused once the case leaves investigation.
  *
- * A BSA s.63 certificate is the exception, and getting this wrong made the feature
- * unusable at exactly the moment it is needed. The certificate is prepared FOR court,
- * which in practice means at or after the chargesheet — precisely when the case has
- * closed to investigative writes. But a certificate does not alter the record: it
- * ATTESTS to a record already collected, and the deponent is the officer who
- * collected it. Requiring WRITE conflated "may amend the investigation" with "may
- * swear to what the investigation produced". It needs case READ access plus the
- * deponent capability above, and nothing more.
+ * No user creates a BSA s.63 certificate: the system issues and signs one at upload.
  */
 const CREATE_IMPLIES_ACTION = Object.freeze({
-  [RESOURCE_TYPE.CERTIFICATE]: ACTION.READ,
   /**
-   * Composing a disclosure pack and putting an advocate on record are both the court
-   * RULING on a case it is seized of — APPROVE, not WRITE.
+   * Putting an advocate on record is the court RULING on a case it is seized of —
+   * APPROVE, not WRITE.
    *
    * WRITE would be wrong twice over. It is authorship, which against a case belongs
    * to the police and to nobody else; and it is refused once the case leaves
-   * investigation, which is precisely when disclosure and representation happen. Both
-   * of these must still work after the chargesheet, because that is the only time
-   * they ever occur.
+   * investigation, which is precisely when representation happens.
    */
-  [RESOURCE_TYPE.DISCLOSURE_PACK]: ACTION.APPROVE,
   [RESOURCE_TYPE.CASE_ACCESS_GRANT]: ACTION.APPROVE,
   // A freeze decision is custodial, like the handovers it re-opens: it must be
   // available after the chargesheet, when articles are still travelling to court.
@@ -780,7 +678,9 @@ export function scopeFilterFor(user, resourceType = RESOURCE_TYPE.CASE) {
   }
 
   if (user.authority === AUTHORITY.COURT) {
-    return scope.courtId ? { courtId: scope.courtId } : null;
+    // Every case listed before a court in this district. `courtId: {$ne: null}` is what
+    // keeps cases still with the police out of it.
+    return scope.districtCode ? { districtCode: scope.districtCode, courtId: { $ne: null } } : null;
   }
 
   if (user.authority === AUTHORITY.FSL) {
@@ -889,6 +789,17 @@ export async function materialiseScopeFilter(user, resourceType = RESOURCE_TYPE.
       },
     });
 
+    // Articles physically at a laboratory in this state are the lab's to see and move,
+    // whether or not a referral was raised for them.
+    if (resourceType === RESOURCE_TYPE.CUSTODY_ITEM && filter.__fslState) {
+      const stateCaseIds = await Case.distinct('_id', { stateCode: filter.__fslState });
+      const clauses = [];
+      if (caseIds.length) clauses.push({ caseId: { $in: caseIds } });
+      if (stateCaseIds.length) clauses.push({ status: CUSTODY_STATUS.AT_FSL, caseId: { $in: stateCaseIds } });
+      if (!clauses.length) return null;
+      return clauses.length === 1 ? clauses[0] : { $or: clauses };
+    }
+
     // A case list, though, follows the exhibits: an examiner has to be able to say
     // which case the still in front of them came out of.
     if (resourceType === RESOURCE_TYPE.CASE && filter.__fslState) {
@@ -914,26 +825,12 @@ export async function materialiseScopeFilter(user, resourceType = RESOURCE_TYPE.
       .lean();
     const caseIds = grants.map((g) => g.caseId);
 
-    // Being on record gets counsel the CASE. It does not get them every exhibit in
-    // it — that is the whole point of a disclosure pack, and `resolve()` enforces it
-    // per exhibit. The list path did not, so an advocate correctly refused an
-    // excluded exhibit at `GET /api/evidence/:id` could still enumerate it, with its
-    // title, mime type, size and triage priority, from `GET /api/evidence` and
-    // `GET /api/evidence/queue/triage`. Same served set, same rule, both paths.
-    if (resourceType === RESOURCE_TYPE.EVIDENCE) {
-      if (!caseIds.length) return null;
-      const packs = await DisclosurePack.find({
-        caseId: { $in: caseIds },
-        status: DISCLOSURE_STATUS.SERVED,
-        'servedTo.userId': filter.__legalGrants,
-      })
-        .select('exhibitIds')
-        .lean();
+    // Physical custody is not counsel's to see (see `evaluate`), so the custody
+    // register lists nothing to them — the list and the per-item read agree.
+    if (resourceType === RESOURCE_TYPE.CUSTODY_ITEM) return null;
 
-      const exhibitIds = packs.flatMap((p) => p.exhibitIds ?? []);
-      return exhibitIds.length ? { _id: { $in: exhibitIds } } : null;
-    }
-
+    // The cases counsel are on record for, and every exhibit in them — exactly what
+    // `resolve()` allows record by record. Same rule, both paths.
     return byCaseIds(caseIds);
   }
 

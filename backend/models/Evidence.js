@@ -6,17 +6,22 @@
  * `supersededById` carry what a DELETE would otherwise express.
  *
  * Two independent claims are kept strictly apart:
- *   `triage`   — machine review-prioritisation. Never a verdict, never on-chain.
+ *   `aiAnalysis` — Gemini's automated deepfake assessment and review priority.
+ *                  A recommendation for the queue. Never a verdict, never on-chain.
  *   `forensic` — the ONLY authenticity opinion, produced by a s.79A-notified lab.
  * Collapsing those two is the single most dangerous thing this codebase could do,
  * so they are separate subdocuments with separate vocabularies.
  */
 import mongoose from 'mongoose';
+import { randomBase64Url } from '../config/crypto.js';
 import {
   EVIDENCE_KIND,
   SOURCE_TYPE,
   TRIAGE_PRIORITY,
-  TRIAGE_DISCLAIMER,
+  AI_ANALYSIS_STATUS,
+  AI_PROVIDER,
+  AI_DISCLAIMER,
+  DEEPFAKE_ASSESSMENT,
   FORENSIC_STATUS,
   FORENSIC_OPINION,
   COURT_STATUS,
@@ -53,42 +58,60 @@ const SourceDeviceSchema = new Schema(
 );
 
 /**
- * The machine's review priority. Written once, at ingest, by the system itself.
+ * Gemini's deepfake / manipulation analysis and its review-priority recommendation.
  *
- * There is no route that sets this and no role that could reach one if there were:
- * a priority a station can raise is a priority that reflects who asked loudest. The
- * only way it changes is a re-ingest, which is a new exhibit.
+ * Every field that explains the AI decision — the assessment, the score, the
+ * description, the indicators, the priority and its reason, the FSL recommendation —
+ * is Gemini's own output, validated by `services/ai/analysisSchema.js` and stored as
+ * returned. Nothing here is computed by this system, and no route lets a person set
+ * it. Result fields stay null unless `status` is COMPLETED; a failed analysis keeps
+ * its error and never acquires a score.
  */
-const TriageSchema = new Schema(
+const AiAnalysisSchema = new Schema(
   {
-    priority: { type: String, enum: values(TRIAGE_PRIORITY), index: true },
-    /** What was observed about the file. Plain sentences, safe to read aloud in court. */
-    indicators: { type: [String], default: [] },
-    /**
-     * The same list with the weight each reason contributed, and whether it is a
-     * finding about this file or context about the case. This is the working behind
-     * the band — not a confidence, not a probability, and never rendered as one.
-     */
-    reasons: {
-      type: [
-        new Schema(
-          {
-            label: { type: String, required: true },
-            weight: { type: Number, required: true },
-            kind: { type: String, enum: ['finding', 'context'], default: 'finding' },
-          },
-          { _id: false }
-        ),
-      ],
-      default: [],
+    status: {
+      type: String,
+      enum: values(AI_ANALYSIS_STATUS),
+      default: AI_ANALYSIS_STATUS.PENDING,
     },
-    /** Whether a laboratory could say anything useful about this kind of exhibit. */
-    examinationRecommended: { type: Boolean, default: false },
-    modelName: { type: String },
-    modelVersion: { type: String },
-    generatedAt: { type: Date },
+    provider: { type: String, enum: values(AI_PROVIDER), default: AI_PROVIDER.GEMINI },
+    /** The model that produced the result, as Gemini reported it (or as configured). */
+    model: { type: String, default: null },
+    requestedAt: { type: Date, default: null },
+    startedAt: { type: Date, default: null },
+    completedAt: { type: Date, default: null },
+    attempts: { type: Number, default: 0 },
+
+    deepfakeAssessment: {
+      type: String,
+      enum: [...values(DEEPFAKE_ASSESSMENT), null],
+      default: null,
+    },
+    deepfakeScore: { type: Number, min: 0, max: 100, default: null },
+    analysisDescription: { type: String, default: null },
+    detectedIndicators: { type: [String], default: [] },
+    triagePriority: { type: String, enum: [...values(TRIAGE_PRIORITY), null], default: null },
+    priorityReason: { type: String, default: null },
+    fslReviewRecommended: { type: Boolean, default: null },
+    fslReviewReason: { type: String, default: null },
+    evidenceSummary: { type: String, default: null },
+
+    error: {
+      type: new Schema(
+        {
+          code: { type: String, required: true },
+          message: { type: String, default: null },
+          retryable: { type: Boolean, default: false },
+          issues: { type: [String], default: [] },
+          at: { type: Date, default: null },
+        },
+        { _id: false }
+      ),
+      default: null,
+    },
+
     /** Immutable text. Never edited, never omitted from a response. */
-    disclaimer: { type: String, default: TRIAGE_DISCLAIMER },
+    disclaimer: { type: String, default: AI_DISCLAIMER },
   },
   { _id: false }
 );
@@ -146,6 +169,22 @@ const EvidenceSchema = new Schema(
   {
     /** Human readable, printed on the QR label. */
     exhibitCode: { type: String, required: true, unique: true, immutable: true },
+
+    /**
+     * The token behind the exhibit's permanent QR label — the sticker put on the
+     * physical article. 32 random bytes, base64url. Set once at upload and never
+     * changed: unlike a certificate's verification token (which is replaced if the
+     * certificate is superseded), a printed label must keep working for the life of
+     * the exhibit. It is a lookup key for the public lifecycle page, nothing more.
+     * Backfilled for older exhibits by the boot migration.
+     */
+    labelToken: {
+      type: String,
+      unique: true,
+      sparse: true,
+      immutable: true,
+      default: () => randomBase64Url(32),
+    },
 
     caseId: { type: Schema.Types.ObjectId, ref: 'Case', required: true, immutable: true, index: true },
     title: { type: String, required: true, trim: true, maxlength: 300 },
@@ -210,7 +249,7 @@ const EvidenceSchema = new Schema(
       default: null,
     },
 
-    triage: { type: TriageSchema, default: null },
+    aiAnalysis: { type: AiAnalysisSchema, default: null },
     forensic: { type: ForensicSchema, default: () => ({}) },
 
     courtStatus: {
@@ -232,7 +271,8 @@ const EvidenceSchema = new Schema(
 );
 
 EvidenceSchema.index({ caseId: 1, createdAt: -1 });
-EvidenceSchema.index({ caseId: 1, 'triage.priority': 1 });
+EvidenceSchema.index({ caseId: 1, 'aiAnalysis.triagePriority': 1 });
+EvidenceSchema.index({ 'aiAnalysis.status': 1 });
 EvidenceSchema.index({ 'forensic.status': 1, 'forensic.labId': 1 });
 EvidenceSchema.index({ 'anchor.batchId': 1 });
 EvidenceSchema.index(

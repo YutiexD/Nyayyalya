@@ -36,11 +36,35 @@ export function openBlob(blob, filename) {
   return undefined;
 }
 
-/** Copy text; resolves true when it worked. */
+/**
+ * Copy text; resolves true when it worked.
+ *
+ * The async clipboard API needs a secure context and a focused document. A demo served
+ * over plain HTTP on a LAN address has neither, so the old `execCommand('copy')` path is
+ * kept as a fallback rather than failing silently.
+ */
 export async function copyText(text) {
+  const value = String(text ?? '');
   try {
-    await navigator.clipboard.writeText(String(text));
-    return true;
+    if (navigator.clipboard?.writeText && window.isSecureContext) {
+      await navigator.clipboard.writeText(value);
+      return true;
+    }
+  } catch {
+    /* fall through to the legacy path */
+  }
+  try {
+    const area = document.createElement('textarea');
+    area.value = value;
+    area.setAttribute('readonly', '');
+    area.style.position = 'fixed';
+    area.style.top = '-1000px';
+    area.style.opacity = '0';
+    document.body.appendChild(area);
+    area.select();
+    const ok = document.execCommand('copy');
+    area.remove();
+    return ok;
   } catch {
     return false;
   }

@@ -12,7 +12,8 @@
 import { z } from 'zod';
 import { Case } from '../models/Case.js';
 import { Evidence } from '../models/Evidence.js';
-import { materialiseScopeFilter, seesTriage } from '../services/accessResolver.js';
+import { materialiseScopeFilter } from '../services/accessResolver.js';
+import { seesAiAnalysis } from '../services/ai/visibility.js';
 import { writeAudit } from '../middleware/audit.js';
 import { RESOURCE_TYPE, ACTION, DECISION } from '../models/enums.js';
 import { BadRequest, ServiceUnavailable } from '../utils/errors.js';
@@ -93,9 +94,10 @@ export async function search(req, res, next) {
               $text: { $search: q.q },
               $and: [{ ...evidenceFilter }, { caseId: { $in: scopedCaseIds } }],
             })
+              // The AI analysis status and priority are the laboratory's alone.
               .select(
                 `exhibitCode title caseId mimeType courtStatus createdAt${
-                  seesTriage(req.user) ? ' triage.priority' : ''
+                  seesAiAnalysis(req.user) ? ' aiAnalysis.status aiAnalysis.triagePriority' : ''
                 }`
               )
               .limit(q.limit)

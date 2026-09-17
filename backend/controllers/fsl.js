@@ -11,7 +11,7 @@
  *
  * # Two claims that must never merge
  *
- * `evidence.triage` is machine review-prioritisation. `evidence.forensic` is the
+ * `evidence.aiAnalysis` is the AI model's automated assessment. `evidence.forensic` is the
  * authenticity opinion of a s.79A-notified laboratory. This file writes the second
  * and never reads or touches the first. AUTHENTIC / MANIPULATED / INCONCLUSIVE is the
  * only authenticity vocabulary in the system and only an examiner can produce it.
@@ -29,6 +29,8 @@ import { z } from 'zod';
 import { Referral } from '../models/Referral.js';
 import { Evidence } from '../models/Evidence.js';
 import { User } from '../models/User.js';
+import { Case } from '../models/Case.js';
+import { CustodyItem } from '../models/CustodyItem.js';
 import {
   LEDGER_EVENT,
   SUBJECT_TYPE,
@@ -41,8 +43,10 @@ import {
   DECISION,
   DENY_REASON,
   TRIAGE_PRIORITY_ORDER,
-  TRIAGE_DISCLAIMER,
+  TRIAGE_PRIORITY_RANK,
   TRIAGE_UI_LABEL,
+  AI_ANALYSIS_STATUS,
+  AI_DISCLAIMER,
   values,
 } from '../models/enums.js';
 import { appendEvent } from '../services/ledger.js';
@@ -53,6 +57,11 @@ import { storeSealedDocument } from '../services/sealedDocument.js';
 import { buildStorageKey } from '../services/storage.js';
 import { sniffMimeType } from '../services/fileType.js';
 import { verifyEcdsaP256 } from '../config/crypto.js';
+import { evidenceCards, sortByPriority } from '../services/caseOverview.js';
+import { STAGE_LABEL } from '../services/caseWorkflow.js';
+import { seesAiAnalysis, aiAnalysisView } from '../services/ai/visibility.js';
+// Recording an opinion does not touch certificates. The s.63 certificate is its own
+// workflow (controllers/certificate.js) and is not gated on, or rewritten by, a verdict.
 import { writeAudit } from '../middleware/audit.js';
 import { BadRequest, NotFound, Forbidden, Conflict } from '../utils/errors.js';
 
@@ -379,6 +388,15 @@ export async function fileReport(req, res, next) {
     if (!req.file) throw BadRequest('FILE_REQUIRED', 'A report file is required');
     const body = parse(reportSchema, req.body);
 
+    const current = await Evidence.findById(referral.evidenceId).select('forensic.opinion').lean();
+    if (current?.forensic?.opinion) {
+      throw Conflict(
+        'VERDICT_ALREADY_RECORDED',
+        'A forensic opinion is already on record for this exhibit. It is the official finding and is not overwritten.',
+        { opinion: current.forensic.opinion }
+      );
+    }
+
     if (referral.status !== REFERRAL_STATUS.ACCEPTED) {
       // Accept-then-report is the whole two-step: an opinion from a lab that never
       // took the exhibit on has no recorded point at which it received it.
@@ -443,10 +461,11 @@ export async function fileReport(req, res, next) {
 
     // ---- 5. the opinion ----
     // `triage` is untouched. The two claims are separate and stay separate.
-    await Evidence.updateOne(
-      { _id: referral.evidenceId },
+    const written = await Evidence.updateOne(
+      { _id: referral.evidenceId, 'forensic.opinion': null },
       {
         $set: {
+          'forensic.basis': 'REFERRAL',
           'forensic.status': FORENSIC_STATUS.REPORT_FILED,
           'forensic.labId': referral.labId,
           'forensic.labName': referral.labName,
@@ -462,6 +481,9 @@ export async function fileReport(req, res, next) {
         },
       }
     );
+    if (!written.modifiedCount) {
+      throw Conflict('VERDICT_ALREADY_RECORDED', 'A forensic opinion was recorded for this exhibit a moment ago.');
+    }
 
     const updated = await Referral.findOneAndUpdate(
       { _id: referral._id, status: REFERRAL_STATUS.ACCEPTED },
@@ -507,8 +529,7 @@ export async function fileReport(req, res, next) {
       },
       ledgerSeq: entry.seq,
       entryHash: entry.entryHash,
-      basisNote:
-        'This opinion is the source for Part B of the BSA s.63 certificate. It is independent of automated triage.',
+      basisNote: 'Recorded as the laboratory’s signed forensic opinion. It is independent of automated triage.',
     });
   } catch (err) {
     return next(err);
@@ -539,13 +560,13 @@ export async function fileReport(req, res, next) {
 export async function reviewQueue(req, res, next) {
   try {
     const labId = req.scopeFilter?.__fslLab ?? null;
-    if (!labId) {
-      return res.json({ labId: null, queue: [], counts: emptyCounts(), uiLabel: TRIAGE_UI_LABEL, disclaimer: TRIAGE_DISCLAIMER });
+    if (!labId || !seesAiAnalysis(req.user)) {
+      return res.json({ labId: null, queue: [], counts: emptyCounts(), uiLabel: TRIAGE_UI_LABEL, disclaimer: AI_DISCLAIMER });
     }
 
     const scope = await materialiseScopeFilter(req.user, RESOURCE_TYPE.EVIDENCE);
     if (!scope) {
-      return res.json({ labId, queue: [], counts: emptyCounts(), uiLabel: TRIAGE_UI_LABEL, disclaimer: TRIAGE_DISCLAIMER });
+      return res.json({ labId, queue: [], counts: emptyCounts(), uiLabel: TRIAGE_UI_LABEL, disclaimer: AI_DISCLAIMER });
     }
 
     const state = parse(z.enum(['PENDING', 'REVIEWED', 'ALL']).default('PENDING'), req.query.state ?? 'PENDING');
@@ -574,7 +595,7 @@ export async function reviewQueue(req, res, next) {
         },
         {
           $project: {
-            exhibitCode: 1, title: 1, caseId: 1, triage: 1, forensic: 1,
+            exhibitCode: 1, title: 1, caseId: 1, aiAnalysis: 1, forensic: 1,
             mimeType: 1, sizeBytes: 1, kind: 1, createdAt: 1,
             case: { $first: '$__case' },
           },
@@ -586,12 +607,13 @@ export async function reviewQueue(req, res, next) {
     return res.json({
       labId,
       state,
-      queue: items,
+      // The provider-neutral view: no provider, no model.
+      queue: items.map((i) => ({ ...i, aiAnalysis: aiAnalysisView(i.aiAnalysis) })),
       counts,
       // The label and the disclaimer travel with the data, so no client can render
       // this as anything other than what it is.
       uiLabel: TRIAGE_UI_LABEL,
-      disclaimer: TRIAGE_DISCLAIMER,
+      disclaimer: AI_DISCLAIMER,
     });
   } catch (err) {
     return next(err);
@@ -617,7 +639,7 @@ async function countsFor(scope) {
     {
       $group: {
         _id: {
-          priority: '$triage.priority',
+          priority: '$aiAnalysis.triagePriority',
           reviewed: { $cond: [{ $ifNull: ['$forensic.opinion', false] }, true, false] },
         },
         n: { $sum: 1 },
@@ -635,6 +657,133 @@ async function countsFor(scope) {
     }
   }
   return counts;
+}
+
+// ======================================================== grouped by case ====
+
+const rankOf = (p) => (p ? TRIAGE_PRIORITY_RANK[p] ?? TRIAGE_PRIORITY_ORDER.length : TRIAGE_PRIORITY_ORDER.length);
+
+/**
+ * GET /api/fsl/cases?state=PENDING|REVIEWED|ALL
+ *
+ * The laboratory's work, grouped by the case it belongs to.
+ *
+ * An examiner first needs to know WHICH case they are opening — its FIR, its offence,
+ * how grave it is — and then every exhibit in it, ordered by the review priority
+ * the AI recommended. Each exhibit carries its AI analysis, its forensic status,
+ * the physical article it came from and its s.63 certificate. Cases are ordered by the
+ * most urgent exhibit they contain.
+ *
+ * Scope is the resolver's evidence scope for this laboratory; nothing outside it is
+ * grouped, counted or named.
+ */
+export async function caseGroups(req, res, next) {
+  try {
+    const labId = req.scopeFilter?.__fslLab ?? null;
+    const empty = { labId, state: null, cases: [], counts: emptyCounts(), uiLabel: TRIAGE_UI_LABEL, disclaimer: AI_DISCLAIMER };
+    if (!labId || !seesAiAnalysis(req.user)) return res.json({ ...empty, labId: null });
+
+    const scope = await materialiseScopeFilter(req.user, RESOURCE_TYPE.EVIDENCE);
+    if (!scope) return res.json(empty);
+
+    const state = parse(z.enum(['PENDING', 'REVIEWED', 'ALL']).default('ALL'), req.query.state ?? 'ALL');
+    const byState = {
+      PENDING: { 'forensic.opinion': null },
+      REVIEWED: { 'forensic.opinion': { $ne: null } },
+      ALL: {},
+    }[state];
+
+    const evidence = await Evidence.find({ $and: [scope, byState] })
+      .select('-encryption')
+      .sort({ createdAt: -1 })
+      .limit(500)
+      .lean();
+    const cards = await evidenceCards(evidence, req.user);
+    const caseIds = [...new Set(cards.map((c) => c.caseId))];
+
+    const custodyScope = await materialiseScopeFilter(req.user, RESOURCE_TYPE.CUSTODY_ITEM);
+    const [cases, articles, counts] = await Promise.all([
+      Case.find({ _id: { $in: caseIds } })
+        .select('firNumber title stationCode districtCode sensitivityClass maxPunishmentYears bnsSections stage courtName cnrNumber createdAt')
+        .lean(),
+      custodyScope
+        ? CustodyItem.find({ $and: [custodyScope, { caseId: { $in: caseIds } }] })
+            .select('itemCode description caseId evidenceId status currentLocation custodian sealIntact frozen lastMovedAt createdAt')
+            .lean()
+        : [],
+      countsFor(scope),
+    ]);
+
+    const S = AI_ANALYSIS_STATUS;
+    const groups = cases.map((c) => {
+      const id = String(c._id);
+      const ev = sortByPriority(cards.filter((x) => x.caseId === id));
+      const ai = (st) => ev.filter((x) => x.aiAnalysis?.status === st).length;
+      const byPriority = Object.fromEntries(
+        TRIAGE_PRIORITY_ORDER.map((p) => [
+          p,
+          ev.filter((x) => x.aiAnalysis?.status === S.COMPLETED && x.aiAnalysis.triagePriority === p).length,
+        ])
+      );
+      const highestPriority = TRIAGE_PRIORITY_ORDER.find((p) => byPriority[p] > 0) ?? null;
+      const caseArticles = articles.filter((a) => String(a.caseId) === id);
+      return {
+        case: {
+          id,
+          firNumber: c.firNumber,
+          title: c.title,
+          stationCode: c.stationCode,
+          sensitivityClass: c.sensitivityClass,
+          maxPunishmentYears: c.maxPunishmentYears,
+          bnsSections: c.bnsSections ?? [],
+          stage: c.stage,
+          stageLabel: STAGE_LABEL[c.stage] ?? c.stage,
+          courtName: c.courtName ?? null,
+          cnrNumber: c.cnrNumber ?? null,
+        },
+        highestPriority,
+        summary: {
+          exhibits: ev.length,
+          awaitingVerdict: ev.filter((x) => !x.forensic?.opinion).length,
+          verdicts: ev.filter((x) => x.forensic?.opinion).length,
+          byPriority,
+          analysis: {
+            completed: ai(S.COMPLETED),
+            pending: ai(S.PENDING) + ai(S.PROCESSING),
+            failed: ai(S.FAILED),
+            unsupported: ai(S.UNSUPPORTED),
+          },
+          fslReviewRecommended: ev.filter((x) => x.aiAnalysis?.fslReviewRecommended && !x.forensic?.opinion).length,
+          articlesAtLab: caseArticles.filter((a) => a.status === 'AT_FSL').length,
+        },
+        latestAt: ev.map((x) => new Date(x.createdAt)).sort((a, b) => b - a)[0] ?? null,
+        evidence: ev,
+        articles: caseArticles.map((a) => ({
+          itemId: String(a._id),
+          itemCode: a.itemCode,
+          description: a.description,
+          evidenceId: a.evidenceId ? String(a.evidenceId) : null,
+          status: a.status,
+          location: a.currentLocation,
+          custodian: a.custodian ?? null,
+          sealIntact: a.sealIntact !== false,
+          frozen: Boolean(a.frozen),
+          lastMovedAt: a.lastMovedAt ?? a.createdAt,
+        })),
+      };
+    });
+
+    groups.sort(
+      (a, b) =>
+        rankOf(a.highestPriority) - rankOf(b.highestPriority) ||
+        b.summary.awaitingVerdict - a.summary.awaitingVerdict ||
+        new Date(b.latestAt) - new Date(a.latestAt)
+    );
+
+    return res.json({ labId, state, cases: groups, counts, uiLabel: TRIAGE_UI_LABEL, disclaimer: AI_DISCLAIMER });
+  } catch (err) {
+    return next(err);
+  }
 }
 
 // =============================================================== verdict ====
@@ -689,6 +838,16 @@ export async function recordVerdict(req, res, next) {
   try {
     const evidence = req.resource;
     const body = parse(verdictSchema, req.body);
+
+    // The laboratory's verdict is the official finding. A second one does not quietly
+    // replace it — it is refused, and the first stays on the record.
+    if (evidence.forensic?.opinion) {
+      throw Conflict(
+        'VERDICT_ALREADY_RECORDED',
+        'A forensic opinion is already on record for this exhibit. It is the official finding and is not overwritten.',
+        { opinion: evidence.forensic.opinion, reportedAt: evidence.forensic.reportedAt ?? null }
+      );
+    }
 
     const labId = req.user.scope?.labId ?? null;
     if (!labId) {
@@ -764,8 +923,9 @@ export async function recordVerdict(req, res, next) {
 
     // ---- record it ----
     const reportedAt = new Date();
-    await Evidence.updateOne(
-      { _id: evidence._id },
+    const written = await Evidence.updateOne(
+      // Guarded: two examiners recording at the same moment cannot both win.
+      { _id: evidence._id, 'forensic.opinion': null },
       {
         $set: {
           'forensic.status': FORENSIC_STATUS.REPORT_FILED,
@@ -784,6 +944,9 @@ export async function recordVerdict(req, res, next) {
         },
       }
     );
+    if (!written.modifiedCount) {
+      throw Conflict('VERDICT_ALREADY_RECORDED', 'A forensic opinion was recorded for this exhibit a moment ago.');
+    }
 
     // Any referral this laboratory still holds open on the exhibit is answered by the
     // opinion — leaving it OPEN would show the same work as outstanding on one screen
@@ -835,8 +998,8 @@ export async function recordVerdict(req, res, next) {
       ledgerSeq: entry.seq,
       entryHash: entry.entryHash,
       basisNote: documentSha256
-        ? 'Recorded with a signed report document, and it is the source for Part B of the BSA s.63 certificate.'
-        : 'Recorded as a signed forensic opinion without a separate report document. It is the source for Part B of the BSA s.63 certificate, and it is independent of automated triage.',
+        ? 'Recorded as a signed forensic opinion with its report document. It is independent of automated triage.'
+        : 'Recorded as a signed forensic opinion without a separate report document. It is independent of automated triage.',
     });
   } catch (err) {
     return next(err);
@@ -851,6 +1014,7 @@ export default {
   acceptReferral,
   fileReport,
   reviewQueue,
+  caseGroups,
   verdictUpload,
   recordVerdict,
   verdictStatement,

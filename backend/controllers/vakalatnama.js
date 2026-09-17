@@ -11,7 +11,9 @@
  *      rules on it.
  *   3. On acceptance the appearance is recorded in the COURT REGISTER first — the
  *      court directory, which checks the registrar's staff code and the listing itself
- *      — and only then does Lexx mirror it as a CaseAccessGrant.
+ *      — and only then does Lexx mirror it as a CaseAccessGrant. That grant is the
+ *      whole of counsel's access: from that moment they read the case and every exhibit
+ *      in it, read-only. The court shares nothing by hand.
  *
  * Step 3's order is the whole trust model. Lexx never decides who represents whom: the
  * court register does, and Lexx follows it. That is also why `sync-representation`
@@ -283,10 +285,9 @@ export async function listMine(req, res, next) {
 /**
  * GET /api/vakalatnama/case/:caseId — the registry's view of representation.
  *
- * Gated on APPROVE over the case, the same court-only gate as the disclosure pack
- * list: the judge and registry of the court the case is listed in, and nobody else.
- * Returns the filings AND who is on record now, because "who will be served" is the
- * question the registrar is actually answering.
+ * Gated on APPROVE over the case, a court-only gate: the court the case is listed in,
+ * and nobody else. Returns the filings AND who is on record now — the advocates who
+ * can read this case file.
  */
 export async function listForCase(req, res, next) {
   try {
@@ -462,6 +463,8 @@ export async function acceptFiling(req, res, next) {
         ? { grantId: String(grant._id), role: grant.role, grantBasis: grant.grantBasis, grantRef: grant.grantRef }
         : null,
       courtRegister,
+      /** What being on record gives counsel, immediately and with no further step. */
+      access: grant ? 'CASE_AND_EXHIBITS_READ_ONLY' : null,
       ledgerSeq: entry.seq,
       entryHash: entry.entryHash,
     });

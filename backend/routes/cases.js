@@ -44,6 +44,41 @@ router.get(
   cases.getTimeline
 );
 
+/** Where the case stands in its lifecycle and which acts can move it now. */
+router.get(
+  '/:id/workflow',
+  authorize({ action: ACTION.READ, resourceType: RESOURCE_TYPE.CASE }),
+  cases.getWorkflow
+);
+
+/** The case grouped for a dashboard: exhibits, articles, pending actions, recent history. */
+router.get(
+  '/:id/overview',
+  authorize({ action: ACTION.READ, resourceType: RESOURCE_TYPE.CASE }),
+  cases.getOverview
+);
+
+/**
+ * The court's judicial acts — take cognizance, commit, begin trial, direct further
+ * investigation, close. ORDER, which the resolver grants to the court alone; the state
+ * machine in services/caseWorkflow.js decides whether the act is valid at this stage.
+ */
+router.post(
+  '/:id/transition',
+  requireHealthyAudit,
+  authorize({ action: ACTION.ORDER, resourceType: RESOURCE_TYPE.CASE }),
+  // Closing may carry a signed PDF (multipart). Parsed only after ORDER is established.
+  cases.closureDocumentUpload,
+  cases.transitionCase
+);
+
+/** The signed judgment / declaration / order attached at closure: an audited download. */
+router.get(
+  '/:id/closure-document',
+  authorize({ action: ACTION.READ, resourceType: RESOURCE_TYPE.CASE }),
+  cases.getClosureDocument
+);
+
 router.post(
   '/:id/compute-jurisdiction',
   authorize({ action: ACTION.WRITE, resourceType: RESOURCE_TYPE.CASE }),
@@ -75,6 +110,7 @@ router.post(
   '/:id/close',
   requireHealthyAudit,
   authorize({ action: ACTION.ORDER, resourceType: RESOURCE_TYPE.CASE }),
+  cases.closureDocumentUpload,
   cases.closeCase
 );
 

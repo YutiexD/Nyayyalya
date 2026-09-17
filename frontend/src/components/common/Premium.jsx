@@ -1,58 +1,45 @@
 /**
- * The compositions that give the register its finish.
+ * Presentation pieces for the public pages (landing, sign-in, verifier).
  *
- * Every piece here is a Magic UI or shadcn part arranged for this product, with the
- * accent colours pinned to the token sheet. Nothing in a page picks a gradient stop
- * or a beam colour on its own — that is how a design stays one design across seven
- * role views built by different hands.
- *
- * Restraint is the rule. A beam traces a flow the viewer is meant to follow; a border
- * beam marks the single card that matters right now; a number ticks up because it is
- * a count and not because counting is fun. A page that used all of these at once
- * would look like a landing page for a crypto exchange, which is the opposite of what
- * a court should feel looking at it.
+ * They used to carry the product's decoration: beams, shimmer, a dot field, colour
+ * pools, a pulsing lamp. All of that is gone. The exports and their props are kept so
+ * the pages compile, but every piece now renders in the same calm, institutional style
+ * as the application screens: flat surfaces, one accent, no animated decoration.
  */
-import { createRef, forwardRef, useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { ShieldCheck } from 'lucide-react';
 
 import { DotPattern } from '@/components/ui/dot-pattern';
-import { AnimatedBeam } from '@/components/ui/animated-beam';
-import { BorderBeam } from '@/components/ui/border-beam';
-import { AnimatedShinyText } from '@/components/ui/animated-shiny-text';
 import { cn } from '@/lib/utils';
 import { useCountUp } from '@/hooks/useGsap';
 
 /**
- * The accent, as hex, for the few Magic UI props that take SVG attributes rather
- * than CSS — `<stop stop-color>` cannot resolve `var()`. Chosen to sit correctly on
- * both themes rather than switched per theme, because a beam that changed colour on
- * toggle would draw the eye to the toggle instead of the flow.
+ * The accent as hex, for the few third-party props that take SVG attributes rather
+ * than CSS. Deliberately low-contrast so any remaining beam reads as a hairline.
  */
-export const ACCENT_HEX = Object.freeze({ from: '#6366f1', to: '#22d3ee' });
+export const ACCENT_HEX = Object.freeze({ from: '#3f5bb5', to: '#94a3b8' });
 
 // ----------------------------------------------------------------- backdrop ----
 
 /**
- * A quiet field behind a hero or a sign-in: a dot grid masked to the centre, and two
- * out-of-focus colour pools. `absolute` and `pointer-events-none`, so it costs the
- * page nothing in layout and never intercepts a click.
+ * A field behind a hero. By default it renders nothing: application and sign-in
+ * surfaces sit on the plain page background. Pass `dots` or `pools` explicitly for a
+ * very faint texture on a marketing section.
  */
-export function Backdrop({ className, dots = true, pools = true }) {
+export function Backdrop({ className, dots = false, pools = false }) {
+  if (!dots && !pools) return null;
   return (
     <div aria-hidden className={cn('pointer-events-none absolute inset-0 overflow-hidden', className)}>
       {dots && (
         <DotPattern
-          width={22}
-          height={22}
+          width={24}
+          height={24}
           cr={1}
-          className="mask-radial fill-foreground/[0.08] dark:fill-foreground/[0.10]"
+          className="mask-radial fill-foreground/[0.05]"
         />
       )}
       {pools && (
-        <>
-          <div className="absolute -top-32 left-1/2 h-[28rem] w-[44rem] -translate-x-1/2 rounded-full bg-accent-from/10 blur-3xl dark:bg-accent-from/15" />
-          <div className="absolute -bottom-40 right-[-10%] h-[22rem] w-[32rem] rounded-full bg-accent-to/10 blur-3xl dark:bg-accent-to/10" />
-        </>
+        <div className="absolute -top-40 left-1/2 h-[24rem] w-[40rem] -translate-x-1/2 rounded-full bg-primary/[0.05] blur-3xl" />
       )}
     </div>
   );
@@ -60,33 +47,29 @@ export function Backdrop({ className, dots = true, pools = true }) {
 
 // ---------------------------------------------------------------- branding ----
 
-/** The mark. A gradient tile with the shield, at any size. */
+/** The mark: the shield on a solid accent tile. */
 export function BrandMark({ className, size = 'md' }) {
-  const dims = { sm: 'size-7 rounded-md', md: 'size-9 rounded-lg', lg: 'size-14 rounded-2xl' }[size];
-  const icon = { sm: 'size-3.5', md: 'size-4.5', lg: 'size-7' }[size];
+  const dims = { sm: 'size-7 rounded-md', md: 'size-9 rounded-lg', lg: 'size-14 rounded-xl' }[size];
+  const icon = { sm: 'size-4', md: 'size-5', lg: 'size-7' }[size];
   return (
     <span
-      className={cn(
-        'grid shrink-0 place-items-center bg-accent-gradient text-white shadow-elev-1',
-        dims,
-        className
-      )}
+      className={cn('grid shrink-0 place-items-center bg-primary text-primary-foreground', dims, className)}
     >
       <ShieldCheck className={icon} strokeWidth={2.25} />
     </span>
   );
 }
 
-/** A small label above a heading. Shines once, softly, to say "start here". */
+/** A small label above a heading. Static. */
 export function Eyebrow({ children, className }) {
   return (
     <div
       className={cn(
-        'inline-flex items-center rounded-full border bg-card/60 px-3 py-1 text-xs font-medium shadow-elev-1',
+        'inline-flex items-center rounded-full border bg-card px-3 py-1 text-xs font-medium text-muted-foreground',
         className
       )}
     >
-      <AnimatedShinyText className="text-muted-foreground">{children}</AnimatedShinyText>
+      {children}
     </div>
   );
 }
@@ -94,12 +77,8 @@ export function Eyebrow({ children, className }) {
 // -------------------------------------------------------------------- stats ----
 
 /**
- * A number that counts up to itself.
- *
- * GSAP rather than Magic UI's NumberTicker, and the reason is what each does when the
- * viewer has asked for reduced motion: this one prints the final value immediately;
- * the motion-based ticker leaves its start value of 0 on screen. "0 tests" on a
- * projector is not a degraded animation, it is a false statement.
+ * A number that counts up to itself. Under reduced motion the final value is printed
+ * immediately, never a misleading 0.
  */
 function CountUp({ value, delay = 0 }) {
   const ref = useRef(null);
@@ -113,35 +92,39 @@ function CountUp({ value, delay = 0 }) {
   return <span ref={ref}>{delay === 0 ? value : 0}</span>;
 }
 
+const TONE_ICON = {
+  ok: 'bg-ok-muted text-ok',
+  warn: 'bg-warn-muted text-warn',
+  bad: 'bg-bad-muted text-bad',
+  accent: 'bg-primary/10 text-primary',
+};
+
 /**
- * A figure worth counting up to. Only for quantities: entries checked, exhibits in
- * a pack, tests passing. Never for anything a viewer might read mid-flight and
- * believe — a digit that changes while being read is worse than no animation.
+ * A figure with a label and caption.
+ * @deprecated Metric tiles are being removed from application pages. Acceptable on the
+ * landing page only.
  */
 export function StatCard({ label, value, suffix, caption, icon: Icon, tone, className, delay = 0 }) {
   return (
-    <div className={cn('surface surface-lift relative overflow-hidden p-5', className)}>
+    <div className={cn('surface relative p-5', className)}>
       <div className="flex items-start justify-between gap-3">
-        <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">{label}</p>
+        <p className="text-[13px] font-medium text-muted-foreground">{label}</p>
         {Icon && (
           <span
             className={cn(
               'grid size-8 place-items-center rounded-md bg-muted text-muted-foreground',
-              tone === 'ok' && 'bg-ok-muted text-ok',
-              tone === 'warn' && 'bg-warn-muted text-warn',
-              tone === 'bad' && 'bg-bad-muted text-bad',
-              tone === 'accent' && 'bg-accent-gradient-soft text-accent-from'
+              TONE_ICON[tone]
             )}
           >
             <Icon className="size-4" />
           </span>
         )}
       </div>
-      <p className="mt-3 flex items-baseline gap-1 text-3xl font-semibold tracking-tight tabular">
+      <p className="mt-2 flex items-baseline gap-1 text-3xl font-semibold tracking-tight tabular">
         {typeof value === 'number' ? <CountUp value={value} delay={delay} /> : value}
         {suffix && <span className="text-base font-medium text-muted-foreground">{suffix}</span>}
       </p>
-      {caption && <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{caption}</p>}
+      {caption && <p className="mt-1.5 text-[13px] leading-relaxed text-muted-foreground">{caption}</p>}
     </div>
   );
 }
@@ -149,23 +132,20 @@ export function StatCard({ label, value, suffix, caption, icon: Icon, tone, clas
 // ----------------------------------------------------------------- feature ----
 
 /**
- * One claim, with its limit underneath. The limit is not small print; it is half the
- * point. `highlight` adds a travelling border beam — reserve it for one card per row.
+ * One claim, with its limit underneath. `highlight` gives the card an accent border
+ * (it no longer adds an animated beam).
  */
 export function FeatureCard({ icon: Icon, title, children, limit, highlight, className }) {
   return (
-    <div className={cn('surface surface-lift relative flex flex-col gap-3 overflow-hidden p-6', className)}>
-      {highlight && (
-        <BorderBeam size={120} duration={9} colorFrom={ACCENT_HEX.from} colorTo={ACCENT_HEX.to} />
-      )}
-      <span className="grid size-10 place-items-center rounded-lg bg-accent-gradient-soft text-accent-from">
+    <div className={cn('surface relative flex flex-col gap-3 p-6', highlight && 'border-primary/35', className)}>
+      <span className="grid size-10 place-items-center rounded-lg bg-primary/10 text-primary">
         <Icon className="size-5" />
       </span>
       <h3 className="text-base font-semibold">{title}</h3>
       <p className="text-sm leading-relaxed text-muted-foreground">{children}</p>
       {limit && (
-        <p className="mt-auto border-t pt-3 text-xs leading-relaxed text-muted-foreground">
-          <span className="font-medium text-foreground/80">What it does not prove. </span>
+        <p className="mt-auto border-t pt-3 text-[13px] leading-relaxed text-muted-foreground">
+          <span className="font-medium text-foreground">What it does not prove. </span>
           {limit}
         </p>
       )}
@@ -175,59 +155,38 @@ export function FeatureCard({ icon: Icon, title, children, limit, highlight, cla
 
 // ---------------------------------------------------------------- pipeline ----
 
-const Node = forwardRef(function Node({ icon: Icon, label, sub, accent, className }, ref) {
+function Node({ icon: Icon, label, sub, accent, className }) {
   return (
-    <div ref={ref} className={cn('relative z-10 flex flex-col items-center gap-2 text-center', className)}>
+    <div className={cn('relative z-10 flex min-w-0 flex-1 flex-col items-center gap-2 text-center', className)}>
       <span
         className={cn(
-          'grid size-14 place-items-center rounded-2xl border bg-card shadow-elev-2',
-          accent && 'border-gradient glow'
+          'grid size-14 place-items-center rounded-xl border bg-card shadow-elev-1',
+          accent && 'border-primary/40'
         )}
       >
-        <Icon className={cn('size-6', accent ? 'text-accent-from' : 'text-foreground/80')} />
+        <Icon className={cn('size-6', accent ? 'text-primary' : 'text-foreground/75')} />
       </span>
-      <span className="text-xs font-semibold">{label}</span>
-      {sub && <span className="max-w-[9rem] text-[11px] leading-snug text-muted-foreground">{sub}</span>}
+      <span className="text-[13px] font-medium">{label}</span>
+      {sub && <span className="max-w-[10rem] text-xs leading-snug text-muted-foreground">{sub}</span>}
     </div>
   );
-});
+}
 
 /**
- * The flow, drawn. Nodes in a row, a beam travelling between each adjacent pair.
+ * The flow, drawn: nodes in a row joined by a static hairline.
  *
  * @param {object} props
  * @param {Array<{icon, label, sub?, accent?}>} props.nodes
  */
 export function PipelineBeam({ nodes, className }) {
-  const container = useRef(null);
-  // One ref object per node, created once. Held in STATE rather than in a ref so the
-  // array can be read during render — `ref={...}` and `fromRef={...}` need the
-  // objects at render time, and reading `someRef.current` while rendering is exactly
-  // what React forbids. The node count is fixed by the caller, so this never resizes.
-  const [refs] = useState(() => nodes.map(() => createRef()));
-
   return (
-    <div ref={container} className={cn('relative flex w-full items-start justify-between gap-4 py-4', className)}>
-      {nodes.map((n, i) => (
-        <Node key={n.label} ref={refs[i]} {...n} />
-      ))}
-      {nodes.slice(1).map((_, i) => (
-        <AnimatedBeam
-          key={`beam-${i}`}
-          containerRef={container}
-          fromRef={refs[i]}
-          toRef={refs[i + 1]}
-          duration={4}
-          delay={i * 0.6}
-          pathColor="currentColor"
-          pathOpacity={0.15}
-          pathWidth={2}
-          gradientStartColor={ACCENT_HEX.from}
-          gradientStopColor={ACCENT_HEX.to}
-          startYOffset={-26}
-          endYOffset={-26}
-          className="text-foreground"
-        />
+    <div className={cn('relative flex w-full items-start justify-between gap-4 py-4', className)}>
+      <div
+        aria-hidden
+        className="absolute left-[12%] right-[12%] top-[calc(1rem+1.75rem)] h-px bg-border"
+      />
+      {nodes.map((n) => (
+        <Node key={n.label} {...n} />
       ))}
     </div>
   );
@@ -236,35 +195,30 @@ export function PipelineBeam({ nodes, className }) {
 // ------------------------------------------------------------------ verdict ----
 
 /**
- * One of the four verification lights, as a premium status tile. The tone carries the
- * meaning; the icon and label repeat it for anyone who cannot rely on colour.
+ * One verification check as a status tile. The tone carries the meaning; the icon and
+ * the state text repeat it for anyone who cannot rely on colour.
  */
 export function LightTile({ index, title, state, explanation, tone, icon: Icon, className }) {
-  const ring = {
-    ok: 'border-ok/40 bg-ok-muted/60',
-    warn: 'border-warn/40 bg-warn-muted/60',
-    bad: 'border-bad/40 bg-bad-muted/60',
-  }[tone] ?? 'border-border bg-muted/40';
-  const lamp = { ok: 'bg-ok', warn: 'bg-warn', bad: 'bg-bad' }[tone] ?? 'bg-muted-foreground';
+  const frame = {
+    ok: 'border-ok/25 bg-ok-muted/40',
+    warn: 'border-warn/25 bg-warn-muted/40',
+    bad: 'border-bad/25 bg-bad-muted/40',
+  }[tone] ?? '';
+  const lamp = { ok: 'bg-ok', warn: 'bg-warn', bad: 'bg-bad' }[tone] ?? 'bg-muted-foreground/60';
   const text = { ok: 'text-ok', warn: 'text-warn', bad: 'text-bad' }[tone] ?? 'text-muted-foreground';
 
   return (
-    <div className={cn('surface relative overflow-hidden border p-5', ring, className)}>
+    <div className={cn('surface p-5', frame, className)}>
       <div className="flex items-center justify-between">
-        <span className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
-          Check {index}
-        </span>
-        <span className="relative flex size-2.5">
-          <span className={cn('absolute inline-flex h-full w-full animate-ping rounded-full opacity-40', lamp)} />
-          <span className={cn('relative inline-flex size-2.5 rounded-full', lamp)} />
-        </span>
+        <span className="label-xs">Check {index}</span>
+        <span aria-hidden className={cn('inline-flex size-2 rounded-full', lamp)} />
       </div>
       <div className="mt-3 flex items-center gap-2">
         {Icon && <Icon className={cn('size-4', text)} />}
         <p className="text-sm font-medium">{title}</p>
       </div>
       <p className={cn('mt-1 text-lg font-semibold tracking-tight', text)}>{state}</p>
-      {explanation && <p className="mt-2 text-xs leading-relaxed text-muted-foreground">{explanation}</p>}
+      {explanation && <p className="mt-2 text-[13px] leading-relaxed text-muted-foreground">{explanation}</p>}
     </div>
   );
 }

@@ -1,353 +1,342 @@
-# LEXX 2.0 — Agent Context & Workflow Brief
+# LEXX 2.0 — The Idea and the Workflow, in Plain Language
 
-> **Audience: AI agents.** You are reading this because you have been asked to understand the LEXX 2.0 system and produce submission documents for **Smart India Hackathon (SIH)**. This file is the single source of truth for onboarding. Read it fully before generating anything.
->
-> **If a fact is not in this file or verifiable in the repository, do not assert it.** §14 lists claims that are forbidden because they are false. Overclaiming is the single most damaging failure mode for this project — see §14 before writing a single sentence of output.
-
----
-
-## 1. What LEXX is — one paragraph
-
-- **LEXX 2.0** is an AI-assisted, blockchain-backed **digital evidence registry** for the Indian criminal justice chain.
-- It manages the lifecycle of digital and physical evidence from **seizure → investigation → forensic examination → disclosure → court**, with cryptographic integrity guarantees at every step.
-- Its three defining claims, stated exactly as they should be repeated:
-  - *"LEXX holds no identities of its own. Officers, judges, advocates and examiners exist in their own authority directories — we verify against them and can create none of them."*
-  - *"Nothing is ever deleted. Status changes, and every change is signed by whoever ordered it."*
-  - *"Only the forensic laboratory decides authenticity. Our AI decides what gets looked at first."*
+> **Who this is for:** anyone who has to explain LEXX without a technical background — a
+> presenter, a judge, a police officer, a lawyer, a friend. No code, no jargon. Where a
+> technical word cannot be avoided, it is explained in the glossary at the end.
 
 ---
 
-## 2. Problem context
+## 1. The problem, as a story
 
-- Digital evidence in Indian criminal proceedings faces four recurring challenges:
-  - **Tamper-evidence** — proving a file has not changed between seizure and trial.
-  - **Chain of custody** — proving who held physical evidence, when, and that no link is missing.
-  - **Confidentiality** — ensuring counsel sees exactly what was disclosed to them and nothing more.
-  - **Statutory compliance** — producing a valid **BSA s.63** certificate, respecting **BNSS** timelines, and honouring **IT Act s.79A** (only a notified laboratory gives an expert authenticity opinion).
-- LEXX addresses each with a specific, testable mechanism rather than a general claim — see §4.
+A woman's phone is seized in a criminal case. On it is a video that could decide the trial.
 
----
+Months later, the video is played in court. The defence lawyer stands up and asks three questions:
 
-## 3. Current status — state this accurately
+1. **"Is this the same file that was collected — or has someone edited it since?"**
+2. **"Has anyone checked whether this video is a deepfake, or simply copied from the internet?"**
+3. **"Where is the legal certificate for it — and how do we know the certificate is genuine?"**
 
-| Dimension | Status |
-|---|---|
-| Maturity | **Working prototype**, feature-complete against its design specification |
-| Backend tests | **525 passing**, 18 suites, 0 skipped, 0 failing |
-| Contract tests | **36 passing** |
-| Lint | 0 errors (26 `require-atomic-updates` warnings — the documented false-positive pattern in the anchor service and in sequential test setup) |
-| API surface | **71 routes**, all documented in `docs/API.md` |
-| Architecture decisions | **39 ADRs** recorded in `docs/AGENT_DECISIONS.md` |
-| Security findings | **6 found, 6 fixed**, each with a regression test (`docs/SECURITY_FINDINGS.md`) |
-| Smart contract | **Deployed and live** on Monad Testnet — see §8 |
-| Live anchoring | **Active in the local deployment** (`ANCHOR_ENABLED=true` in `.env`): Merkle roots are submitted and confirmed on Monad Testnet — see §8 |
-| Cloud deployment | **Not deployed.** Runs locally / on a single machine |
-| Independent security audit | **Never performed.** Do not imply otherwise |
+Today, answering those questions means digging through paper registers, emails between the
+police station and the forensic lab, and a certificate typed up and signed by hand at the last
+minute. Pieces go missing. Cases get delayed, and sometimes genuine evidence is thrown out simply
+because nobody can *prove* it was handled properly.
 
-- The codebase is roughly **48,500 lines** across 151 files (backend, three directory services, frontend, contracts, tests, docs).
+At the same time, AI tools now make fake photos and videos easy to create. Courts are
+receiving digital evidence that no one can confidently trust.
 
 ---
 
-## 4. Features — the twelve, with the mechanism behind each
+## 2. The idea
 
-State the *mechanism*, not just the feature name. The mechanism is what makes each claim credible.
+**LEXX is one trusted record that follows a piece of evidence from the police station all
+the way to the courtroom.**
 
-- **F1 — Provisioned authentication.** No self-registration; `POST /api/auth/register` returns **410 Gone**. Accounts exist only if the person is already ACTIVE in an authority directory. Role and jurisdiction are read from that directory, never from the request body.
-- **F2 — Case creation + jurisdiction router.** Cases are created only from an FIR that already exists in the police directory. A pure function computes the correct court (Magistrate / Sessions / Special), picks it from the district's courts as the court directory lists them, and **shows its reasoning on screen** — e.g. *"Maximum punishment 20 years — triable by a Court of Session"*, *"Victim is a minor — POCSO designated court required"*. **Filing the chargesheet registers the case with that court**, which allots the CNR (a simulated eCourts registration, ADR-035); a designation no local court holds is refused, never routed to an ordinary court. Filing starts the fourteen-day BNSS s.230 disclosure clock.
-- **F3 — Evidence upload with client-side hash + signature.** The browser computes SHA-256 and signs it with an **ECDSA P-256 key that is non-extractable and never leaves the device**. The server recomputes the hash from the bytes it received and verifies the signature against the key registered at activation. Failure of either check is refused *and written to the ledger*.
-- **F4 — QR-based physical custody chain.** Booking an item prints a **custody label**: a QR that opens the item in Lexx (`/scan?label=…`) plus the particulars checked against the bag by eye (item code, seal number, FIR, IMEI/serial, who seized it). Movement is a two-scan handshake done on screen: the holder picks a **named** receiver and gets a single-use code (5-minute TTL), the receiver scans the label (or opens the row in any custody register — officer, station, court, lab) and enters the code with the seal condition. Handovers continue after the chargesheet (articles still travel to court); booking a *new* article does not (ADR-036). Broken seals freeze custody until the **SHO records a decision** (optionally re-sealing); the exception stays in the chain. Gap detection reports structured findings (`ILLEGAL_STATE_TRANSITION`, `SEQUENCE_DISCONTINUITY`, `STATE_DIVERGENCE`).
-- **F5 — Integrity verification (four independent lights).** File integrity, uploader signature, ledger chain, on-chain anchor — each recomputed from first principles and reported **separately, never merged into one verdict**. Available to the officer, the court and counsel on the same exhibit. The **public verifier** (no account) checks a s.63 certificate — by its token, or by **dropping the PDF itself**, which it hashes in the browser and reports as the current registered document, an earlier version, or not the registered document (ADR-039) — an officer's **upload receipt** (ledger sequence + entry hash, against the register and the anchored root, with the contract's own `verifyEntry`), and lists anchored batches with explorer links.
-- **F6 — Automatic review priority.** **Every** exhibit is banded the moment it is registered — `CRITICAL | HIGH | MEDIUM | LOW` — from the file's own metadata, the integrity of its upload, its media type and the gravity of the case. Nobody is asked for it: there is no field on any form and no endpoint that sets one, so no role can push its own work up a laboratory's queue. Each band comes with the sentences behind it ("container and stream durations disagree by 19s"). What was *observed about the file* sets the band; how grave the case is can move it up one place and never into `CRITICAL`. Never a verdict. See §6 — this boundary is the most important thing in the system.
-- **F7 — FSL review.** An examiner's queue is the digital evidence registered in the state their laboratory serves, plus anything formally referred to it, **in review-priority order** (ADR-042). They record a signed opinion of `AUTHENTIC | MANIPULATED | INCONCLUSIVE` — **the only authenticity vocabulary in the entire system** — in one step, with a report document optional; the record says which route produced it. The formal referral pipeline (refer → accept → report) is unchanged and is how a station puts *named questions* to a *named* laboratory about a sealed article it has sent.
-- **F8 — Vakalatnama e-filing, disclosure sets + advocate scoping.** An advocate comes on record **only** by filing a signed vakalatnama through Lexx (PDF hashed and signed in the browser); filing grants nothing. The **presiding judge** accepts or refuses it; on acceptance the appearance is written to the **court register first** — which verifies the judge against the roster order placing them in that court today — and only then mirrored as access (ADR-030, ADR-040). **Disclosure is the court's, start to finish** (ADR-043): the police have no route to a disclosure pack at all, and `POST /api/disclosure/:caseId/share` composes the set, rules on every withholding and serves it in one act, writing all three ledger entries. The court rules on each withholding request **both ways** — withhold, or refuse and disclose (ADR-037); an unruled request blocks service. An advocate on record sees only the served exhibit set, and never machine triage on any read path (ADR-038). One outside the set gets `EXHIBIT_NOT_IN_DISCLOSURE_SET`; one not on record gets `NOT_ON_RECORD_FOR_THIS_CASE` — both reachable from counsel's **Open by reference** (case by CNR, exhibit by code), both audited. Per-recipient watermarking makes leaks traceable, and the court can **trace** a leaked page's watermark token back to its recipient.
-- **F9 — BSA s.63 certificate.** Part A auto-fills from the evidence record and ledger timeline. Part B can only come from a filed FSL report. **Generation is refused if any Part A field is missing**, returning the exact missing-field list — refusing to produce an incomplete legal document is a feature, and should be presented as one. Issued, signed by **both parties** (the deponent signs Part A on the officer's exhibit screen; the examiner signs Part B on the Lab screen) and downloaded from the exhibit screens; each certificate shows its verification link, QR and copy buttons for the public verifier. A certificate issued before the laboratory reported is flagged: a fresh one is needed to carry Part B.
-- **F10 — Audit log.** Every authorization decision, **allow and deny**, is recorded. Audit rows are append-only.
-- **F11 — Merkle anchoring.** Ledger entries are batched into a Merkle tree; only the **root** goes on chain. See §8.
-- **F12 — Search.** Scope filter is applied **before** the query, never as a post-filter on results.
+Every time something happens to the evidence — it is uploaded, certified, examined, or the case
+moves forward in court — LEXX writes it down in a way that **cannot be quietly changed
+afterwards**. Anyone who needs to can later check that the evidence and its history are exactly
+as they were.
 
----
+It rests on three simple promises:
 
-## 5. Roles — ten, across four authorities
-
-Roles are **derived from external directories**, never assigned inside LEXX.
-
-- **POLICE authority**
-  - `IO` — Investigating Officer. Owns their own cases; cannot write once the case leaves investigation. Opens cases from FIRs, registers evidence, books articles into custody, files the chargesheet.
-  - `SHO` — Station House Officer. Sees every case and every exhibit at their station in review-priority order, and the chains of custody that do not add up. **No workflow waits on an SHO.** What only they can do is lift a custody freeze after a broken seal, and put named questions to a named laboratory.
-  - `DISTRICT_SP` — District Superintendent. District-wide **read-only** oversight.
-- **COURT authority**
-  - `JUDGE` — Reached via the court **roster**, never assigned by LEXX. Holds the whole of the court's authority over the cases listed in their court: the exhibits, the physical articles, the ledger, judicial orders (only a judge can), ruling on vakalatnamas, sharing the case file with counsel, issuing s.63 certificates, tracing a leaked copy, and **closing the case**. What they cannot do is write the investigation: a `WRITE` against a case or an exhibit is refused.
-  - `EVIDENCE_CUSTODIAN` — Court-side evidence room. Receives and keeps the physical articles produced in court, and reads the cases it holds them for. It rules on nothing.
-  - Seeded courts: Sessions Court No. 2 (POCSO and SC/ST designated — judge `UP-JUD-2291`, evidence room `UP-GZB-EVC-01`) and the Court of the CJM (judge `UP-JUD-1180`, evidence room `UP-GZB-EVC-02`).
-- **FSL authority**
-  - `FSL_EXAMINER` — Sees the digital evidence registered in the state their laboratory serves, plus anything referred to it, ordered by review priority. The only role that can state an authenticity opinion. Signs Part B of the certificate; receives a sealed article while their lab holds a referral in its case, and hands it back after reporting.
-- **LEGAL authority**
-  - `DEFENCE_COUNSEL`, `VICTIM_COUNSEL`, `LEGAL_AID_COUNSEL`, `PUBLIC_PROSECUTOR` — Case-scoped and read-only. An advocate **files a vakalatnama through Lexx**; access exists only once the court accepts it and the court register records it (or via a legal-aid order). Counsel can open, verify and read the certificate of each exhibit served on them — nothing else.
-
-### Two roles this product deliberately does not have
-
-`MALKHANA_CUSTODIAN` and `REGISTRAR` were removed (ADR-040), and the reason is the same for both: **neither made a decision.** Each was an account the workflow had to wait for.
-
-- The custodian's real contribution was a rule — *the officer on a case must not keep that case's evidence* — and that rule is unchanged, now enforced against whoever would actually end up holding the article. The station store is still a place, every movement is still a two-scan ledgered handover, and the custody register is station-wide because an article in the store is kept by the station.
-- The registrar was a second court login standing between a judge's decision and its effect. It is where rehearsals stalled: an advocate filed a vakalatnama, the judge could see it and could not act on it, and the defence saw nothing.
-
-If asked, say it plainly: *we removed the two steps that added a login and no decision.*
-
-**Key architectural point to convey:** advocates get **no jurisdictional scope at all**. Their access is purely per-case, granted by a court-asserted fact.
+- **Nothing is ever deleted.** Things can change status, but every change is recorded with
+  who did it and when.
+- **The AI helps the lab decide what to look at first. Only the forensic lab decides what is
+  real. Only the court decides the case.** These three are never mixed up.
+- **LEXX does not create people.** Police officers, judges, lawyers and lab examiners already
+  exist in official government records. LEXX checks those records; it cannot invent an
+  officer or a judge.
 
 ---
 
-## 6. The compliance boundary — the most important section in this file
+## 3. The people in the story
 
-- **AI triage produces ONLY:** a `Review Priority` of `CRITICAL | HIGH | MEDIUM | LOW`, a list of indicators, a model name/version, and a fixed statutory disclaimer.
-- **AI triage NEVER produces:** an authenticity verdict, a confidence score, a percentage, or the words `AUTHENTIC`, `MANIPULATED`, `VERIFIED`.
-- **Only an `FSL_EXAMINER` produces** `AUTHENTIC | MANIPULATED | INCONCLUSIVE`, and only after examining an exhibit referred to their laboratory.
-- **The disclaimer text, verbatim, always attached:**
-  > *Automated triage only. Not expert opinion under BSA s.39 / IT Act s.79A.*
-- This separation is **enforced structurally, not by convention**:
-  - Two disjoint vocabularies in `backend/models/enums.js` (`TRIAGE_PRIORITY` vs `FORENSIC_OPINION`).
-  - An automated test asserts the triage output can never contain a verdict word or a percentage.
-  - The UI renders them as visually distinct components with separate attribution.
-- **Why it matters legally:** BSA s.39 / s.45A and IT Act s.79A require a *certified examiner's* opinion for authenticity. An algorithm asserting authenticity would be inadmissible and a liability.
-- **When writing submission material:** never describe LEXX's AI as "detecting fake evidence", "verifying authenticity", or "validating evidence". Correct phrasing: *"prioritises which exhibits a human examiner should look at first."*
-
----
-
-## 7. Tech stack — complete
-
-- **Runtime & language**
-  - Node.js **22.x** (requires ≥20.10), ES Modules throughout (`"type": "module"`)
-  - JavaScript, no TypeScript
-- **Backend**
-  - **Express 4.22** — core API on port `5000`
-  - **Mongoose 8** — ODM over MongoDB
-  - **MongoDB 7/8** — databases: `lexx_core`, `dir_police`, `dir_court`, `dir_legal`
-  - **zod** — request validation on every endpoint
-  - **pino** + **pino-http** — structured logging with secret redaction
-  - **helmet**, **cors**, **express-rate-limit** — HTTP hardening
-  - **multer 2.x** — multipart upload, disk-streamed (never buffered in memory)
-  - **jsonwebtoken** — HS256, algorithm pinned at verification
-  - **bcryptjs** — password hashing, cost 12 (production refuses below 12)
-  - **pdfkit** — s.63 certificate PDF generation
-  - **qrcode** — custody label and certificate QR generation
-  - **ethers 6** — blockchain interaction
-- **Frontend**
-  - **React 18** single-page app on **Vite 7**, **React Router 7**, **TanStack Query 5**, **Redux Toolkit 2**
-  - **Tailwind CSS 3** + shadcn/Radix components, GSAP for motion, `qrcode` for labels and certificate QRs; no CDN dependencies (works offline)
-  - **Web Crypto API** — SHA-256 hashing and ECDSA P-256 signing in-browser (evidence, FSL reports, vakalatnamas, certificate signatures)
-  - **IndexedDB** — stores the non-extractable private key
-- **Blockchain**
-  - **Solidity 0.8.24**, EVM target `paris`
-  - **Hardhat 2.22** + **@nomicfoundation/hardhat-toolbox**
-  - **OpenZeppelin Contracts v5** — `AccessControl`, `MerkleProof`
-  - **Monad Testnet** — chain ID **10143**
-- **Testing**
-  - **Vitest 5** — 525 backend tests across unit / integration / authz / redteam
-  - **supertest** — HTTP-level integration testing
-  - **mongodb-memory-server** — real `mongod` binary per test suite (not a mock)
-  - **Hardhat/Mocha/Chai** — 36 contract tests
-- **Tooling**
-  - **ESLint 9** flat config, **dotenv**, **concurrently**
-
----
-
-## 8. Blockchain — state this precisely
-
-- **Network:** Monad Testnet · **Chain ID 10143** · RPC `https://testnet-rpc.monad.xyz` · Explorer `https://testnet.monadexplorer.com`
-- **Contract:** `LexxAnchor.sol` — OpenZeppelin `AccessControl`, custom errors, no hardcoded addresses
-- **Deployed address:** `0x835611e0d85D130d313EfC0F80F69DaAFfc5Aaa8`
-- **Deployment block:** 59571226 — **verified live on chain** (bytecode present, deploy transaction `status = 1`)
-- **What goes on chain:** a batch ID, a **Merkle root**, and the sequence range it covers. Nothing else.
-- **What NEVER goes on chain:** evidence, file contents, hashes of PII, names, case identifiers, AI triage output.
-- **When things go on chain:** every ledger write (upload, custody move, referral, report, vakalatnama ruling, disclosure step, order, certificate) is appended to the hash-chained ledger. Every `ANCHOR_INTERVAL_MS` (5 min), and once at the end of `npm run seed`, the new entries are batched into a Merkle tree and **one root** is submitted to `LexxAnchor.anchorBatch`. A batch is `CONFIRMED` only after its receipt is read back with `status === 1`.
-- **Current anchoring state — state it exactly:**
-  - The local `.env` runs with `ANCHOR_ENABLED=true` and a signer holding `ANCHOR_ROLE` (funded with testnet MON). Roots **are submitted and confirmed** on Monad Testnet — first live batches confirmed in blocks 61687401–61687421, and the contract's `verifyEntry` confirmed a ledger entry's Merkle proof. `.env.example` still defaults to `false` (DRY_RUN) for a fresh checkout without a funded key.
-  - Switching submission on also promotes earlier `DRY_RUN` batches to the chain, oldest first (ADR-033). Batch ids commit to their root, so a reset ledger never collides with batches already on chain (ADR-032).
-  - Correct phrasing: *"Merkle roots of the ledger are anchored on Monad Testnet every five minutes; each confirmed batch has a transaction anyone can open on the explorer."*
-  - Incorrect phrasing: *"Evidence is stored on the blockchain"* — only roots go on chain. If a deployment runs with `ANCHOR_ENABLED=false`, the verifier shows roots amber as "recorded locally, nothing submitted" and it must be described as dry-run.
-- **Outcomes are read from receipts.** Once a transaction is sent, an RPC error while waiting is settled from the transaction receipt; an unanswered batch stays `SUBMITTED` and nothing new is batched over it; one recorded `FAILED` despite a mined transaction is corrected on the next cycle (ADR-039 — found live: batch 27–28 was mined in block 61704167 but recorded `FAILED`).
-- **What anchoring proves:** that a set of ledger entries existed in exactly that form at that time.
-- **What anchoring does NOT prove:** that the entries are true, that evidence is authentic, or that nothing was omitted.
-- **Verified integration:** the backend's Merkle implementation is cross-checked against the deployed contract at **nine tree sizes** — every backend-generated proof verifies on-chain, and forged leaves are rejected on-chain (`contracts/scripts/cross-check-backend-merkle.js`).
-
----
-
-## 9. Architecture
-
-```
-CLIENT (React SPA on Vite, :5173) — role views + /scan + public verifier
-  · SHA-256 hash + ECDSA P-256 sign in-browser, key non-extractable in IndexedDB
-        │  JWT (15 min) + rotating refresh token
-LEXX CORE API (Express :5000, db lexx_core)
-  · authenticate → resolveContext → authorize → audit
-  · services/accessResolver.js  ← THE single policy point
-  · modules: auth · case · evidence · custody · fsl · disclosure
-             vakalatnama · certificate · ledger · audit · search · anchor
-        │                    │                      │
-   MongoDB            Object vault            Anchor service
-   lexx_core          ./vault                 Merkle batcher →
-   + append-only      AES-256-GCM             MONAD TESTNET
-     hash chain       envelope-encrypted      (root only)
-
-EXTERNAL AUTHORITY DIRECTORIES (mock government systems, read-only to LEXX)
-  POLICE :6001 (CCTNS)   COURT :6002 (eCourts)   LEGAL/FSL :6003 (BCI + FSL LIMS)
-```
-
-- **Three authority directories** are **deliberate mocks** standing in for CCTNS, eCourts and FSL LIMS. They are separate services with separate databases, and **every route is a GET, enforced by middleware, except two simulated court-registry acts** in the court directory. LEXX's only writes into any directory are relaying **the presiding judge's acceptance of a vakalatnama** (carrying the judge's own code, which the directory verifies against its judges *and* against the roster order placing them in that court today, before recording anything — ADR-030, ADR-040) and **registering a filed chargesheet** with the court the jurisdiction router chose, which allots the CNR (the directory refuses a court it does not hold — ADR-035). It cannot create identities, postings or rosters, and cannot choose a court the statute does not point at.
-- **Repository layout:**
-  - `backend/` — core API (config, middleware, models, services, controllers, routes, tests)
-  - `directories/` — the three authority services (`common/`, `police/`, `court/`, `legal/`)
-  - `frontend/` — Vite MPA (`lib/`, `pages/`, 8 HTML entries)
-  - `contracts/` — `LexxAnchor.sol` + Hardhat (own package)
-  - `seed/`, `scripts/`, `shared/`, `docs/`
-
----
-
-## 10. Security model — summary
-
-- **Authorization:** one function (`backend/services/accessResolver.js`), deny-by-default, with two invariants:
-  - It **loads resources from the database itself** — a controller can never hand it a request-derived object (prevents body-injected scope bypass).
-  - **The database is the authority, not the token** — session context is re-read every request, so a suspension takes effect on the *next request*, not the next login.
-  - Verified by a **58-assertion cross-scope authorization matrix**.
-- **Cryptography inventory:**
-  - SHA-256 — evidence hashing (browser + server recompute)
-  - ECDSA P-256, **IEEE P1363** encoding over the hex hash string — DER is explicitly rejected
-  - AES-256-GCM — content encryption, fresh 96-bit IV per operation
-  - HKDF-SHA256 — per-case KEK derivation from a master key
-  - keccak256 — Merkle tree, sorted pairs, leaves pre-hashed once
-  - HMAC-SHA256 — QR label authenticity
-  - bcrypt — passwords
-  - All randomness from `crypto.randomBytes` / `crypto.randomInt`; `Math.random` appears nowhere security-relevant
-- **Envelope encryption:** master key → per-case KEK (derived, never stored) → per-evidence DEK (stored wrapped). A database dump without the master key yields no plaintext.
-- **Tamper evidence:** append-only ledger, enforced at three levels — no update/delete route exists; Mongoose middleware refuses every mutating operation; each entry's hash chains to its predecessor. **Only the third one truly matters** — the first two stop mistakes, the third makes tampering *detectable*.
-- **Red-team suite:** 40 adversarial tests covering privilege escalation, JWT forgery (`alg:none`, wrong secret, tampered payload), NoSQL injection, prototype pollution, IDOR, ledger tampering, path traversal, MIME spoofing, token replay, and information disclosure.
-- **Six security findings, all fixed with regression tests.** The most serious (**SEC-001**) allowed any investigating officer to upload evidence into **any** case in the system — found by a test written against the intended policy, fixed by routing creation through the same `evaluate()` used by every other write.
-
----
-
-## 11. The eleven demo beats
-
-Each maps to a problem-statement requirement. Full script in `docs/DEMO_SCRIPT.md`.
-
-- **Beat 1** — A fake authority identity (`UP-GZB-9999`) is rejected and the attempt is audited.
-- **Beat 2** — Case created from FIR; the jurisdiction router shows its reasoning on screen.
-- **Beat 3** — Evidence upload: hash and signature computed in-browser, verified server-side, receipt downloaded.
-- **Beat 4** — Print a custody label (QR + seal particulars), scan it, hand the item over to a named receiver with a one-time code; a deliberately broken chain reports structured gap findings.
-- **Beat 5** — ★ **The winning beat.** Tamper the stored file from a terminal; click Verify; the **file light goes red while the ledger light stays green** — proving the file was touched, not the log.
-- **Beat 6** — AI triage shows *Review Priority: HIGH* with its disclaimer, never a verdict.
-- **Beat 7** — An FSL examiner sees only their own laboratory's referrals; files a signed opinion.
-- **Beat 8** — An advocate on record sees the served set; one not on record is **denied and logged live** — then files a vakalatnama through Lexx, the presiding judge accepts it, the court register records it, and the case file is shared with them, with their own watermark.
-- **Beat 9** — One-click s.63 certificate → PDF → scan its QR → public verifier confirms it, with no login. The officer's upload receipt is checked there too.
-- **Beat 10** — The audit feed shows the denial that just happened.
-- **Beat 11** — The Merkle anchor batch and its **confirmed Monad Testnet transaction** on the explorer; root only.
-
-### Where to get what you paste (demo mode)
-
-| What | Where it appears in the app | In demo mode |
+| Person | What they do in real life | What they do in LEXX |
 |---|---|---|
-| Certificate verification link / token | QR on the certificate PDF; copy buttons on every certificate panel (officer exhibit, court Exhibits tab, counsel's served exhibit, lab Part B) | printed at the end of `npm run seed` (EX-…-001, and EX-…-002 awaiting the examiner's Part B); `node scripts/demo-lookup.js` |
-| A certificate PDF someone handed you | nothing to paste — drop the file on `/verify` ("Were you handed a certificate?"); its token is read from the file | Download PDF on any certificate panel |
-| A case or exhibit counsel is not entitled to | Counsel → Open by reference: CNR `UPGB010012342026` (as `UP/9876/2019`), exhibit `EX-01232026-003` (as `UP/1234/2015`) | — |
-| Upload receipt (ledger seq + entry hash) | receipt JSON downloaded at upload; "Check this receipt" link on the officer's exhibit panel | `node scripts/demo-lookup.js` prints ready `/verify?seq=…&entry=…` links |
-| Custody label | QR + text on the printed label; "Print label" / "Copy label text" on every custody register | `node scripts/demo-lookup.js` prints each label and its `/scan` link |
-| Handover code | shown once to the sender after "Start handover" (copy button + QR) | — (one-time, 5 minutes) |
-| Pack / exclusions / recipients | picked on screen ("Use this pack", tick boxes by exhibit code and advocate name) | — |
-| Watermark token (leak trace) | the recipient's watermark banner and every served page; the serve result | `node scripts/demo-lookup.js` |
-| Vakalatnama CNR | case's CNR on the court cause list | `UPGB010012342026` |
-| Anchor transactions | public verifier → "Anchoring history" | `node scripts/demo-lookup.js` prints explorer links |
+| **Investigating Officer (IO)** | The police officer investigating the case | Opens the case, uploads evidence, files the chargesheet |
+| **Station House Officer (SHO)** | The officer in charge of the police station | Watches over every case at the station. Can step in if something looks wrong — but nobody has to wait for their approval |
+| **Forensic Lab Examiner (FSL)** | The scientist at the government forensic lab | Sees the AI's first look, examines the evidence, and gives the official answer: real, edited, or can't tell |
+| **Court** | The judge and court staff | Receives the case after the chargesheet, moves it through the court stages, and accepts lawyers onto the case |
+| **Lawyer** | Defence lawyer, victim's lawyer | Once the court accepts them, sees the case and all its evidence automatically |
+| **The public** | Anyone | Can check that a certificate is genuine, without logging in |
 
 ---
 
-## 12. Roadmap — where this is going
+## 4. The journey of one piece of evidence
 
-Full plan in `docs/PRODUCTION_ROADMAP.md`. Five phases, seven workstreams, no cloud spend required.
+### Step 1 — The case is opened
+The officer types in the FIR number. LEXX fetches the details from the police records
+(sections, station, how serious the offence is) and **works out which court the case will
+eventually go to** — explaining why, in plain words (for example, *"victim is a minor —
+special court required"*).
 
-- **Phase A** — CI/CD gating, branch protection, a `KeyProvider` abstraction so every secret goes through one interface; key-compromise runbook; data-retention policy.
-- **Phase B** — **RAG-based deepfake-detection triage pipeline** (see §13).
-- **Phase C** — Containerization, two-replica concurrency verification, backup/**rehearsed** restore, load testing to justify rate limits.
-- **Phase D** — Observability: metrics, dashboards, and one alert that matters (`CHAIN_BROKEN`).
-- **Phase E** — A second red-team pass against the newly added surface, UX polish, rehearsed demo.
+### Step 2 — The officer uploads the evidence
+The officer picks the photo, video or document, gives it a **title**, and (if they like) a short
+description. That is all they have to fill in. Details about the phone or computer it came from
+are optional.
+
+Behind the scenes, before the file even leaves the officer's computer, LEXX takes its **digital
+fingerprint** (a unique code that changes completely if even one pixel of the file changes) and
+the officer's computer **signs** it — like a personal seal only that officer's device can make.
+The officer does not have to do anything for this.
+
+When the file arrives, LEXX checks the fingerprint and the seal again. If they don't match,
+the upload is refused and the refusal itself is recorded.
+
+The file is stored locked (encrypted), so even someone who steals the database cannot open it.
+
+### Step 3 — The Section 63 certificate is created automatically
+Indian law (Bharatiya Sakshya Adhiniyam, Section 63) says digital evidence in court needs a
+certificate. **LEXX creates it the moment the evidence is uploaded — nobody has to fill it in or
+sign it by hand.**
+
+- It is filled from the record: what the file is, its digital fingerprint, who uploaded it and
+  when, and how it came into the system.
+- It is **signed by LEXX itself**, as the "LEXX Certificate Authority" — like an official stamp
+  that only the system can apply, and that anyone can check.
+- There is **exactly one certificate per piece of evidence**. The system will not make a second.
+- It has a QR code and a link anyone can use to check it is genuine.
+
+**A QR label comes with it.** Every piece of evidence also gets its own permanent QR code. The officer
+can print it as a sticker and put it on the phone, the hard disk or the evidence bag. Anyone who scans
+it — no login needed — sees whether the evidence and its certificate still check out, who uploaded
+it and when, which case and court it belongs to, and where it is in its journey: uploaded,
+certificate issued, examined by the lab, chargesheet filed, taken up by the court, and so on. It never
+shows the lab's verdict or the AI's analysis.
+
+The certificate is about the **record** — that this is the file that was uploaded, unchanged. It
+does not say whether the video is real or fake; that is the lab's job, and it is kept separate.
+
+### Step 4 — The AI takes a first look (for the lab only)
+In the background, the file is sent to an AI model, which looks at the actual photo or video and
+reports:
+
+- whether it seems genuine or possibly manipulated (a deepfake),
+- a score out of 100,
+- **in its own words, why** — for example, *"lighting on the face does not match the background"*,
+- the specific warning signs it noticed,
+- how urgently a human expert should look at it: **Critical, High, Medium or Low**,
+- and whether it recommends a full forensic examination.
+
+Important things to say about the AI:
+
+- **Only the forensic lab sees the AI result.** Police, the court and lawyers never see it — not
+  the score, not the priority, not even the order it would put evidence in. It exists to help the
+  lab decide what to examine first, and nothing else.
+- **Everything shown comes from the AI itself.** LEXX does not make up scores or explanations.
+- **If the AI fails** (no internet, busy, can't read the file), LEXX says so honestly and the lab
+  gets a *Retry* button. It never fills in a fake result. The upload and the certificate are not
+  affected.
+- **The AI is a helper, not a judge.** Every AI result is clearly labelled *"automated
+  preliminary assessment — not a forensic finding"*.
+
+### Step 5 — The forensic lab examines it
+The lab examiner opens their screen and sees **cases, not a pile of files**. Each case shows
+its evidence sorted by how urgent the AI thinks it is, and whether a verdict already exists.
+
+Where an examination is needed, the examiner looks at the evidence and records the **official
+verdict**: **Authentic, Manipulated, or Inconclusive** — signed with their own seal.
+
+On screen, the AI's opinion and the lab's verdict are **shown in visibly different boxes**, so
+no one can confuse a machine's guess with an expert's finding. A verdict, once recorded,
+**cannot be overwritten**. Unlike the AI result, the lab's verdict *is* visible to the police, the
+court and the lawyers — it is the official finding.
+
+**One-click certificate check.** Anyone working on the case — the lab, the police, the court, a
+lawyer on record — can press **Verify** on the certificate. LEXX re-checks five things on the spot:
+
+1. the certificate document has not been changed,
+2. it really carries LEXX's signature,
+3. the evidence file is still exactly what was uploaded,
+4. it is the current certificate for that evidence,
+5. its entry in the tamper-proof record is intact.
+
+The answer is simply **Verified** or **Failed** (with which check failed). This check does not
+depend on the lab's verdict: a video can be *Manipulated* and still have a perfectly valid
+certificate, because the certificate proves the file was not changed *after* it was collected.
+
+### Step 6 — The chargesheet is filed
+When the investigation is finished, the officer files the chargesheet. From that moment the
+investigation record is locked, and **the case appears on the court's screen immediately**.
+
+### Step 7 — The case moves through court
+The court sees exactly what needs its attention and the **next step it can take**. The steps
+follow the real court process, in order:
+
+> **Chargesheet filed → Court takes cognizance → (Committed to Sessions Court, for serious
+> cases) → Trial begins → Case closed**
+
+- The court cannot skip steps. For example, a trial cannot begin before committal in a
+  Sessions case — and the screen explains why.
+- Some steps ask for a short note, like a line in the court's order sheet.
+- Every screen updates **live**: when the police file the chargesheet, the case appears on the
+  court's screen within a second, without anyone refreshing — and the same for evidence, lab
+  verdicts, lawyers and closing.
+- The case's **CNR** (its court registration number) has a copy button wherever it is shown.
+- If needed, the court can also send the case back for **further investigation**.
+
+### Step 8 — Lawyers come on record, and see the evidence automatically
+A lawyer files a **vakalatnama** (the document that says "I represent this person") through
+LEXX. Until the court accepts it, the lawyer **cannot open the case at all** — and the attempt
+is recorded.
+
+**The moment the court accepts the vakalatnama, the lawyer can see the case, every piece of
+evidence in it, and each certificate.** Nobody has to remember a second step to "share" anything.
+The lawyer can view, download and verify — but cannot change anything, and never sees the AI
+result.
+
+### Step 9 — The case is closed
+The judge closes the case with a short reason and can **attach the final judgment, a declaration or
+an order** as a PDF. Just like evidence, the document is fingerprinted and signed by the judge's own
+device, stored locked, and its fingerprint becomes part of the case record. Police, the court and the
+lawyers on the case can open it.
+
+Closing a case stops new activity. **Nothing is deleted.** Every piece of evidence, verdict,
+certificate and record remains readable.
+
+### Following every step — the timeline
+Each case and each piece of evidence has a **timeline**. Every step in it says, in plain words,
+**what happened, who did it and when** — for example *"Uploaded by SI Ramesh Kumar (Investigating
+Officer)"* or *"Closed by the Court; final judgment attached"*. Open **Show proof** on a step to see
+what backs it up: the file's fingerprint, the signing key that was used, the entry in the chain of
+records, and the blockchain transaction that locked it in. The public page reached by scanning the QR
+label shows the same timeline, without private notes, the lab's verdict or the AI result.
 
 ---
 
-## 13. The planned AI upgrade — describe carefully
+## 5. How we prove nothing was changed (the blockchain part, simply)
 
-- **What is planned:** replacing the current metadata-only heuristic with a **RAG-grounded, LLM-assisted analysis pipeline** for deepfake-oriented review prioritisation.
-- **Architecture:** a pluggable `TriageProvider` interface. The existing heuristic becomes `heuristicProvider`; the new one is `ragDeepfakeProvider`. Both return an **identical output shape**.
-- **RAG design:** a curated, versioned knowledge base of forensic manipulation indicators; local feature extraction (EXIF, error-level analysis, frequency-domain statistics, frame consistency); retrieval of the most relevant indicator descriptions; the model reasons over **extracted features plus retrieved indicators**.
-- **Data-handling stance (recommended and planned):** the external model receives **extracted features only — never raw evidentiary media**. This is a deliberate decision, recorded as an ADR, because case evidence may include sensitive material (the demo case is a POCSO matter).
-- **Availability:** circuit breaker + budget cap + hard timeout, with automatic fallback to the deterministic heuristic. **An evidence upload must never fail because the AI pipeline is unavailable.**
-- **The boundary does not move.** The new provider must pass the *same* compliance test as the old one: never a verdict, never a percentage, always `Review Priority` with the disclaimer.
-- **Tense discipline:** this is **planned/in-progress**, not shipped. Write it as roadmap, never as a current capability.
+Every action in LEXX is written into a **chain of records**, where each entry includes a
+fingerprint of the one before it. Change one old entry, and every entry after it stops
+matching — like tearing a page out of a numbered, glued notebook.
 
----
+Every few minutes LEXX takes a single fingerprint of all recent entries and publishes **just
+that fingerprint** on a public blockchain (Monad Testnet). Once it is there, nobody — not even
+us — can change it.
 
-## 14. Rules for agents generating submission documents
+- **What goes on the blockchain:** only that one fingerprint.
+- **What never goes on the blockchain:** evidence, names, case details, AI results.
 
-**Forbidden claims — these are false. Never write them.**
+So if anyone ever edits the evidence file or the record, a single **Verify** click shows
+exactly what changed:
 
-- ❌ "Integrated with CCTNS / eCourts / FSL LIMS." → ✅ *"Integrates with three authority directory services that model CCTNS, eCourts and the FSL LIMS; the integration contract is designed so real systems can be substituted."*
-- ❌ "AI detects fake/forged evidence" or "AI verifies authenticity." → ✅ *"AI prioritises which exhibits a human examiner reviews first; only a notified laboratory determines authenticity."*
-- ❌ "Evidence is stored on the blockchain." → ✅ *"Only a Merkle root is written on chain; evidence never leaves encrypted off-chain storage."*
-- ❌ "Evidence is being anchored on-chain." → ✅ *"Merkle roots of the ledger — never evidence — are anchored on Monad Testnet every five minutes."* (True of the local deployment with `ANCHOR_ENABLED=true`; for a deployment without a funded key, say it runs in dry-run.)
-- ❌ "Lexx assigns / approves lawyers." → ✅ *"An advocate files a vakalatnama through Lexx; the presiding judge accepts it and the court register records it; Lexx then mirrors that record as access."*
-- ❌ "Security audited" / "certified" / "compliant." → ✅ *"Adversarially tested with a 40-attack red-team suite; no independent third-party audit has been performed."*
-- ❌ "Production-deployed" / "live in the cloud." → ✅ *"Runs locally; deployment is a configuration change, not a rewrite."*
-- ❌ Any accuracy percentage for the AI (e.g. "95% accurate deepfake detection"). **No such figure exists or ever will** — the system deliberately never emits a percentage.
-- ❌ Inventing metrics, user counts, pilot deployments, partnerships, or endorsements.
-
-**Required practices**
-
-- Prefer the **mechanism** over the adjective. Not *"highly secure"* — say *"one deny-by-default policy point, verified by a 58-assertion authorization matrix."*
-- Use exact numbers from §3; do not round up or estimate.
-- Preserve controlled vocabulary exactly: **"Review Priority"**, not "AI score"; **"forensic opinion"**, not "AI verdict".
-- When describing a limitation, state it plainly. `docs/PRODUCTION_READINESS.md` is deliberately unflattering — that honesty is a strength to mirror, not a weakness to hide.
-- Cite the repository file that substantiates a claim wherever practical.
+- 🔴 *File modified* — the evidence file itself was tampered with, or
+- 🟢 *Record intact* — the history of who did what was not.
 
 ---
 
-## 15. Documents to generate for SIH submission
+## 6. Why this is different
 
-Typical SIH deliverables and where the substance for each lives:
-
-- **Idea / solution summary** — §1, §2, §4. Lead with the three defining claims.
-- **Technical approach** — §7 (stack), §9 (architecture), §10 (security). Include the architecture diagram.
-- **Feasibility & viability** — §3 (proven with test counts), §12 (roadmap), plus `docs/PRODUCTION_READINESS.md` §7 for honest limitations and their mitigations.
-- **Impact & benefits** — §2 mapped to §4; frame each feature as the specific courtroom problem it removes.
-- **Innovation / differentiators** — strongest four:
-  - The **AI/forensic separation enforced in code**, not policy — a legally defensible design most systems get wrong.
-  - **Client-side hashing and signing** with a non-extractable key — integrity established before a byte is uploaded.
-  - **Four independent verification lights** that are never merged into one verdict — a modified file with an intact ledger tells you precisely *which* record moved.
-  - **Federated identity with live re-verification** — a transferred officer or suspended advocate loses access on their next request, with no administrator action.
-- **References / research** — BSA 2023 (s.39, s.45A, s.63), BNSS 2023 (s.176(3), s.230), IT Act s.79A, MeitY notification framework for forensic laboratories.
-- **Demo plan** — §11, expanded from `docs/DEMO_SCRIPT.md`.
+1. **The certificate makes itself.** No typing, no chasing signatures — every piece of evidence
+   gets its legal certificate the moment it is uploaded, and anyone can check it in one click.
+2. **The AI is powerful but kept in its place.** It analyses the media, explains itself and even
+   checks whether a photo came from the internet — but only the lab sees it, and the law's
+   requirement that a certified lab decides authenticity is built into the system.
+3. **Proof starts on the officer's own computer**, before the file is even uploaded.
+4. **The court sees every case the moment it's filed**, with its next legal step laid out.
+5. **Lawyers get the evidence as soon as the court accepts them** — no forgotten "share" step.
+6. **Anyone can verify a certificate** — no account, no phone call to the police station.
+7. **Access follows real authority.** A transferred officer or a lawyer not on record loses
+   access automatically, on their very next click. People stay signed in while they work; they are
+   not thrown out every few minutes.
 
 ---
 
-## 16. Repository map for verification
+## 7. What is real today, and what is not (be honest about this)
 
-Verify before asserting. Key files:
+**Working today (a complete prototype):**
+- The full journey above, from FIR to closed case, on screen.
+- Automatic, system-signed Section 63 certificates with one-click verification.
+- AI analysis of uploaded evidence, for the lab.
+- A permanent, printable QR label for every piece of evidence that shows its checks and lifecycle when scanned.
+- A step-by-step timeline for every case and piece of evidence, with who did what and the proof behind it.
+- Live screens that update on their own, and a judge's signed final judgment attached at closing.
+- The tamper-proof record and publishing to the Monad test blockchain.
+- Hundreds of automatic tests that check every step and every permission.
 
-| Claim to verify | File |
+**Not yet:**
+- It is **not connected to real government systems**. The police, court and lawyer records
+  are realistic stand-ins built to behave like the real ones (CCTNS, eCourts, FSL systems).
+- It is **not deployed** for real users; it runs on a laptop.
+- It has **not had an independent security audit**.
+- The certificate's signing key is held by the server; a real rollout would keep it in secure
+  government key hardware.
+- Sending evidence to an outside AI service would need government data-handling approval in a real
+  rollout.
+
+**Never say:** "the AI detects fake evidence", "evidence is stored on the blockchain",
+"integrated with CCTNS/eCourts", "the certificate proves the video is real", or any accuracy
+percentage for the AI.
+
+**Say instead:** "the AI helps the lab decide what to examine first", "only a fingerprint is
+stored on the blockchain", "designed to plug into CCTNS and eCourts", "the certificate proves the
+file hasn't changed since it was collected".
+
+---
+
+## 8. Simple answers to likely questions
+
+**"Is the AI deciding if evidence is fake?"**
+No. It gives the lab a first opinion and a priority. The official answer comes only from the
+forensic lab, and the court decides the case.
+
+**"Why can't the police, the court or the lawyers see the AI result?"**
+Because it is a machine's guess, not a finding. Keeping it with the lab means nobody can use it to
+sway the case. What everyone else sees is the lab's official verdict.
+
+**"What if the AI is wrong?"**
+That's exactly why it can't make the final call. Its job is to help the lab work on the most
+urgent evidence first.
+
+**"What if the internet or the AI is down?"**
+Evidence is still saved, the certificate is still created, and the case continues. The lab sees
+the AI result as *failed* with a *Retry* button — nothing is made up.
+
+**"Who signs the certificate?"**
+LEXX itself, as the LEXX Certificate Authority, on behalf of the officer who uploaded the
+evidence. Anyone can check that signature with one click, or by scanning the QR code.
+
+**"What does scanning the QR label show?"**
+Whether the evidence and its certificate are still intact, who uploaded it and when, the case and
+court, and each step the evidence has been through. It does not show the lab's verdict or the AI
+result, and it does not need a login.
+
+**"If the lab says a video is manipulated, is the certificate invalid?"**
+No. The certificate proves the file is exactly what was collected. Whether what it shows is real
+is a separate question, answered by the lab.
+
+**"Can a police officer delete evidence?"**
+No. There is no delete button anywhere in the system.
+
+**"Can someone change the evidence later?"**
+They could try, but it would be caught instantly. The digital fingerprint would no longer
+match, the certificate check would fail, and the published blockchain fingerprint can't be changed.
+
+**"Why would a court trust this?"**
+Because the court doesn't have to trust us. Every claim can be checked independently.
+
+**"Who can see the evidence?"**
+Only people with a real role in the case: the investigating officer, their station, the
+lab, the court, and lawyers the court has accepted.
+
+---
+
+## 9. Glossary
+
+| Word | Meaning |
 |---|---|
-| Authorization model | `backend/services/accessResolver.js` |
-| AI/forensic vocabulary separation | `backend/models/enums.js` |
-| Current triage behaviour | `backend/services/triage.js` |
-| Ledger hash chain + immutability | `backend/services/ledger.js`, `backend/models/Ledger.js` |
-| Cryptographic primitives | `backend/config/crypto.js` |
-| Browser hashing/signing | `frontend/src/lib/crypto.js` |
-| Vakalatnama e-filing (lawyer on record) | `backend/controllers/vakalatnama.js`, `frontend/src/features/vakalatnama/Vakalatnama.jsx` |
-| Custody labels, scan, hand-over | `backend/controllers/custody.js`, `frontend/src/features/custody/CustodyKit.jsx` |
-| Certificate panel (link, QR, signing) | `frontend/src/features/certificates/CertificatePanel.jsx` |
-| Public receipt check, anchor history | `backend/controllers/ledger.js`, `frontend/src/features/verify/VerifyPage.jsx` |
-| Every value to paste in a demo | `scripts/demo-lookup.js` |
-| Smart contract | `contracts/contracts/LexxAnchor.sol` |
-| Deployment record | `contracts/deployments/monad-testnet.json` |
-| All architectural decisions (34) | `docs/AGENT_DECISIONS.md` |
-| Security findings (6) | `docs/SECURITY_FINDINGS.md` |
-| Honest limitations | `docs/PRODUCTION_READINESS.md` |
-| Full API reference (71 routes) | `docs/API.md` |
-| Demo script | `docs/DEMO_SCRIPT.md` |
-| Production plan | `docs/PRODUCTION_ROADMAP.md` |
-
-- **Commands to confirm status:** `npm test` (525 tests) · `npm run contracts:test` (36) · `npm run routes` (71) · `npm run health` (6 checks)
+| **FIR** | First Information Report — the police record that starts a criminal case |
+| **IO** | Investigating Officer — the police officer handling the case |
+| **SHO** | Station House Officer — the officer in charge of the police station |
+| **FSL** | Forensic Science Laboratory — the government lab that examines evidence |
+| **Chargesheet** | The police report sent to court when the investigation is finished |
+| **Cognizance** | The court formally taking up the case |
+| **Committal** | A magistrate sending a serious case to the Sessions Court for trial |
+| **Section 63 certificate** | The legal certificate required for digital evidence under the Bharatiya Sakshya Adhiniyam |
+| **LEXX Certificate Authority** | The name under which LEXX itself signs every certificate |
+| **Vakalatnama** | The document authorising a lawyer to represent someone |
+| **Deepfake** | A photo, video or audio clip faked or altered using AI |
+| **AI model** | A computer program trained to analyse media; LEXX uses one to give the lab a first look at evidence |
+| **QR label** | A permanent QR sticker for a piece of evidence; scanning it shows the evidence's checks and lifecycle |
+| **Digital fingerprint** | A short code calculated from a file; changes completely if the file changes even slightly |
+| **Digital signature** | A seal only one person's device (or the LEXX system) can create, proving who produced something |
+| **Blockchain** | A public record that nobody can edit once something is written to it |

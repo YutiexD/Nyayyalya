@@ -34,8 +34,10 @@ import env from '../config/env.js';
 import { sha256Hex } from '../config/crypto.js';
 import { sealBuffer, openBuffer } from './envelope.js';
 import { buildStorageKey, resolveObjectPath, ensureVault } from './storage.js';
+import { SYSTEM_SIGNER_LABEL } from './systemSigner.js';
 import { Internal } from '../utils/errors.js';
 
+const SYSTEM_TEMPLATE_VERSION = 'v3.0';
 const MAGIC = Buffer.from('LEXXPDF1', 'ascii');
 const TEMPLATE_TITLE =
   'CERTIFICATE UNDER SECTION 63 OF THE BHARATIYA SAKSHYA ADHINIYAM, 2023';
@@ -56,7 +58,7 @@ export const verificationUrlFor = (verificationToken) =>
 
 // ---------------------------------------------------------------- rendering ----
 
-const NA = '— not recorded —';
+const NA = 'Not recorded';
 const show = (v) => (v === null || v === undefined || v === '' ? NA : String(v));
 
 const fmtDate = (d) => (d ? new Date(d).toISOString().replace('T', ' ').slice(0, 19) + ' UTC' : NA);
@@ -164,13 +166,101 @@ export async function renderCertificatePdf({ certificate, caseDoc, evidence }) {
   doc.moveDown(0.8);
   doc.fillColor('#000000');
 
+  const isSystem = certificate.templateVersion === SYSTEM_TEMPLATE_VERSION;
   field(doc, 'Certificate no.', String(certificate._id));
   field(doc, 'Template version', certificate.templateVersion ?? 'v1.0');
-  field(doc, 'Generated at', fmtDate(generatedAt));
-  field(doc, 'Exhibit', evidence?.exhibitCode ?? null);
+  field(doc, isSystem ? 'Issued at' : 'Generated at', fmtDate(generatedAt));
+  field(doc, 'Exhibit', evidence?.exhibitCode ?? certificate.exhibitCode ?? null);
   field(doc, 'FIR number', caseDoc?.firNumber ?? null);
   field(doc, 'CNR number', caseDoc?.cnrNumber ?? null);
 
+  if (isSystem) {
+    renderSystemBody(doc, certificate);
+  } else {
+    renderLegacyBody(doc, certificate, partA, partB);
+  }
+
+  renderVerificationBlock(doc, qrPng, verificationUrl);
+
+  doc.end();
+  return finished;
+}
+
+/**
+ * v3.0 — issued and signed by the system. Part B is the ingest hash attestation, and
+ * nothing on the document depends on a forensic verdict.
+ */
+function renderSystemBody(doc, certificate) {
+  const partA = certificate.partA ?? {};
+  const partB = certificate.partB ?? {};
+  const onBehalf = certificate.issuedOnBehalfOf ?? {};
+
+  heading(doc, 'PART A — particulars of the electronic record');
+  paragraph(
+    doc,
+    `Issued automatically by the ${SYSTEM_SIGNER_LABEL} when the electronic record was produced, on behalf of the officer who produced it. Particulars that were not recorded at upload are shown as "${NA}".`
+  );
+  field(doc, 'Issued on behalf of', onBehalf.name);
+  field(doc, 'Designation', onBehalf.designation ?? partA.deponentDesignation);
+  field(doc, 'Authority ID', onBehalf.authorityId);
+  field(doc, 'Source type', partA.sourceType);
+  field(doc, 'Make', partA.make);
+  field(doc, 'Model', partA.model);
+  field(doc, 'Colour', partA.colour);
+  field(doc, 'Serial number', partA.serialNumber);
+  field(doc, 'IMEI / UID', partA.imeiOrUid);
+  field(doc, 'Hash algorithm', partA.hashAlgorithm ?? 'SHA-256');
+  field(doc, 'Hash value', partA.hashValue);
+
+  doc.moveDown(0.3);
+  doc.font('Helvetica-Bold').fontSize(9).text('Manner of production');
+  doc.moveDown(0.2);
+  paragraph(doc, show(partA.mannerOfProduction));
+  doc.font('Helvetica-Bold').fontSize(9).text('Conditions of operation');
+  doc.moveDown(0.2);
+  paragraph(doc, show(partA.conditionsStatement));
+
+  heading(doc, 'PART B — hash values computed at ingest');
+  field(doc, 'Attested by', partB.attestedBy);
+  field(doc, 'Hash algorithm', partB.hashAlgorithm);
+  field(doc, 'SHA-256 on device', partB.sha256Client);
+  field(doc, 'SHA-256 on server', partB.sha256Server);
+  field(doc, 'Values match', partB.hashesMatch === true ? 'Yes' : partB.hashesMatch === false ? 'No' : null);
+  field(doc, 'Computed at', fmtDate(partB.hashComputedAt));
+  paragraph(doc, show(partB.statement));
+
+  heading(doc, 'SYSTEM SIGNATURE');
+  field(doc, 'Signed by', SYSTEM_SIGNER_LABEL);
+  field(doc, 'Algorithm', 'ECDSA P-256 over SHA-256');
+  field(doc, 'Authority key', certificate.authorityFingerprint);
+  field(doc, 'Certificate body hash', certificate.bodyHash);
+  paragraph(
+    doc,
+    'The system signature covers the certificate body hash above together with the SHA-256 digest of this document and the authority key. It is recorded in the LEXX register and its append-only ledger, and it is checked — together with the evidence file itself — by the verification address below.'
+  );
+}
+
+function renderVerificationBlock(doc, qrPng, verificationUrl) {
+  heading(doc, 'INDEPENDENT VERIFICATION');
+  const qrY = doc.y;
+  doc.image(qrPng, doc.page.width - doc.page.margins.right - 96, qrY, { width: 96 });
+  doc
+    .font('Helvetica')
+    .fontSize(8.5)
+    .text(
+      'Scan the code, or open the address below, to confirm this certificate against the issuing register. The verifier reports validity only: it discloses no case narrative, no party details and no evidence content.',
+      doc.page.margins.left,
+      qrY,
+      { width: doc.page.width - doc.page.margins.left - doc.page.margins.right - 112 }
+    );
+  doc.moveDown(0.4);
+  doc.font('Helvetica-Bold').fontSize(8).text(verificationUrl, {
+    width: doc.page.width - doc.page.margins.left - doc.page.margins.right - 112,
+  });
+}
+
+/** v1.0 / v2.0 — kept so a legacy certificate still renders as it was issued. */
+function renderLegacyBody(doc, certificate, partA, partB) {
   // ---- Part A ----
   heading(doc, 'PART A — to be filled in by the party producing the electronic record');
 
@@ -234,26 +324,6 @@ export async function renderCertificatePdf({ certificate, caseDoc, evidence }) {
     }
   }
 
-  // ---- verification block ----
-  heading(doc, 'INDEPENDENT VERIFICATION');
-  const qrY = doc.y;
-  doc.image(qrPng, doc.page.width - doc.page.margins.right - 96, qrY, { width: 96 });
-  doc
-    .font('Helvetica')
-    .fontSize(8.5)
-    .text(
-      'Scan the code, or open the address below, to confirm this certificate against the issuing register. The verifier reports validity only: it discloses no case narrative, no party details and no evidence content.',
-      doc.page.margins.left,
-      qrY,
-      { width: doc.page.width - doc.page.margins.left - doc.page.margins.right - 112 }
-    );
-  doc.moveDown(0.4);
-  doc.font('Helvetica-Bold').fontSize(8).text(verificationUrl, {
-    width: doc.page.width - doc.page.margins.left - doc.page.margins.right - 112,
-  });
-
-  doc.end();
-  return finished;
 }
 
 // ---------------------------------------------------------------- storage ----

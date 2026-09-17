@@ -11,6 +11,8 @@ import request from 'supertest';
 import { startDirectories, stopDirectories } from '../helpers/directories.js';
 import { allModels } from '../../models/index.js';
 import { User } from '../../models/User.js';
+import { RefreshToken } from '../../models/RefreshToken.js';
+import { sha256Hex } from '../../config/crypto.js';
 import { AuditEvent } from '../../models/AuditEvent.js';
 import { createApp } from '../../app.js';
 import { makeBrowserKeyPair, activateUser, loginUser } from '../helpers/client.js';
@@ -218,8 +220,16 @@ describe('each authority resolves to the right role and scope', () => {
     // Lexx never assigns a judge to a court. The court published a roster; we read it.
     const s = await activateUser(server, JUDGE);
     expect(s.user.authority).toBe(AUTHORITY.COURT);
-    expect(s.user.role).toBe(ROLE.JUDGE);
+    expect(s.user.role).toBe(ROLE.COURT);
     expect(s.user.scope.courtId).toBe('UP-GZB-SESS-02');
+    expect(s.user.scope.districtCode).toBe('UP-GZB');
+  });
+
+  it('resolves court registry staff to the same single Court role', async () => {
+    const s = await activateUser(server, 'UP-GZB-EVC-02');
+    expect(s.user.authority).toBe(AUTHORITY.COURT);
+    expect(s.user.role).toBe(ROLE.COURT);
+    expect(s.user.scope.courtId).toBe('UP-GZB-CJM-01');
   });
 
   it('resolves an FSL examiner to their lab', async () => {
@@ -416,6 +426,17 @@ describe('session tokens', () => {
       .get('/api/auth/me')
       .set('Authorization', `Bearer ${header}.${payload}.`);
     expect(forged.status).toBe(401);
+  });
+
+  it('issues refresh tokens that never expire on their own', async () => {
+    const s = await activateUser(server, IO);
+    const record = await RefreshToken.findOne({ tokenHash: sha256Hex(s.refreshToken) }).lean();
+    expect(record.expiresAt.getUTCFullYear()).toBe(9999);
+
+    const renewed = await request(server).post('/api/auth/refresh').send({ refreshToken: s.refreshToken });
+    expect(renewed.status).toBe(200);
+    const next = await RefreshToken.findOne({ tokenHash: sha256Hex(renewed.body.refreshToken) }).lean();
+    expect(next.expiresAt.getUTCFullYear()).toBe(9999);
   });
 
   it('rotates the refresh token and refuses the old one', async () => {

@@ -1,396 +1,330 @@
-# LEXX 2.0 — Presentation Roadmap
+# LEXX 2.0 — Demo Run-book
 
-**Smart India Hackathon · complete run-book, from a cold machine to the closing line.**
+**A 3-minute demo (with an optional 2-minute extension for a 5-minute slot): the setup, the
+logins, what is on each screen, what to click, and what to say.**
 
-This is the operational document. `docs/DEMO_SCRIPT.md` holds the longer narrative; this one
-is what you keep open on the second screen. Everything here has been executed end to end
-against a real database, three running directory services, the API and a browser.
+For the plain-language explanation of the idea, read `WORKFLOW.md` first.
 
----
+The story you are showing:
 
-## 0 · The one-paragraph pitch
-
-> Indian courts increasingly receive digital evidence they have no way to test. Under BSA
-> 2023 s.63 an electronic record needs a certificate; under BNSS 2023 the accused must be
-> served the material. Neither says how anyone checks that the file in court is the file
-> that was seized. LEXX is a register that answers that: every exhibit is hashed and signed
-> **in the officer's browser** before a byte is uploaded, every action lands in an
-> append-only hash-chained ledger, the ledger's Merkle root is anchored to a public
-> blockchain, and every access decision runs through a single policy point that reads the
-> government's own directories rather than anything a user types. It never claims evidence
-> is authentic — only a forensic laboratory does that, and the system keeps the two claims
-> visibly apart.
+> **Police upload evidence → the certificate and a QR label are created automatically → the lab
+> sees the AI analysis and gives its verdict → the case goes to court → the court accepts the lawyer
+> → the lawyer sees the evidence automatically → anyone can scan the QR or open the link to verify
+> the evidence and its whole lifecycle.**
 
 ---
 
-## 1 · Before you walk in
+## Part 1 — Before the judges arrive (30 minutes early)
 
-### 1.1 Start the stack — four terminals
+### 1.1 Check `.env`
 
-```bash
-npm run mongo:dev
 ```
+GEMINI_API_KEY=<your key>
+GEMINI_MODEL=gemini-2.5-flash
+DEMO_ECHO_OTP=true
+REFRESH_TTL_SEC=0
+```
+
+- **AI key:** https://aistudio.google.com/apikey → *Create API key*.
+- **Model code:** https://ai.google.dev/gemini-api/docs/models → copy the code exactly.
+- `DEMO_ECHO_OTP=true` shows sign-in codes on screen (no phone needed).
+- `REFRESH_TTL_SEC=0` — you are never logged out automatically.
+
+The app refuses to start without the AI key and model, and says which one is missing.
+
+### 1.2 Start and load the demo data
+
 ```bash
 npm run dev
 ```
+
+In a second terminal, once everything is listening:
+
 ```bash
-npm run reset -- --yes && npm run seed
+npm run reset -- --yes --directories
+```
+```bash
+npm run seed
 ```
 ```bash
 npm run health
 ```
 
-> **The `--` matters.** `npm run reset --yes` gives the flag to *npm*, not to the script,
-> and the reset then stops on an interactive prompt. Always `npm run reset -- --yes`.
+The seed ends with a summary. **Keep it visible** — it prints the certificate **Verify link** and
+the **QR label** links for Tab 5. (Lost them? Run `node scripts/demo-lookup.js`.)
 
-`npm run dev` starts all three directory services, the API and the web client together.
+**Optional — scanning with a phone on stage:** a phone can only open the QR if the address inside it
+is reachable from the phone. Set `PUBLIC_WEB_URL=http://<laptop-LAN-IP>:5173` in `.env`, make the web
+app listen on the network, and connect the phone to the same Wi-Fi. Otherwise open the link on the
+laptop instead of scanning.
 
-### 1.2 The six-line health check
+### 1.3 Accounts
 
-`npm run health` must print six green lines. If MongoDB says DOWN, run it again — a cold
-Atlas connection does a DNS SRV lookup and a TLS handshake on its first attempt.
+**Password for every account:** `LexxDemo!2026#Seed`
 
-### 1.3 Read the seed's closing block
+| Login ID | Who | Screen | Used in |
+|---|---|---|---|
+| `UP-GZB-4471` | Investigating Officer (police) | `/officer` — **Your cases** | **Tab 1** |
+| `FSL-LKO-0091` | Forensic lab examiner | `/lab` — **Lab cases** | **Tab 2** |
+| `UP-JUD-2291` | Court (one login for every court in the district) | `/court` — **Court** | **Tab 3** |
+| `UP/9876/2019` | Lawyer — not on any case yet | `/counsel` — **Your cases** | **Tab 4** (5-min version) |
+| `UP/1234/2015` | Lawyer — already on record for FIR 0123/2026 | `/counsel` | Backup |
+| `UP-GZB-4402` | Station House Officer | `/station` — **Station cases** | Q&A |
+| `UP-GZB-9999` | **Fake ID** — not in any directory | `/login` | Q&A |
 
-It prints the exhibit codes, the tamper target, the unregistered FIR and the shared
-password. Keep that terminal visible.
+### 1.4 Signing in (same for everyone)
 
-### 1.4 Set this before the room fills
+1. `http://localhost:5173/login` → type the **Login ID** → continue.
+2. Ask for the code → **the code appears on screen** ("Demo code").
+3. Type the code and the password → sign in.
+4. **First time in this browser only:** **Register this device** appears → send the code again →
+   type it → **Register this device**. Needed once per account per browser, so the browser can sign.
 
-If judges will scan the certificate QR with their own phones, `localhost` resolves to
-nothing on their device. In `.env`:
+### 1.5 Cases already loaded
 
-```
-PUBLIC_WEB_URL=http://<your-LAN-ip>:5173
-```
-
-Then re-seed so the certificate is generated with a scannable URL.
-
-### 1.5 Browser setup
-
-- One window, **two tabs**: the app, and the public verifier at `/verify`.
-- Zoom to **125%**. Hashes are the point; they have to be readable from the back.
-- Use **dark mode** on a projector. The accent gradient and the beam diagrams read best on
-  the deep navy, and dark surfaces do not wash out under hall lighting. The toggle is in the
-  header — show it once, in passing, and move on.
-- If the laptop has Windows "Show animations" switched off (`prefers-reduced-motion`), the
-  interface degrades to its finished state — everything is visible, the counts show their
-  final values, only the travelling beams stand still. Nothing depends on an animation
-  having played.
-
----
-
-## 2 · The cast
-
-Password for every account: `LexxDemo!2026#Seed`
-One-time codes are echoed on screen while `DEMO_ECHO_OTP=true` (the server refuses to do
-this in production, and says so on the form).
-
-| Identifier | Role | Used in |
+| FIR | State after seeding | Used for |
 |---|---|---|
-| `UP-GZB-4471` | Investigating Officer | Beats 2, 3, 5, 7 |
-| `UP-GZB-4402` | SHO | Beats 6, 11 |
-| `UP-GZB-4455` | Officer who keeps the station store | Beat 5 |
-| `UP-GZB-9001` | District SP | (spare — supervisory scope) |
-| `FSL-LKO-0091` | FSL examiner | Beat 8 |
-| `UP-JUD-2291` | Presiding judge | Beat 9 |
-| `UP-GZB-EVC-01` | Court evidence room | (spare — receives articles in court) |
-| `UP/1234/2015` | Defence counsel — **on record** | Beat 9 |
-| `UP/9876/2019` | Defence counsel — **not on record** | Beat 9 (the refusal) |
-| `UP-GZB-9999` | **Does not exist** | Beat 1 |
+| `0124/2026` | Under investigation, **no evidence yet** | **The live demo** |
+| `0123/2026` | 5 exhibits with certificates, lab verdict on one, chargesheet filed, a lawyer on record | Backup, and the Verify link |
+| `0125/2026` | In police records but not yet a case | Q&A: "open a case from an FIR" |
 
-### The three FIRs, and why there are three
+### 1.6 Browser tabs
 
-| FIR | Punishment | Class | State after seeding | Routes to |
-|---|---|---|---|---|
-| `0123/2026` | 20 yrs | POCSO | Chargesheet filed, full history | Designated Sessions court |
-| `0124/2026` | 3 yrs | Ordinary | Open, no exhibits | Magistrate |
-| `0125/2026` | 7 yrs | SC/ST | **Not a case at all** | Sessions |
+One window, zoom 125%. Open each tab with **Ctrl+T** (not "Duplicate tab" — each tab keeps its own
+login). Sessions never expire, so tabs can sit ready.
 
-`0125/2026` sits in the police directory as a real FIR and nothing more. **You create the
-case from it live, on stage.** That is beat 2, and it is the one step that cannot be
-mistaken for seeded state.
+| Tab | Signed in as | Leave it on |
+|---|---|---|
+| **1 — Police** | `UP-GZB-4471` | **Your cases** → FIR **0124/2026** selected |
+| **2 — Lab** | `FSL-LKO-0091` | **Lab cases** |
+| **3 — Court** | `UP-JUD-2291` | **Court** → **Needs action** |
+| **4 — Lawyer** | `UP/9876/2019` | **Your cases** (5-min version only) |
+| **5 — Public** | *not signed in* | the **QR label** link for EX-01232026-001 from the seed summary |
 
----
+### 1.7 Files on the desktop
 
-## 3 · The run — eleven beats, about eight minutes
+- **`fake.jpg`** — an obviously AI-generated or edited photo (a face swap works well).
+- **`genuine.jpg`** — a normal phone photo, as a backup.
+- **`vakalatnama.pdf`** — any small PDF, for the lawyer's filing in the 5-minute version.
+- **`judgment.pdf`** — any small PDF, attached by the judge when closing the case (5-minute version).
 
-Timings assume you talk while things load. **Never read a hash aloud.** Point at it, say
-what it is, move on.
+### 1.8 Rehearsal checklist
 
----
-
-### Beat 1 · An identity that does not exist — 30s
-
-**Do.** `/login`. Enter `UP-GZB-9999`. Check the directory.
-
-**Shows.** A refusal, with a machine code and a plain sentence.
-
-> *"Lexx holds no identities of its own. Officers live in the police directory, judges and
-> court staff in the court directory, advocates in the Bar Council roll. There is no
-> sign-up. If the directory has no record of you, there is nothing here to create — and
-> the attempt is already in the audit log."*
+- [ ] `npm run health` all green
+- [ ] A practice upload shows the AI analysis on the Lab screen within ~20 s (then reset + seed again)
+- [ ] Tabs 1–5 signed in, device registered in Tabs 1–4
+- [ ] A printer (or "Save as PDF") ready for **Print QR label**; optionally a sticker sheet
+- [ ] Notifications off, other apps closed
 
 ---
 
-### Beat 2 · A case from an FIR that already exists — 60s ★
+## Part 2 — The 3-minute script
 
-**Do.** Sign in as `UP-GZB-4471`. Cases tab → FIR **`0125/2026`** → *Create case from FIR*.
-Then *Compute jurisdiction* on that row, and on `0123/2026`.
-
-**Shows.** The case inherits station, sections, sensitivity and officer from the directory
-record. The two cases route to **different courts**.
-
-> *"I did not type any of this. The station, the sections, the maximum punishment, the
-> victim-protection flag — all of it came from the FIR record. And notice the routing
-> decides: seven years and SC/ST goes to Sessions, three years ordinary goes to a
-> Magistrate, POCSO goes to a designated court. The statute decides, not the officer."*
-
-**If it fails:** you still have `0124/2026` open. Move on; do not debug on stage.
+**Say** = speak it. **Do** = click it. Never read codes or hashes aloud.
 
 ---
 
-### Beat 3 · Hashed and signed before it is sent — 90s ★★
+### 0:00 – 0:20 · The problem · *Tab 1*
 
-**Do.** Evidence tab. Working case → the case you just made (or `0124/2026`). Choose any
-file. Fill Title. Fill **Make / Model / Serial / IMEI** — beat 10 needs them. Upload.
-
-**Shows.** Four steps, each reporting what it produced:
-1. **Hash in this browser** — a 64-character SHA-256
-2. **Sign in this browser** — a 128-character ECDSA P-256 signature
-3. **Upload** — bytes transferred
-4. **Server verification** — *digest recomputed and matched; signature verified*
-
-Then two digests side by side: **client** and **server**.
-
-> *"The hash was computed here, on this machine, before a byte left it. The signature uses
-> a private key generated in this browser that is marked non-extractable — I could not
-> export it if I wanted to. The server then recomputed the hash from the bytes it actually
-> received. Those two digests are computed independently and they match, which is how we
-> know what was stored is what was signed. If they disagreed, the upload would be refused
-> and the refusal would go into the ledger."*
+**Say:**
+> "When digital evidence reaches court, three questions decide whether it counts: Is this the same
+> file? Is it fake — or just copied from the internet? And where is its legal certificate? Today
+> that takes weeks of paperwork. With LEXX it takes one upload."
 
 ---
 
-### Beat 4 · The review priority is not a verdict — 30s
+### 0:20 – 0:50 · Police upload — the certificate makes itself · *Tab 1 (Police)*
 
-**Do.** Select the exhibit you just uploaded.
+**Do:** FIR **0124/2026** → **Upload evidence** → choose `fake.jpg` → keep the title → **Upload**.
 
-**Shows.** **Review Priority: HIGH/MEDIUM/LOW**, with the system's own disclaimer beside it.
+**Point at:** the three steps completing — *Fingerprint · Upload · Certificate issued* — and the
+**QR code** that appears with it.
 
-> *"This is the only thing the automated step produces: an ordering for a human reviewer.
-> It is not a percentage, not a confidence, and the word 'verified' appears nowhere near
-> it. Authenticity is a forensic finding, and you will see who actually makes it in a
-> moment."*
+**Do:** **Print QR label** → show the sticker in the print preview → print it (or cancel).
 
----
+**Say:**
+> "I'm the investigating officer. I choose the file and give it a title — that's all. LEXX
+> fingerprints it on my laptop, uploads it, and the Section 63 certificate is created and signed by
+> the system instantly. It also gives the evidence a permanent QR label — stick it on the phone or the
+> evidence bag, and anyone can scan it to check the evidence and its whole history."
 
-### Beat 5 · Custody, and a chain with a hole in it — 45s
-
-**Do.** Custody tab — the register for this case. Then sign in as `UP-GZB-4455` at
-`/station` → Custody. Show `IT-01232026-001` (complete) and the gap report flagging
-`IT-01232026-002`.
-
-**Shows.** Every movement is a two-scan handshake. The gap report names the missing step
-and the ledger sequence where the chain jumps.
-
-> *"The second item went from seized straight to the laboratory. The deposit into the station store never
-> happened. Nobody filed a complaint about that — the system found it, because the ledger
-> knows what a lawful sequence looks like."*
+*Note: the police screen shows no AI result — by design.*
 
 ---
 
-### Beat 6 · Break the file. Watch the right light go red. — 90s ★★★
+### 0:50 – 1:35 · The lab — AI analysis and one-click verification · *Tab 2 (Lab)*
 
-**This is the beat that wins the room.**
+**Do:** click FIR **0124/2026** (it is already there — every screen updates live, no refresh) → click
+the new exhibit.
 
-**Do.** In a terminal, append a byte to the tamper target using the storage key the seed
-printed:
+**Point at (left):** the **AI analysis** — assessment and score, reasoning, warning signs and
+review priority.
+
+**Say:**
+> "Only the forensic lab sees this. The AI gives a first opinion — is it manipulated, why, and how
+> urgently an expert should look at it."
+
+**Do (right):** **Verify certificate**.
+
+**Point at:** the green **Verified** result.
+
+**Say:**
+> "One click checks everything: the file hasn't changed, the certificate is genuine and the record
+> is intact."
+
+**Do:** choose **Manipulated**, type one line (e.g. *"Face region inconsistent with the rest of the image"*)
+→ **Sign and record verdict**.
+
+**Say:**
+> "The official verdict comes from the lab, not the AI — signed, and it can never be overwritten."
+
+---
+
+### 1:35 – 1:45 · Chargesheet · *Tab 1 (Police)*
+
+**Do:** FIR **0124/2026** → **File chargesheet** → confirm.
+
+**Say:** "Investigation complete. Chargesheet filed."
+
+---
+
+### 1:45 – 2:20 · The court takes it up · *Tab 3 (Court)*
+
+**Do:** **Needs action** → FIR **0124/2026** has appeared on its own (badge *Next: Take cognizance*) →
+open it. Point at the CNR's copy button.
+
+**Point at:** the stage stepper and the **next judicial step** button.
+
+**Do:** **Take cognizance** → note *"Chargesheet perused"* → confirm.
+
+**Point at:** the next step now offered (*Frame charges and begin trial*) and the evidence table with
+its verdict and certificate columns.
+
+**Do:** open **Case timeline** → expand **Show proof** on *Cognizance taken*.
+
+**Say:**
+> "The moment the chargesheet was filed, the case reached the court with its next legal step ready —
+> no refresh. The court moves it forward in the real legal order and can't skip a step. And every
+> step says who did it, when, and the fingerprints and blockchain record that prove it."
+
+---
+
+### 2:20 – 2:50 · Scan the label — verify the evidence and its lifecycle · *Tab 5 (Public)*
+
+**Do:** open the **QR label** link (or scan the printed label with a phone — see 1.2).
+
+**Point at:** the large **Verified** card, then **Uploaded by** (officer, role, station), **Case**
+(FIR, court, current stage), **Section 63 certificate**, and the **Lifecycle** timeline — uploaded,
+certificate issued, forensic examination, chargesheet, cognizance… Expand **Show proof** on one step:
+who did it, the file fingerprint, the signing key and the blockchain transaction.
+
+**Say:**
+> "Anyone can scan the QR on the evidence — no login. It re-checks the file and the certificate on the
+> spot, shows who uploaded it and when, and exactly where the evidence is in its journey through the
+> case. Every step is chained together and anchored on a public blockchain. Change one byte of the
+> evidence, and this turns red."
+
+---
+
+### 2:50 – 3:00 · Close
+
+**Say:**
+> "Police upload. The certificate makes itself. The AI helps the lab. The lab decides what's real.
+> The court decides the case. LEXX proves nothing changed along the way. Thank you."
+
+---
+
+## Part 3 — Extension to 5 minutes (insert after 2:20)
+
+### + 0:45 · The lawyer gets the evidence automatically · *Tab 4 → Tab 3 → Tab 4*
+
+**Do (Tab 4, lawyer `UP/9876/2019`):** **File vakalatnama** → pick FIR 0124/2026's case by its CNR
+(shown on the court screen) → appearing for the accused → attach any PDF → file.
+
+**Say:** "A lawyer files their vakalatnama. Until the court accepts it, they see nothing."
+
+**Do (Tab 3, court):** FIR **0124/2026** → **Lawyers** → the filing is already listed → **Accept**.
+
+**Do (Tab 4):** without refreshing, FIR **0124/2026** appears → open it → the evidence table is there
+→ **Verify** on the certificate.
+
+**Say:**
+> "The court only accepts the lawyer. There is no 'share evidence' step — the case and its evidence
+> are available to that lawyer immediately. And the lawyer never sees the AI analysis."
+
+### + 0:30 · The judge closes the case with the final judgment · *Tab 3 (Court)*
+
+**Do:** FIR **0124/2026** → **Close case** → reason note → **Attach final judgment / declaration** →
+kind *Final judgment* → choose `judgment.pdf` → **Close case**.
+
+**Point at:** *Fingerprint · Sign · Close*, then the **Case closed** block — closed by, document,
+SHA-256 and the judge's signing key — and **Open document**. Tabs 1 and 4 show it closed within a
+second.
+
+**Say:**
+> "The judge closes the case and attaches the final judgment. The document is fingerprinted and
+> signed by the judge's own device, stored encrypted, and its fingerprint joins the case record."
+
+### + 1:15 · Tampering is caught · *terminal → Tab 3 or Tab 5*
+
+**Do:** in a terminal:
 
 ```bash
 npm run tamper -- EX-01232026-004
 ```
 
-It resolves the vault path itself (the vault fans out by the first four characters of the
-storage key, which is easy to get wrong under pressure) and prints exactly what the two
-lights should now say.
+Then as the court (or on Tab 5 with EX-01232026-004's link from `node scripts/demo-lookup.js`), open
+exhibit **EX-01232026-004** → **Verify certificate**.
 
-Then, as the IO, open `EX-01232026-004` → **Verify this exhibit**.
+**Point at:** **Failed** — *Evidence file is unchanged since it was uploaded* is red, while the other
+checks stay green.
 
-**Shows.**
+**Say:**
+> "Someone edited the file directly on the server. One click, and LEXX shows exactly what changed —
+> the file — and that the record itself is intact."
 
-| | |
+*(After the demo, reset and seed again.)*
+
+---
+
+## Part 4 — If something goes wrong
+
+| Problem | What to do |
 |---|---|
-| Stored file | **FILE MODIFIED** — red |
-| Signature | Verified |
-| Ledger chain | **CHAIN INTACT** — green |
-| Anchored root | matches |
-
-> *"I corrupted that file from outside the application, the way someone with server access
-> would. The file light is red — and the ledger light is still green. That distinction is
-> the whole product. The file was touched; the log was not. The original hash is still
-> provable, so a court can be told exactly what changed and when it was last known good.
-> A system that went entirely red here would tell you something is wrong. This one tells
-> you **what**."*
+| AI analysis still *Pending* after 30 s | Keep going; verify the certificate and record the verdict, return to it at the end |
+| AI analysis *Failed* | *"No internet or quota — and it says so honestly instead of inventing a result."* Click **Retry** |
+| Upload refused `SIGNATURE_INVALID` | That tab skipped **Register this device**. Use FIR **0123/2026** as backup |
+| Case not under **Needs action** | Check the **Live** dot in the top bar; if it says *Reconnecting*, wait a few seconds or refresh. Otherwise use FIR **0123/2026**, already waiting for the court |
+| Signed out | Sign in again (1.4) — 20 seconds |
+| Scanned QR won't open on a phone | `PUBLIC_WEB_URL` still points at `localhost` — open the link on the laptop instead |
+| Anything else | Tab 5 always works — finish the story there |
 
 ---
 
-### Beat 7 · Refer it to the laboratory — 20s
+## Part 5 — Quick Q&A demos (30 seconds each)
 
-**Do.** As the SHO (`UP-GZB-4402`) at `/station` → Queue, refer the mobile video to FSL.
-
----
-
-### Beat 8 · The examiner sees only their own referrals — 45s
-
-**Do.** Sign in as `FSL-LKO-0091` at `/lab`.
-
-**Shows.** Referrals to this lab only. Accept, then file a report with an opinion.
-
-> *"An examiner sees exhibits referred to their laboratory and nothing else — not the rest
-> of the case, not the other exhibits. And this is the only place an authenticity finding
-> enters the system. It is signed by the examiner, attributed to the laboratory and its
-> s.79A notification number, and it is deliberately rendered differently from the machine
-> priority you saw earlier, because they are different kinds of claim."*
+- **Fake officer:** sign in as `UP-GZB-9999` → rejected, not in the official directory, and recorded.
+- **Lawyer not on the case:** as `UP/9876/2019`, before acceptance, the case isn't available.
+- **Station chief:** `UP-GZB-4402` → **Station cases** — every case and its evidence, no approvals
+  needed from them, no AI shown.
+- **Open a case from an FIR:** Tab 1 → **Open case** → `0125/2026`.
 
 ---
 
-### Beat 9 · Disclosure — the advocate on record, and the one who is not — 75s ★★
+## Part 6 — Quick answers
 
-**Do.**
-1. As the IO: Disclosure tab, exclude one exhibit with a reason, prepare the pack.
-2. As `UP-GZB-REG-01` at `/court` → Disclosure: **find the pack from the case**, rule on
-   the exclusion, serve it.
-3. As `UP/1234/2015` at `/counsel`: the served pack, and the acknowledgement that stops the
-   BNSS s.230 clock.
-4. As `UP/9876/2019`: **refused** — `NOT_ON_RECORD_FOR_THIS_CASE`.
+| Question | Answer |
+|---|---|
+| Who creates the Section 63 certificate? | The system, automatically, the moment evidence is uploaded — one per exhibit, signed by the LEXX Certificate Authority. |
+| How is it verified? | One click. It checks the file, the certificate's signature, that it is the current one, and the record. It doesn't depend on the lab verdict. |
+| Does AI decide if evidence is fake? | No. It gives the lab a first opinion and a priority. The official verdict comes only from the forensic lab. |
+| Who sees the AI analysis? | Only the forensic lab. Police, court and lawyers never see it. |
+| What is the QR label? | A permanent QR created with every upload. Printed and stuck on the physical item, anyone can scan it to check the evidence, its certificate, who uploaded it and its lifecycle — without a login, and without revealing the lab verdict or the AI analysis. |
+| How do lawyers get evidence? | The court accepts their vakalatnama; the evidence is available to them immediately. No sharing step. |
+| Is evidence on the blockchain? | No — only a fingerprint of the records. |
+| Can evidence be deleted? | No. There is no delete function anywhere. |
+| Connected to CCTNS / eCourts? | Not yet. Realistic stand-ins behave the same way, so real systems can plug in. |
+| Is it live? | A working prototype running locally, with 564 automated backend tests. |
 
-> *"The second advocate is a real, practising advocate in the Bar Council directory. They
-> are simply not on record for this case, so there is nothing here for them — and that
-> refusal is now in the audit log. Notice also that the withheld exhibit is not merely
-> hidden from the pack: counsel cannot list it, cannot search it, and cannot reach its
-> certificate. The exclusion hides the exhibit, not just the bytes."*
-
----
-
-### Beat 10 · The s.63 certificate and its public verifier — 60s ★★
-
-**Do.** As the IO, generate a certificate for the exhibit you uploaded in beat 3. Open the
-PDF. Then switch to the second tab — the **public verifier** — and either scan the QR with
-a phone or paste the token.
-
-**Shows.** Part A auto-filled from the record — never typed. The verifier answers **without
-any sign-in at all**, and discloses validity, never contents.
-
-> *"This is the certificate the Bharatiya Sakshya Adhiniyam asks for, and every field in
-> Part A came from the record rather than from someone's memory. The QR on it goes to a
-> page anyone can open with no account — a judge, defence counsel, a journalist. It tells
-> them the certificate is on the register and its digest still matches. It tells them
-> nothing about the case."*
-
----
-
-### Beat 11 · The Merkle anchor — 60s ★★
-
-**Do.** On the verifier page, the **Anchoring record** panel.
-
-**Shows.** The batch, the Merkle root, the ledger range, network `monad-testnet`, chain
-`10143`, and — with `ANCHOR_ENABLED=true` — a confirmed transaction you can open on the explorer (**Anchoring history** lists every batch). In a deployment without a funded key it shows an amber **DRY RUN** banner instead; say which one the audience is looking at.
-
-> *"Every few minutes the new ledger entries are batched into a Merkle tree and the root is
-> anchored. Only the root. No evidence, no filenames, no personal data, no case
-> identifiers, no AI scores — a root is a commitment, and it discloses nothing about what
-> it commits to."*
-
-**Now say the honest part. Do not skip it.**
-
-> *"And I want you to see this banner. This deployment has no funded signing key, so the
-> root was computed and stored locally and **not** submitted to any chain. The system says
-> so, in those words, rather than showing you a green tick. We built it that way
-> deliberately: an unanchored root presented as an anchored one is exactly the kind of
-> claim this project exists to prevent."*
-
-That admission is worth more than the feature. It is also the answer to the first hard
-question you will be asked.
-
----
-
-## 4 · Closing — 30s
-
-> *"Three claims, and we keep them separate. The **officer** signed what they uploaded.
-> The **laboratory** gave an opinion on authenticity. The **ledger** proves nothing has
-> changed since. Our software makes none of those claims itself — it makes each one
-> checkable, by someone who does not have to trust us. Four hundred and fifty-three tests
-> stand behind that, including a red-team suite that attacks the API assuming a hostile
-> client."*
-
----
-
-## 5 · Questions you will get
-
-**"Is this production ready?"**
-No, and `docs/PRODUCTION_READINESS.md` says exactly what is missing: the master key belongs
-in an HSM, the directories are simulated, there is no HA story. What is solid is the
-security model, and there are 489 tests behind it.
-
-**"Why not put the evidence on the blockchain?"**
-Because that would put case data on a public, permanent, unredactable ledger. We publish a
-Merkle root — a commitment that proves a set of records existed in exactly that form,
-and discloses nothing about them. Putting evidence on-chain would be a privacy incident
-with extra steps.
-
-**"How do I know the AI isn't deciding guilt?"**
-It produces one field: a review priority for a human queue. It is labelled that way in the
-API, in the database and on screen, it never produces a percentage, and the word "verified"
-is never attached to it. Authenticity comes from a s.79A laboratory and is signed by a
-named examiner.
-
-**"What if an insider with database access edits a record?"**
-That is beat 6, and it is the case we designed for. The file changed and the ledger caught
-it, because the ledger's hashes are chained and its root is committed elsewhere. An insider
-would have to rewrite every subsequent entry *and* the anchored root, and the root is not
-theirs to rewrite.
-
-**"Why Monad and not Ethereum?"**
-Cost and finality for a testnet demonstration, and the contract is chain-agnostic — it is
-Solidity 0.8.24 with OpenZeppelin access control. The design does not depend on the chain;
-it depends on the root being somewhere we cannot quietly change.
-
-**"Can a police officer delete evidence?"**
-There is no delete endpoint anywhere in the system. Where another design would remove a
-record, this one records a court order and changes a status. The ledger is append-only and
-the model enforces it.
-
----
-
-## 6 · If something breaks
-
-| Symptom | Cause | Fix |
-|---|---|---|
-| Reset stops at a prompt | `npm run reset --yes` | `npm run reset -- --yes` |
-| Search returns 503 | Indexes gone | Reset rebuilds them; otherwise restart the API |
-| Upload refused `SIGNATURE_INVALID` | Browser key not registered | Sign in again — the login flow detects it and offers to register the device |
-| Upload refused `CASE_STAGE_CLOSED_TO_WRITES` | Working case is chargesheeted | Switch to `0124/2026` or the case from beat 2 |
-| Anchor panel says nothing anchored | Batcher had nothing new | Expected right after a reset; the seed anchors what it creates |
-| A directory is down | Service not started | `npm run dev` starts all of them |
-
-**The rule on stage:** if a beat fails, say *"that one's not cooperating"* and move to the
-next. Beats 6, 10 and 11 carry the presentation on their own.
-
----
-
-## 7 · What to have open
-
-1. Terminal with the seed output (the tamper storage key)
-2. Terminal ready for the tamper command
-3. Browser tab — the app
-4. Browser tab — `/verify`
-5. This file, on the second screen
-
----
-
-## 8 · The thirty-second version
-
-If you get cut short, do **beat 3** and **beat 6**. Hash and sign in the browser, then
-break the file and show the file light red while the ledger light stays green. That pair is
-the entire thesis.
+**Never say:** "AI detects fake evidence", "evidence is on the blockchain", "integrated with
+eCourts", any AI accuracy percentage — and don't name the AI provider on stage.

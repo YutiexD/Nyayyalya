@@ -11,7 +11,7 @@
  *     advocate's capability and a case that is actually listed before a court.
  *   - RULING on a filing takes two gates, like `sync-representation`: APPROVE on the
  *     filing establishes court scope, and the CASE_ACCESS_GRANT capability restricts
- *     the act to a REGISTRAR. Deciding who is on record is a registry act.
+ *     the act to the COURT role. Deciding who is on record is a registry act.
  */
 import { Router } from 'express';
 import * as vakalatnama from '../controllers/vakalatnama.js';

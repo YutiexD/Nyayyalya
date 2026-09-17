@@ -28,6 +28,9 @@ router.use(...requireSession);
  */
 router.get('/queue', authorizeCollection(RESOURCE_TYPE.EVIDENCE), fsl.reviewQueue);
 
+/** The same work grouped by case: case summary first, then its exhibits by AI review priority. */
+router.get('/cases', authorizeCollection(RESOURCE_TYPE.EVIDENCE), fsl.caseGroups);
+
 router.get('/referrals', authorizeCollection(RESOURCE_TYPE.REFERRAL), fsl.listReferrals);
 
 router.post(
@@ -50,7 +53,7 @@ router.post(
   fsl.fileReport
 );
 
-/** Certificates for the referred exhibit — where the examiner signs Part B. */
+/** Certificates for the referred exhibit — issued automatically at upload. */
 router.get(
   '/referrals/:id/certificates',
   authorize({ action: ACTION.READ, resourceType: RESOURCE_TYPE.REFERRAL }),

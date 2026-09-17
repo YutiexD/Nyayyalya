@@ -23,6 +23,7 @@ import fslRoutes, { evidenceFslRouter } from './routes/fsl.js';
 import disclosureRoutes from './routes/disclosure.js';
 import certificateRoutes, { publicVerifyRouter } from './routes/certificate.js';
 import vakalatnamaRoutes from './routes/vakalatnama.js';
+import eventsRoutes from './routes/events.js';
 
 export function createApp() {
   const app = express();
@@ -118,6 +119,12 @@ export function createApp() {
 
   // ---------------------------------------------------------------- routes ----
 
+  // The change feed is a long-lived text/event-stream response. Nothing mounted above
+  // holds or buffers it: there is no compression middleware, rate limiting applies only
+  // to the auth and public verifier routes, authorization audit rows are written per
+  // decision rather than per response, and helmet/cors only set headers. Keep it that
+  // way — a compression() added here must skip text/event-stream.
+  app.use('/api/events', eventsRoutes);
   app.use('/api/auth', authRoutes);
   app.use('/api/cases', caseRoutes);
   app.use('/api/evidence', evidenceRoutes);

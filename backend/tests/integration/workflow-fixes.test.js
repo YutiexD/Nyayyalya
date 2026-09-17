@@ -15,6 +15,7 @@ import { startDirectories, stopDirectories } from '../helpers/directories.js';
 import { allModels } from '../../models/index.js';
 import { Ledger } from '../../models/Ledger.js';
 import { AuditEvent } from '../../models/AuditEvent.js';
+import { Certificate } from '../../models/Certificate.js';
 import { createApp } from '../../app.js';
 import { asUser, sha256Hex } from '../helpers/client.js';
 import { runAnchorCycle } from '../../services/anchor.js';
@@ -54,16 +55,11 @@ async function upload(caseId, title) {
 const post = (session, path, body = {}) => as(session, request(server).post(path)).send(body);
 const get = (session, path) => as(session, request(server).get(path));
 
-async function handOver(itemId, from, to, toStatus, toLocation, sealIntact = true) {
-  const started = await post(from, `/api/custody/items/${itemId}/initiate-transfer`, {
-    toUserId: to.user.userId,
-    reason: 'Handover in the workflow audit',
+/** Record one custody movement — one act, no handover token. */
+function moveTo(itemId, who, toStatus, sealIntact = true) {
+  return post(who, `/api/custody/items/${itemId}/move`, {
     toStatus,
-    toLocation,
-  });
-  expect(started.status, JSON.stringify(started.body)).toBe(201);
-  return post(to, `/api/custody/items/${itemId}/accept-transfer`, {
-    transferToken: started.body.transferToken,
+    reason: 'Movement in the workflow audit',
     sealIntact,
   });
 }
@@ -126,7 +122,7 @@ afterAll(async () => {
 
 // ====================================================== the main case, 0123 ====
 
-describe('disclosure: a court can refuse an exclusion, and the s.230 clock runs', () => {
+describe('counsel on record read the case file at once, and nobody else does', () => {
   const c = {};
 
   beforeAll(async () => {
@@ -134,10 +130,6 @@ describe('disclosure: a court can refuse an exclusion, and the s.230 clock runs'
     c.ex1 = (await upload(c.caseId, 'CCTV still')).evidence;
     c.ex2 = (await upload(c.caseId, 'Mobile video')).evidence;
     c.ex3 = (await upload(c.caseId, 'Witness statement')).evidence;
-
-    // A certificate for ex1 BEFORE any report — its Part B is blank for good.
-    const cert = await post(s.io, '/api/certificates/generate', { evidenceId: c.ex1._id });
-    expect(cert.status, JSON.stringify(cert.body)).toBe(201);
 
     const ref = await post(s.sho, `/api/evidence/${c.ex1._id}/refer-fsl`, {
       labCode: 'UP-FSL-LKO',
@@ -152,16 +144,6 @@ describe('disclosure: a court can refuse an exclusion, and the s.230 clock runs'
     expect(filed.status, JSON.stringify(filed.body)).toBe(200);
     c.case = filed.body.case;
     await fileAndAcceptVakalatnama(s.advocate, s.judge, c.case.cnrNumber);
-
-    // Disclosure is composed by the court, and only once the case is before it.
-    const prepared = await post(s.judge, `/api/disclosure/${c.caseId}/prepare`, {
-      excludedItems: [
-        { itemId: c.ex2._id, reason: 'Requested withholding — the court should refuse this one.' },
-        { itemId: c.ex3._id, reason: 'Identifies a protected witness; withheld pending a redaction order.' },
-      ],
-    });
-    expect(prepared.status, JSON.stringify(prepared.body)).toBe(201);
-    c.packId = prepared.body.pack.packId;
   }, 240_000);
 
   it('starts the fourteen-day BNSS s.230 clock when the chargesheet is filed', () => {
@@ -170,73 +152,63 @@ describe('disclosure: a court can refuse an exclusion, and the s.230 clock runs'
     expect(due - filedOn).toBe(14 * DAY);
   });
 
-  it('tells whoever can issue a certificate that a report now needs a fresh one', async () => {
-    const res = await get(s.io, `/api/certificates?evidenceId=${c.ex1._id}`);
-    expect(res.body.reportFiled).toBe(true);
-    expect(res.body.freshCertificateNeeded).toBe(true);
+  it('filing the laboratory report does not touch the certificate — and creates no second one', async () => {
+    // Recording a forensic opinion is the laboratory's act on the exhibit. The s.63
+    // certificate is issued on upload and is neither rewritten by nor gated on it.
+    expect(await Certificate.countDocuments({ evidenceId: c.ex1._id })).toBe(1);
+    expect(await Ledger.countDocuments({ eventType: LEDGER_EVENT.CERTIFICATE_PART_B_ATTACHED })).toBe(0);
   });
 
-  it('records a refusal as a ruling, puts the exhibit back in the set, and lets the pack be served', async () => {
-    const approved = await post(s.judge, `/api/disclosure/${c.packId}/approve`, {
-      approvedExclusions: [c.ex3._id],
-      refusedExclusions: [c.ex2._id],
-      refusalNote: 'The ground given does not justify withholding this from the accused.',
-    });
-    expect(approved.status, JSON.stringify(approved.body)).toBe(200);
-    expect(approved.body.servable).toBe(true);
-    expect(approved.body.pack.exhibitIds).toContain(c.ex2._id);
-    expect(approved.body.pack.exhibitIds).not.toContain(c.ex3._id);
-
-    const entry = await Ledger.findOne({ eventType: LEDGER_EVENT.DISCLOSURE_APPROVED }).lean();
-    expect(entry.payload.refusedExclusions).toEqual([c.ex2._id]);
-
-    const served = await post(s.judge, `/api/disclosure/${c.packId}/serve`);
-    expect(served.status, JSON.stringify(served.body)).toBe(200);
-  });
-
-  it('refuses a contrary second ruling on an exclusion already ruled', async () => {
-    // The pack is served now, so any re-approval is refused outright.
-    const res = await post(s.judge, `/api/disclosure/${c.packId}/approve`, {
-      approvedExclusions: [c.ex2._id],
-    });
-    expect(res.status).toBe(409);
-  });
-
-  it("shows counsel the refused exhibit, withholds only the approved one, and runs the clock", async () => {
-    const res = await get(s.advocate, `/api/disclosure/my-pack/${c.caseId}`);
+  it('gives counsel the whole case file the moment the vakalatnama is accepted — no share step', async () => {
+    const res = await get(s.advocate, `/api/disclosure/case-file/${c.caseId}`);
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     const codes = res.body.exhibits.map((e) => e.exhibitCode);
-    expect(codes).toContain(c.ex2.exhibitCode);
-    expect(codes).not.toContain(c.ex3.exhibitCode);
-    expect(res.body.withheld).toHaveLength(1);
-    expect(res.body.withheld[0].reason).toMatch(/protected witness/);
-    expect(res.body.dueOn).toBeTruthy();
+    expect(codes).toEqual(expect.arrayContaining([c.ex1.exhibitCode, c.ex2.exhibitCode, c.ex3.exhibitCode]));
+    expect(res.body.exhibitCount).toBe(3);
+    expect(res.body.onRecord.length).toBeGreaterThan(0);
   });
 
-  it('never shows counsel machine triage — not on an exhibit, the list, the queue or search', async () => {
+  it('reports no disclosure pack and no "case file not shared" action on the case', async () => {
+    for (const who of [s.io, s.judge]) {
+      const one = await get(who, `/api/cases/${c.caseId}`);
+      expect(one.status).toBe(200);
+      expect(one.body).not.toHaveProperty('disclosure');
+      expect(one.body.case.summary).not.toHaveProperty('disclosure');
+
+      const overview = await get(who, `/api/cases/${c.caseId}/overview`);
+      expect(overview.status).toBe(200);
+      expect(overview.body).not.toHaveProperty('disclosure');
+      expect(overview.body.pendingActions.map((a) => a.code)).not.toContain('CASE_FILE_NOT_SHARED');
+    }
+  });
+
+  it('never shows counsel machine triage — not on an exhibit, the list, the queue, search or the case', async () => {
     const one = await get(s.advocate, `/api/evidence/${c.ex1._id}`);
     expect(one.status).toBe(200);
-    expect(one.body.evidence.triage).toBeUndefined();
+    expect(one.body.evidence.aiAnalysis).toBeUndefined();
 
     const list = await get(s.advocate, `/api/evidence?caseId=${c.caseId}`);
-    for (const e of list.body.evidence) expect(e.triage).toBeUndefined();
+    for (const e of list.body.evidence) expect(e.aiAnalysis).toBeUndefined();
 
     const queue = await get(s.advocate, '/api/evidence/queue/triage');
-    expect(queue.body.queue).toEqual([]);
+    expect(queue.body.queue ?? []).toEqual([]);
 
     const found = await get(s.advocate, '/api/search?q=CCTV');
     expect(found.status).toBe(200);
-    for (const e of found.body.evidence) expect(e.triage).toBeUndefined();
+    for (const e of found.body.evidence) expect(e.aiAnalysis).toBeUndefined();
+
+    const overview = await get(s.advocate, `/api/cases/${c.caseId}/overview`);
+    if (overview.status === 200) expect(JSON.stringify(overview.body)).not.toMatch(/aiAnalysis|triagePriority/);
   });
 
-  it('does not let search find an exhibit withheld from counsel', async () => {
+  it('lets search find the exhibits of a case counsel is on record for, and nothing for a stranger', async () => {
     const res = await get(s.advocate, '/api/search?q=Witness');
     expect(res.status).toBe(200);
-    expect(res.body.evidence.map((e) => e.exhibitCode)).not.toContain(c.ex3.exhibitCode);
+    expect(res.body.evidence.map((e) => e.exhibitCode)).toContain(c.ex3.exhibitCode);
 
-    // The officer, whose scope is the whole case, still finds it.
-    const io = await get(s.io, '/api/search?q=Witness');
-    expect(io.body.evidence.map((e) => e.exhibitCode)).toContain(c.ex3.exhibitCode);
+    const stranger = await get(s.stranger, '/api/search?q=Witness');
+    expect(stranger.status).toBe(200);
+    expect(stranger.body.evidence.map((e) => e.exhibitCode)).not.toContain(c.ex3.exhibitCode);
   });
 
   it('refuses — and audits — an advocate reaching for a case by CNR they are not on record for', async () => {
@@ -252,15 +224,19 @@ describe('disclosure: a court can refuse an exclusion, and the s.230 clock runs'
 
     const mine = await get(s.advocate, `/api/cases/by-cnr/${c.case.cnrNumber}`);
     expect(mine.status).toBe(200);
+
+    const file = await get(s.stranger, `/api/disclosure/case-file/${c.caseId}`);
+    expect(file.status).toBe(403);
+    expect(file.body.error.code).toBe(DENY_REASON.NOT_ON_RECORD_FOR_THIS_CASE);
   });
 
-  it('refuses — and audits — counsel reaching for a withheld exhibit by its code', async () => {
-    const res = await get(s.advocate, `/api/evidence/by-code/${c.ex3.exhibitCode}`);
-    expect(res.status).toBe(403);
-    expect(res.body.error.code).toBe(DENY_REASON.EXHIBIT_NOT_IN_DISCLOSURE_SET);
+  it('lets counsel on record open any exhibit by its code, and refuses a stranger', async () => {
+    const mine = await get(s.advocate, `/api/evidence/by-code/${c.ex3.exhibitCode}`);
+    expect(mine.status, JSON.stringify(mine.body)).toBe(200);
 
-    const served = await get(s.advocate, `/api/evidence/by-code/${c.ex2.exhibitCode}`);
-    expect(served.status).toBe(200);
+    const theirs = await get(s.stranger, `/api/evidence/by-code/${c.ex3.exhibitCode}`);
+    expect(theirs.status).toBe(403);
+    expect(theirs.body.error.code).toBe(DENY_REASON.NOT_ON_RECORD_FOR_THIS_CASE);
   });
 
   it('answers an unknown CNR or code as not found, like an unknown id', async () => {
@@ -295,23 +271,22 @@ describe('custody keeps moving after the chargesheet, and a lab can return an ar
     c.referralId = ref.body.referral.id;
     await post(s.examiner, `/api/fsl/referrals/${c.referralId}/accept`);
 
-    expect((await handOver(c.itemId, s.io, s.store, 'IN_STORE', 'MALKHANA')).status).toBe(200);
-    expect((await handOver(c.itemId, s.store, s.examiner, 'AT_FSL', 'FSL')).status).toBe(200);
+    expect((await moveTo(c.itemId, s.store, 'IN_STORE')).status).toBe(200);
+    expect((await moveTo(c.itemId, s.store, 'AT_FSL')).status).toBe(200);
     await fileReport(c.referralId);
 
-    // Filed WITHOUT a pack — the order that used to strand disclosure.
     const filed = await post(s.io, `/api/cases/${c.caseId}/file-chargesheet`);
     expect(filed.status, JSON.stringify(filed.body)).toBe(200);
   }, 240_000);
 
   it('lets the examiner hand the article back after reporting, after the chargesheet', async () => {
-    const back = await handOver(c.itemId, s.examiner, s.store, 'IN_STORE', 'MALKHANA');
+    const back = await moveTo(c.itemId, s.examiner, 'IN_STORE');
     expect(back.status, JSON.stringify(back.body)).toBe(200);
     expect(back.body.item.status).toBe('IN_STORE');
   });
 
-  it('lets station police receive an article after the chargesheet — custody is not investigation', async () => {
-    const returned = await handOver(c.itemId, s.store, s.sho, 'RETURNED', 'FIELD');
+  it('lets station police record a return after the chargesheet — custody is not investigation', async () => {
+    const returned = await moveTo(c.itemId, s.sho, 'RETURNED');
     expect(returned.status, JSON.stringify(returned.body)).toBe(200);
     expect(returned.body.item.status).toBe('RETURNED');
   });
@@ -327,53 +302,24 @@ describe('custody keeps moving after the chargesheet, and a lab can return an ar
     expect(res.body.error.code).toBe(DENY_REASON.CASE_STAGE_CLOSED_TO_WRITES);
   });
 
-  /**
-   * Disclosure happens AFTER filing, which is the only time it ever happens — and it
-   * is the court that composes it. Requiring an investigative WRITE here would have
-   * refused every pack that was ever actually needed, since the case is closed to
-   * writes by then; APPROVE is the action, and the court holds it.
-   */
-  it('lets the court compose disclosure after filing, and reports the pack on the case', async () => {
-    const prepared = await post(s.magistrate, `/api/disclosure/${c.caseId}/prepare`, {
-      excludedItems: [],
-      maskVictimIdentity: true,
-    });
-    expect(prepared.status, JSON.stringify(prepared.body)).toBe(201);
-    c.packId = prepared.body.pack.packId;
+  it("does not list a case's custody register to a court in another district, even by ?caseId", async () => {
+    // One Court role for the district: every court login there reads the register.
+    const same = await get(s.evidenceRoom, `/api/custody/items?caseId=${c.caseId}`);
+    expect(same.status).toBe(200);
+    expect(same.body.items.map((i) => i.id)).toContain(c.itemId);
 
-    const got = await get(s.io, `/api/cases/${c.caseId}`);
-    expect(got.body.disclosure).toMatchObject({ packId: c.packId, status: 'DRAFT' });
-  });
-
-  it('refuses the investigating officer disclosure entirely', async () => {
-    const res = await post(s.io, `/api/disclosure/${c.caseId}/prepare`, { excludedItems: [] });
-    expect(res.status).toBe(403);
-    expect(res.body.error.code).toBe(DENY_REASON.READ_ONLY_ROLE);
-  });
-
-  it('never unmasks a victim at approval when the approval does not mention masking', async () => {
-    const approved = await post(s.magistrate, `/api/disclosure/${c.packId}/approve`, {
-      approvedExclusions: [],
-    });
-    expect(approved.status, JSON.stringify(approved.body)).toBe(200);
-    expect(approved.body.pack.maskVictimIdentity).toBe(true);
-
-    const explicitOff = await post(s.magistrate, `/api/disclosure/${c.packId}/approve`, {
-      maskVictimIdentity: false,
-    });
-    expect(explicitOff.body.pack.maskVictimIdentity).toBe(true);
-  });
-
-  it("does not list another court's case's custody register to a court, even by ?caseId", async () => {
-    const other = await get(s.evidenceRoom, `/api/custody/items?caseId=${c.caseId}`);
-    expect(other.status).toBe(200);
-    expect(other.body.items).toEqual([]);
-
-    const gaps = await get(s.evidenceRoom, `/api/custody/gaps?caseId=${c.caseId}`);
-    expect(gaps.body.items).toEqual([]);
-
-    const own = await get(s.magistrate, `/api/custody/items?caseId=${c.caseId}`);
-    expect(own.body.items.map((i) => i.id)).toContain(c.itemId);
+    // A court identity from another district does not.
+    const users = mongoose.connection.collection('users');
+    await users.updateOne({ authorityId: 'UP-GZB-EVC-01' }, { $set: { 'scope.districtCode': 'UP-LKO' } });
+    try {
+      const other = await get(s.evidenceRoom, `/api/custody/items?caseId=${c.caseId}`);
+      expect(other.status).toBe(200);
+      expect(other.body.items).toEqual([]);
+      const gaps = await get(s.evidenceRoom, `/api/custody/gaps?caseId=${c.caseId}`);
+      expect(gaps.body.items).toEqual([]);
+    } finally {
+      await users.updateOne({ authorityId: 'UP-GZB-EVC-01' }, { $set: { 'scope.districtCode': 'UP-GZB' } });
+    }
   });
 });
 
@@ -392,7 +338,7 @@ describe('a frozen article can be released — by the SHO, on a recorded decisio
       location: 'FIELD',
     });
     c.itemId = booked.body.item.id;
-    const accepted = await handOver(c.itemId, s.io, s.store, 'IN_STORE', 'MALKHANA', false);
+    const accepted = await moveTo(c.itemId, s.io, 'IN_STORE', false);
     expect(accepted.body.frozen).toBe(true);
   }, 120_000);
 
@@ -425,13 +371,8 @@ describe('a frozen article can be released — by the SHO, on a recorded decisio
     expect(types).toContain(LEDGER_EVENT.CUSTODY_FREEZE_LIFTED);
 
     // …and the item can move again.
-    const again = await post(s.store, `/api/custody/items/${c.itemId}/initiate-transfer`, {
-      toUserId: s.sho.user.userId,
-      reason: 'Released after decision',
-      toStatus: 'RETURNED',
-      toLocation: 'FIELD',
-    });
-    expect(again.status, JSON.stringify(again.body)).toBe(201);
+    const again = await moveTo(c.itemId, s.store, 'RETURNED');
+    expect(again.status, JSON.stringify(again.body)).toBe(200);
   });
 });
 

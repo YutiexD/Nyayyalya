@@ -25,6 +25,7 @@ import { canonicalHash } from './canonical.js';
 import { sha256Hex, randomHex } from '../config/crypto.js';
 import { loggerFor } from '../utils/logger.js';
 import { Internal } from '../utils/errors.js';
+import { emitLedgerAppend, emitChange } from './realtime.js';
 
 const log = loggerFor('ledger');
 
@@ -137,7 +138,7 @@ export async function appendEvent(e) {
     throw Internal('LEDGER_BAD_EVENT', 'payload must be an object');
   }
 
-  return enqueue(async () => {
+  const entry = await enqueue(async () => {
     const holder = await acquireLock();
     try {
       // Timestamp is server-authoritative (ADR-007). A client-asserted time, if any,
@@ -226,6 +227,22 @@ export async function appendEvent(e) {
       await releaseLock(holder);
     }
   });
+
+  announceAppend(entry);
+  return entry;
+}
+
+/**
+ * Tell open pages the chain moved. Runs after the lock is released and never throws:
+ * a change feed that could fail or delay an append would put the record at the mercy
+ * of a notification.
+ */
+function announceAppend(entry) {
+  try {
+    emitLedgerAppend(entry);
+  } catch (err) {
+    log.warn({ err: err.message }, 'change feed notification failed');
+  }
 }
 
 // ---------------------------------------------------------------- verification ----
@@ -359,6 +376,16 @@ export async function stampAnchorBatch(seqs, batchId) {
     { seq: { $in: seqs }, anchorBatchId: null },
     { $set: { anchorBatchId: batchId } }
   );
+
+  // Anchoring status is shown on timelines; let open pages for these cases refetch.
+  // Fire-and-forget: a notification must never affect anchoring.
+  Ledger.collection
+    .distinct('caseId', { seq: { $in: seqs }, caseId: { $ne: null } })
+    .then((caseIds) => {
+      for (const caseId of caseIds) emitChange({ type: 'RECORD_UPDATED', caseId });
+    })
+    .catch(() => {});
+
   return { modifiedCount: res.modifiedCount };
 }
 

@@ -16,6 +16,7 @@ import request from 'supertest';
 import { startDirectories, stopDirectories } from '../helpers/directories.js';
 import { allModels } from '../../models/index.js';
 import { Ledger } from '../../models/Ledger.js';
+import { Case } from '../../models/Case.js';
 import { CaseAccessGrant } from '../../models/CaseAccessGrant.js';
 import { createApp } from '../../app.js';
 import { asUser, sha256Hex } from '../helpers/client.js';
@@ -37,8 +38,26 @@ let judge;
 let advocate;
 let other;
 let caseId;
+let exhibit;
 
 const as = (session, req) => req.set('Authorization', `Bearer ${session.accessToken}`);
+
+const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+
+/** One exhibit, uploaded by the IO while the case is still under investigation. */
+async function uploadExhibit(title) {
+  const bytes = Buffer.concat([PNG, Buffer.from(title.padEnd(96, '.'), 'utf8')]);
+  const sha = sha256Hex(bytes);
+  const res = await as(io, request(server).post('/api/evidence/upload'))
+    .field('caseId', String(caseId))
+    .field('title', title)
+    .field('sha256Client', sha)
+    .field('signature', io.keys.sign(sha))
+    .field('sourceType', 'MOBILE')
+    .attach('file', bytes, { filename: `${title}.png`, contentType: 'image/png' });
+  expect(res.status, JSON.stringify(res.body)).toBe(201);
+  return res.body.evidence;
+}
 
 const pdf = (label) => Buffer.from(`%PDF-1.4\n% vakalatnama — ${label}\n${'.'.repeat(64)}\n%%EOF\n`, 'utf8');
 
@@ -72,7 +91,8 @@ beforeAll(async () => {
   const created = await as(io, request(server).post('/api/cases/from-fir')).send({ firNumber: FIR });
   expect(created.status, JSON.stringify(created.body)).toBe(201);
   caseId = created.body.case._id;
-  const filed = await as(io, request(server).post(`/api/cases/${caseId}/file-chargesheet`)).send({});
+  exhibit = await uploadExhibit('CCTV clip');
+  const filed =await as(io, request(server).post(`/api/cases/${caseId}/file-chargesheet`)).send({});
   expect(filed.status, JSON.stringify(filed.body)).toBe(200);
 }, 180_000);
 
@@ -102,6 +122,10 @@ describe('filing grants nothing', () => {
     const res = await as(advocate, request(server).get(`/api/cases/${caseId}`));
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe(DENY_REASON.NOT_ON_RECORD_FOR_THIS_CASE);
+
+    const ex = await as(advocate, request(server).get(`/api/evidence/${exhibit._id}`));
+    expect(ex.status).toBe(403);
+    expect(ex.body.error.code).toBe(DENY_REASON.NOT_ON_RECORD_FOR_THIS_CASE);
   });
 
   it('refuses a second live filing for the same appearance', async () => {
@@ -211,6 +235,31 @@ describe("the ruling is the court’s act", () => {
     expect(res.status).toBe(200);
   });
 
+  it('opens every exhibit at the same moment — the court shares nothing by hand', async () => {
+    const one = await as(advocate, request(server).get(`/api/evidence/${exhibit._id}`));
+    expect(one.status, JSON.stringify(one.body)).toBe(200);
+    expect(one.body.evidence.aiAnalysis).toBeUndefined();
+
+    const list = await as(advocate, request(server).get(`/api/evidence?caseId=${caseId}`));
+    expect(list.body.evidence.map((e) => e.exhibitCode)).toContain(exhibit.exhibitCode);
+
+    const file = await as(advocate, request(server).get(`/api/disclosure/case-file/${caseId}`));
+    expect(file.status, JSON.stringify(file.body)).toBe(200);
+    expect(file.body.exhibits.map((e) => e.evidenceId)).toEqual([String(exhibit._id)]);
+    expect(JSON.stringify(file.body)).not.toMatch(/watermark|aiAnalysis/i);
+
+    // Read-only: being on record is not authorship.
+    const order = await as(advocate, request(server).post(`/api/cases/${caseId}/record-order`)).send({
+      orderType: 'ADJOURNMENT',
+      text: 'Counsel cannot record an order.',
+    });
+    expect(order.status).toBe(403);
+
+    // The s.230 "made available" date is stamped when counsel came on record.
+    const c = await Case.findById(caseId).lean();
+    expect(c.clocks.disclosureServedOn).toBeInstanceOf(Date);
+  });
+
   it('cannot be ruled on twice', async () => {
     const res = await as(judge, request(server).post(`/api/vakalatnama/${filingId}/reject`)).send({
       note: 'Second thoughts after acceptance.',
@@ -251,6 +300,9 @@ describe("the ruling is the court’s act", () => {
 
     const denied = await as(other, request(server).get(`/api/cases/${caseId}`));
     expect(denied.status).toBe(403);
+    const deniedExhibit = await as(other, request(server).get(`/api/evidence/${exhibit._id}`));
+    expect(deniedExhibit.status).toBe(403);
+    expect(deniedExhibit.body.error.code).toBe(DENY_REASON.NOT_ON_RECORD_FOR_THIS_CASE);
 
     const entry = await Ledger.findOne({ eventType: LEDGER_EVENT.VAKALATNAMA_REJECTED }).lean();
     expect(entry.payload.advocateAuthorityId).toBe(OTHER_ADVOCATE);

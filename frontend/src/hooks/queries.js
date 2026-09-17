@@ -1,19 +1,34 @@
 /**
  * Every server read and write, as hooks.
  *
- * One file rather than one per feature, because the invalidation relationships cross
- * features constantly: uploading an exhibit changes the case timeline, the ledger, the
- * triage queue and the anchor tail; serving a disclosure pack changes the pack list,
- * the case clocks and the advocate's own view. Those edges are only correct if they
- * are visible together.
- *
- * Reads are queries; anything that mutates is a mutation that names what it
- * invalidates. Nothing in the app calls `api.*` directly — that way a new screen
- * cannot accidentally read server state into a component and hold it stale.
+ * One file rather than one per feature, because invalidation crosses features: an
+ * upload changes the case, its timeline, the ledger, the lab queue and the certificate
+ * register. Reads are queries; anything that mutates is a mutation that names what it
+ * invalidates. Nothing in the app calls `api.*` for server state directly.
  */
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { api } from '@/lib/api';
 import { qk } from '@/lib/queryClient';
+
+/** Statuses in which an AI analysis has not come back yet. */
+const ANALYSIS_IN_FLIGHT = new Set(['PENDING', 'PROCESSING']);
+
+/**
+ * Poll while any exhibit in a response is still being analysed, and stop the moment
+ * none is. Only laboratory responses carry `aiAnalysis`, so other roles never poll.
+ */
+const pollWhileAnalysing = (collect) => (query) => {
+  const exhibits = collect(query.state.data) ?? [];
+  return exhibits.some((e) => ANALYSIS_IN_FLIGHT.has(e?.aiAnalysis?.status)) ? 4000 : false;
+};
+
+/** Everything that shows a case, its evidence or its progress. */
+const invalidateCaseViews = (qc) => {
+  qc.invalidateQueries({ queryKey: ['cases'] });
+  qc.invalidateQueries({ queryKey: ['case'] });
+  qc.invalidateQueries({ queryKey: ['case-file'] });
+  qc.invalidateQueries({ queryKey: ['fsl'] });
+};
 
 // ------------------------------------------------------------------ cases ----
 
@@ -31,6 +46,55 @@ export const useCaseTimeline = (id, options) =>
     ...options,
   });
 
+/** The case grouped for a dashboard. Polls while an AI analysis is still running. */
+export const useCaseOverview = (id, options) =>
+  useQuery({
+    queryKey: qk.caseOverview(id),
+    queryFn: () => api.cases.overview(id),
+    enabled: Boolean(id),
+    refetchInterval: pollWhileAnalysing((d) => d?.evidence),
+    ...options,
+  });
+
+export const useCaseWorkflow = (id, options) =>
+  useQuery({
+    queryKey: qk.caseWorkflow(id),
+    queryFn: () => api.cases.workflow(id),
+    enabled: Boolean(id),
+    ...options,
+  });
+
+/**
+ * The case file: `{ caseId, cnrNumber, firNumber, title, stage, courtId, onRecord,
+ * clocks, exhibitCount, exhibits }`. Counsel on record read it automatically.
+ */
+export const useCaseFile = (caseId, options) =>
+  useQuery({
+    queryKey: qk.caseFile(caseId),
+    queryFn: () => api.disclosure.caseFile(caseId),
+    enabled: Boolean(caseId),
+    ...options,
+  });
+
+/**
+ * A judicial act on a case. The server's state machine decides whether it is valid;
+ * the client names the act, never the stage.
+ */
+export function useTransitionCase() {
+  const qc = useQueryClient();
+  return useMutation({
+    // `form` (multipart) is used when closing with a signed judgment or declaration.
+    mutationFn: ({ caseId, action, note, form }) =>
+      form ? api.cases.transitionWithDocument(caseId, form) : api.cases.transition(caseId, action, note),
+    onSuccess: () => {
+      invalidateCaseViews(qc);
+      qc.invalidateQueries({ queryKey: ['ledger'] });
+      // Every exhibit's lifecycle carries the case stage.
+      qc.invalidateQueries({ queryKey: ['exhibit'] });
+    },
+  });
+}
+
 export function useCreateCaseFromFir() {
   const qc = useQueryClient();
   return useMutation({
@@ -47,10 +111,9 @@ export function useFileChargesheet() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (caseId) => api.cases.fileChargesheet(caseId),
-    // Filing binds the case to a court and closes it to investigative writes, so the
-    // case, its timeline, the ledger and every list that shows a stage are all stale.
+    // Filing binds the case to a court and closes it to investigative writes.
     onSuccess: (_data, caseId) => {
-      qc.invalidateQueries({ queryKey: ['cases'] });
+      invalidateCaseViews(qc);
       qc.invalidateQueries({ queryKey: qk.case(caseId) });
       qc.invalidateQueries({ queryKey: qk.caseTimeline(caseId) });
       qc.invalidateQueries({ queryKey: ['ledger'] });
@@ -58,18 +121,13 @@ export function useFileChargesheet() {
   });
 }
 
-/**
- * The court closing the case.
- *
- * Closing changes what every screen may do with the case — it becomes readable and
- * nothing more — so the case, its lists, its timeline and the ledger are all stale.
- */
+/** The court closing the case: it becomes readable and nothing more. */
 export function useCloseCase() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ caseId, reason }) => api.cases.close(caseId, reason),
     onSuccess: (_d, { caseId }) => {
-      qc.invalidateQueries({ queryKey: ['cases'] });
+      invalidateCaseViews(qc);
       qc.invalidateQueries({ queryKey: qk.case(caseId) });
       qc.invalidateQueries({ queryKey: qk.caseTimeline(caseId) });
       qc.invalidateQueries({ queryKey: ['ledger'] });
@@ -94,32 +152,60 @@ export function useRecordOrder() {
 export const useEvidence = (query, options) =>
   useQuery({ queryKey: qk.evidence(query), queryFn: () => api.evidence.list(query), ...options });
 
+/** One exhibit. Polls while its AI analysis is pending or processing (FSL responses only). */
 export const useExhibit = (id, options) =>
-  useQuery({ queryKey: qk.exhibit(id), queryFn: () => api.evidence.get(id), enabled: Boolean(id), ...options });
+  useQuery({
+    queryKey: qk.exhibit(id),
+    queryFn: () => api.evidence.get(id),
+    enabled: Boolean(id),
+    refetchInterval: pollWhileAnalysing((d) => (d?.evidence ? [d.evidence] : [])),
+    ...options,
+  });
+
+/** Re-queue a failed AI analysis. FSL only. */
+/** One exhibit's lifecycle: every step with its description, actor and proofs. */
+export const useEvidenceLifecycle = (evidenceId, options) =>
+  useQuery({
+    queryKey: qk.exhibitLifecycle(evidenceId),
+    queryFn: () => api.evidence.lifecycle(evidenceId),
+    enabled: Boolean(evidenceId),
+    ...options,
+  });
+
+export function useRetryAiAnalysis() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (evidenceId) => api.evidence.retryAiAnalysis(evidenceId),
+    onSuccess: (_d, evidenceId) => {
+      qc.invalidateQueries({ queryKey: qk.exhibit(evidenceId) });
+      qc.invalidateQueries({ queryKey: ['evidence'] });
+      invalidateCaseViews(qc);
+    },
+  });
+}
 
 export const useTriageQueue = (query, options) =>
   useQuery({ queryKey: qk.triage(query), queryFn: () => api.evidence.triageQueue(query), ...options });
 
 /**
- * Verify is a MUTATION, not a query, even though it reads.
- *
- * It writes a VERIFY row to the audit log every time it runs, so it must happen when
- * the user asks and never on a refetch, a window focus, or a cache revalidation. A
- * query would put unexplained verification events in the one log that has to mean
- * something.
+ * Verify is a MUTATION, not a query, even though it reads: every run is written to the
+ * audit log, so it must happen when the user asks and never on a refetch.
  */
 export function useVerifyExhibit() {
   return useMutation({ mutationFn: (id) => api.evidence.verify(id) });
 }
 
+/** Upload evidence. The server issues the s.63 certificate as part of the same request. */
 export function useUploadEvidence() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (form) => api.evidence.upload(form),
     onSuccess: (data) => {
+      invalidateCaseViews(qc);
       qc.invalidateQueries({ queryKey: ['evidence'] });
       qc.invalidateQueries({ queryKey: ['triage'] });
       qc.invalidateQueries({ queryKey: ['ledger'] });
+      qc.invalidateQueries({ queryKey: ['certificate'] });
       const caseId = data?.evidence?.caseId;
       if (caseId) qc.invalidateQueries({ queryKey: qk.caseTimeline(caseId) });
     },
@@ -134,92 +220,16 @@ export function useReferToFsl() {
       qc.invalidateQueries({ queryKey: ['evidence'] });
       qc.invalidateQueries({ queryKey: ['fsl', 'referrals'] });
       qc.invalidateQueries({ queryKey: ['ledger'] });
-      // The exhibit's own forensic status and the queue's status column both move to
-      // "Referred". Without these the station kept showing "Not referred" and invited
-      // a second referral that the server refuses as a duplicate.
       qc.invalidateQueries({ queryKey: qk.exhibit(evidenceId) });
       qc.invalidateQueries({ queryKey: ['triage'] });
-    },
-  });
-}
-
-// ---------------------------------------------------------------- custody ----
-
-export const useCustodyItems = (query, options) =>
-  useQuery({ queryKey: qk.custodyItems(query), queryFn: () => api.custody.items(query), ...options });
-
-export const useCustodyGaps = (query, options) =>
-  useQuery({ queryKey: qk.custodyGaps(query), queryFn: () => api.custody.gaps(query), ...options });
-
-export const useCustodyChain = (id, options) =>
-  useQuery({
-    queryKey: qk.custodyChain(id),
-    queryFn: () => api.custody.chain(id),
-    enabled: Boolean(id),
-    ...options,
-  });
-
-export function useCreateCustodyItem() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (payload) => api.custody.create(payload),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['custody'] });
-      qc.invalidateQueries({ queryKey: ['ledger'] });
-    },
-  });
-}
-
-export function useScanCustodyLabel() {
-  return useMutation({ mutationFn: (qrToken) => api.custody.scan(qrToken) });
-}
-
-export const useCustodyRecipients = (id, options) =>
-  useQuery({
-    queryKey: qk.custodyRecipients(id),
-    queryFn: () => api.custody.recipients(id),
-    enabled: Boolean(id),
-    ...options,
-  });
-
-export function useInitiateTransfer() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, payload }) => api.custody.initiateTransfer(id, payload),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['custody'] });
-      qc.invalidateQueries({ queryKey: ['ledger'] });
-    },
-  });
-}
-
-export function useAcceptTransfer() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, payload }) => api.custody.acceptTransfer(id, payload),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['custody'] });
-      qc.invalidateQueries({ queryKey: ['ledger'] });
-    },
-  });
-}
-
-/** An SHO's recorded decision lifting a seal-exception freeze. */
-export function useLiftFreeze() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, payload }) => api.custody.liftFreeze(id, payload),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['custody'] });
-      qc.invalidateQueries({ queryKey: ['ledger'] });
+      invalidateCaseViews(qc);
     },
   });
 }
 
 /**
  * Counsel reaching for a case by its CNR, or an exhibit by its code. Mutations, not
- * queries: each is an attempt the server audits — allowed or refused — so it happens
- * when the advocate asks and never on a background refetch.
+ * queries: each is an audited attempt, so it happens only when asked.
  */
 export function useOpenCaseByCnr() {
   return useMutation({ mutationFn: (cnr) => api.cases.byCnr(cnr) });
@@ -231,29 +241,33 @@ export function useOpenExhibitByCode() {
 
 // ------------------------------------------------------------------- FSL ----
 
-/**
- * The examiner's review queue — the screen the automatic review priority exists for.
- * `state` is PENDING (the default, and the work), REVIEWED, or ALL.
- */
+/** The examiner's review queue. `state` is PENDING (the default), REVIEWED, or ALL. */
 export const useLabQueue = (query, options) =>
   useQuery({ queryKey: qk.labQueue(query), queryFn: () => api.fsl.queue(query), ...options });
 
 /**
- * A laboratory recording its opinion on an exhibit.
- *
- * It changes the exhibit, the queue it came from, the case summaries that count
- * opinions, the certificates whose Part B it becomes, and the ledger. All of them.
+ * The laboratory's work grouped by case: `{ cases: [{ case, summary, highestPriority,
+ * evidence }], counts }`. Polls while any analysis is running.
  */
+export const useFslCases = (query, options) =>
+  useQuery({
+    queryKey: qk.fslCases(query),
+    queryFn: () => api.fsl.cases(query),
+    refetchInterval: pollWhileAnalysing((d) => (d?.cases ?? []).flatMap((g) => g.evidence ?? [])),
+    ...options,
+  });
+
+/** A laboratory recording its verdict on an exhibit. */
 export function useRecordVerdict() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ evidenceId, form }) => api.evidence.recordVerdict(evidenceId, form),
-    onSuccess: (_d, { evidenceId }) => {
-      qc.invalidateQueries({ queryKey: ['fsl'] });
+    // Settled, not success: a 409 VERDICT_ALREADY_RECORDED means the screen is stale.
+    onSettled: (_d, _e, { evidenceId }) => {
       qc.invalidateQueries({ queryKey: ['evidence'] });
       qc.invalidateQueries({ queryKey: qk.exhibit(evidenceId) });
       qc.invalidateQueries({ queryKey: ['triage'] });
-      qc.invalidateQueries({ queryKey: ['cases'] });
+      invalidateCaseViews(qc);
       qc.invalidateQueries({ queryKey: ['certificate'] });
       qc.invalidateQueries({ queryKey: ['ledger'] });
     },
@@ -268,7 +282,7 @@ export function useAcceptReferral() {
   return useMutation({
     mutationFn: (id) => api.fsl.accept(id),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['fsl', 'referrals'] });
+      invalidateCaseViews(qc);
       qc.invalidateQueries({ queryKey: ['exhibit'] });
       qc.invalidateQueries({ queryKey: ['triage'] });
     },
@@ -280,111 +294,14 @@ export function useFileReport() {
   return useMutation({
     mutationFn: ({ id, form }) => api.fsl.report(id, form),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['fsl', 'referrals'] });
+      invalidateCaseViews(qc);
       qc.invalidateQueries({ queryKey: ['evidence'] });
       qc.invalidateQueries({ queryKey: ['exhibit'] });
       qc.invalidateQueries({ queryKey: ['triage'] });
-      // Certificates now report that a report has landed which their Part B lacks.
       qc.invalidateQueries({ queryKey: ['certificate'] });
       qc.invalidateQueries({ queryKey: ['ledger'] });
     },
   });
-}
-
-// ------------------------------------------------------------ disclosure ----
-
-export const usePacksForCase = (caseId, status, options) =>
-  useQuery({
-    queryKey: qk.packsForCase(caseId, status),
-    queryFn: () => api.disclosure.packsForCase(caseId, status),
-    enabled: Boolean(caseId),
-    ...options,
-  });
-
-export const useMyPack = (caseId, options) =>
-  useQuery({
-    queryKey: qk.myPack(caseId),
-    queryFn: () => api.disclosure.myPack(caseId),
-    enabled: Boolean(caseId),
-    ...options,
-  });
-
-/**
- * The court sharing the case file: composed, ruled on and served in one act.
- *
- * It puts material in front of counsel for the first time, so it invalidates the
- * disclosure views, the case (its clocks move), the case lists, and the ledger.
- */
-export function useShareCaseFile() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ caseId, payload }) => api.disclosure.share(caseId, payload),
-    onSuccess: (_d, { caseId }) => {
-      qc.invalidateQueries({ queryKey: ['disclosure'] });
-      qc.invalidateQueries({ queryKey: ['cases'] });
-      qc.invalidateQueries({ queryKey: qk.case(caseId) });
-      qc.invalidateQueries({ queryKey: qk.caseTimeline(caseId) });
-      qc.invalidateQueries({ queryKey: ['ledger'] });
-    },
-  });
-}
-
-export function usePreparePack() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ caseId, payload }) => api.disclosure.prepare(caseId, payload),
-    onSuccess: (_d, { caseId }) => {
-      qc.invalidateQueries({ queryKey: ['disclosure'] });
-      qc.invalidateQueries({ queryKey: ['ledger'] });
-      // The case record now reports the pack, which the officer's screen reads.
-      qc.invalidateQueries({ queryKey: qk.case(caseId) });
-    },
-  });
-}
-
-export function useSyncRepresentation() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (caseId) => api.disclosure.syncRepresentation(caseId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['disclosure'] });
-      // The on-record list and the serve recipients read the representation query.
-      qc.invalidateQueries({ queryKey: ['vakalatnama'] });
-    },
-  });
-}
-
-export function useApprovePack() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ packId, payload }) => api.disclosure.approve(packId, payload),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['disclosure'] }),
-  });
-}
-
-export function useServePack() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ packId, payload }) => api.disclosure.serve(packId, payload),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['disclosure'] });
-      qc.invalidateQueries({ queryKey: ['cases'] });
-      qc.invalidateQueries({ queryKey: ['ledger'] });
-    },
-  });
-}
-
-export function useAcknowledgePack() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: (packId) => api.disclosure.acknowledge(packId),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['disclosure'] }),
-  });
-}
-
-/** A lookup the court runs on demand — never on a refetch, since each one is audited. */
-export function useTraceWatermark() {
-  return useMutation({ mutationFn: (token) => api.disclosure.trace(token) });
 }
 
 // ------------------------------------------------------------ vakalatnama ----
@@ -409,8 +326,9 @@ export function useFileVakalatnama() {
 }
 
 /**
- * Accepting puts an advocate on record, which changes who a pack can be served on,
- * who can read the case, and the ledger — so all of those are stale afterwards.
+ * The court ruling on a filing. Accepting puts the advocate on record, which gives them
+ * the case and every exhibit automatically — so cases, evidence, the case file and
+ * certificates are all stale afterwards.
  */
 export function useRuleOnFiling() {
   const qc = useQueryClient();
@@ -418,9 +336,22 @@ export function useRuleOnFiling() {
     mutationFn: ({ id, decision, note }) =>
       decision === 'ACCEPT' ? api.vakalatnama.accept(id) : api.vakalatnama.reject(id, note),
     onSuccess: () => {
+      invalidateCaseViews(qc);
       qc.invalidateQueries({ queryKey: ['vakalatnama'] });
-      qc.invalidateQueries({ queryKey: ['disclosure'] });
+      qc.invalidateQueries({ queryKey: ['evidence'] });
+      qc.invalidateQueries({ queryKey: ['certificate'] });
       qc.invalidateQueries({ queryKey: ['ledger'] });
+    },
+  });
+}
+
+export function useSyncRepresentation() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (caseId) => api.disclosure.syncRepresentation(caseId),
+    onSuccess: () => {
+      invalidateCaseViews(qc);
+      qc.invalidateQueries({ queryKey: ['vakalatnama'] });
     },
   });
 }
@@ -436,42 +367,34 @@ export const useCertificate = (id, options) =>
   });
 
 /**
- * The certificates for one exhibit, or — for an examiner, whose read on the exhibit
- * ends when they report — for one referral.
+ * The certificate register for one exhibit: `{ evidenceId, exhibitCode, active,
+ * certificates, total }`. `active` is the one current certificate, or null.
  */
-export const useCertificatesFor = ({ evidenceId, referralId }, options) =>
+export const useCertificateFor = (evidenceId, options) =>
   useQuery({
-    queryKey: referralId ? qk.certificatesForReferral(referralId) : qk.certificatesForEvidence(evidenceId),
-    queryFn: () =>
-      referralId ? api.fsl.certificates(referralId) : api.certificates.forEvidence(evidenceId),
-    enabled: Boolean(evidenceId || referralId),
+    queryKey: qk.certificatesForEvidence(evidenceId),
+    queryFn: () => api.certificates.forEvidence(evidenceId),
+    enabled: Boolean(evidenceId),
     ...options,
   });
 
-export function useGenerateCertificate() {
+/**
+ * One-click certificate verification. A mutation, because every run is audited. On
+ * success the certificate's `lastVerification` has moved, so the register is refetched.
+ */
+export function useVerifyCertificate() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (evidenceId) => api.certificates.generate(evidenceId),
-    onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['certificate'] });
-      qc.invalidateQueries({ queryKey: ['ledger'] });
-    },
-  });
-}
-
-export function useSignPartA() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, payload }) => api.certificates.signPartA(id, payload),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['certificate'] }),
-  });
-}
-
-export function useSignPartB() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ id, payload }) => api.certificates.signPartB(id, payload),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ['certificate'] }),
+    mutationFn: (id) => api.certificates.verify(id),
+    // A verification updates the certificate's last result, which the lab list, case
+    // overviews and exhibit views all show.
+    onSuccess: () =>
+      qc.invalidateQueries({
+        predicate: (q) => {
+          const head = String(q.queryKey?.[0] ?? '');
+          return /^(certificate|fsl|case|evidence|exhibit)/i.test(head);
+        },
+      }),
   });
 }
 
@@ -497,10 +420,7 @@ export const useAudit = (query, options) =>
 export const useSecurityFeed = (options) =>
   useQuery({ queryKey: qk.auditSecurity, queryFn: () => api.audit.security(), ...options });
 
-/**
- * Chain verification is a mutation for the same reason exhibit verification is: it is
- * an act the user performs, not a value that gets refreshed underneath them.
- */
+/** Chain verification is an act the user performs, so it is a mutation. */
 export function useVerifyChain() {
   return useMutation({ mutationFn: () => api.ledger.verifyChain() });
 }

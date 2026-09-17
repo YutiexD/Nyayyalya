@@ -238,7 +238,8 @@ const POSTING_ROLE_TO_LEXX = Object.freeze({
  * identity is refused at activation rather than admitted with no policy behind it.
  */
 const REGISTRY_ROLE_TO_LEXX = Object.freeze({
-  EVIDENCE_CUSTODIAN: ROLE.EVIDENCE_CUSTODIAN,
+  // The court is one role in Lexx. Registry staff and judges alike act as the court.
+  EVIDENCE_CUSTODIAN: ROLE.COURT,
 });
 
 /**
@@ -386,14 +387,14 @@ async function resolveJudge(authorityId, judge) {
   // roster they have no court scope, and therefore no case access.
   const courtAssignment = await court.getJudgeCourt(authorityId);
   if (!courtAssignment) {
-    return base(AUTHORITY.COURT, ROLE.JUDGE, judge.name, {}, judge.phone, false, 'NOT_ON_CURRENT_ROSTER', { judge });
+    return base(AUTHORITY.COURT, ROLE.COURT, judge.name, {}, judge.phone, false, 'NOT_ON_CURRENT_ROSTER', { judge });
   }
 
   const courtRecord = courtAssignment.court ?? courtAssignment;
 
   return base(
     AUTHORITY.COURT,
-    ROLE.JUDGE,
+    ROLE.COURT,
     judge.name,
     {
       courtId: courtRecord.code ?? courtRecord.courtCode ?? null,

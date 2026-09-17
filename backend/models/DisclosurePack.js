@@ -1,9 +1,13 @@
 /**
- * A disclosure pack: exactly what has been served on a party, and to whom.
+ * A disclosure pack — LEGACY RECORD.
  *
- * This is the document the advocate-scoping decision reads. An exhibit that is not
- * in `exhibitIds` of a SERVED pack is not visible to defence counsel, and the
- * attempt is logged. That denial is the confidentiality guarantee made concrete.
+ * Packs used to decide which exhibits counsel could see. They no longer decide
+ * anything: counsel on record read every exhibit of their case directly (see
+ * services/accessResolver.js). Existing packs are kept because nothing is deleted and
+ * because older ledger entries refer to them; no route creates or serves one.
+ *
+ * The per-recipient watermark fields that used to live on `servedTo` were removed, and
+ * the boot migration strips them from existing documents.
  */
 import mongoose from 'mongoose';
 import { DISCLOSURE_STATUS, values } from './enums.js';
@@ -18,11 +22,6 @@ const ExcludedItemSchema = new Schema(
     requestedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
     approvedByRegistrarId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
     approvedAt: { type: Date, default: null },
-    /**
-     * The other ruling. A court that disagrees with a withholding request must be
-     * able to say so — otherwise the only way to serve a pack is to agree with every
-     * exclusion in it. A refused exclusion puts the exhibit back into the served set.
-     */
     refusedByUserId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
     refusedAt: { type: Date, default: null },
     refusalNote: { type: String, default: null, maxlength: 1000 },
@@ -34,12 +33,6 @@ const ServedToSchema = new Schema(
   {
     userId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
     servedAt: { type: Date, required: true },
-    /**
-     * Per-recipient watermark identity. Rendered onto served pages, so a leaked
-     * document points back to the recipient it was served to.
-     */
-    watermarkToken: { type: String, required: true },
-    watermarkLabel: { type: String, required: true },
     acknowledgedAt: { type: Date, default: null },
   },
   { _id: false }
@@ -71,7 +64,7 @@ const DisclosurePackSchema = new Schema(
       index: true,
     },
 
-    /** BNSS s.230 clock. */
+    /** BNSS s.230 clock, as recorded when packs were still served. */
     dueOn: { type: Date, default: null },
     servedOn: { type: Date, default: null },
   },
@@ -79,14 +72,6 @@ const DisclosurePackSchema = new Schema(
 );
 
 DisclosurePackSchema.index({ caseId: 1, status: 1 });
-DisclosurePackSchema.index({ 'servedTo.userId': 1 });
-DisclosurePackSchema.index({ 'servedTo.watermarkToken': 1 }, { sparse: true });
-
-/** The served exhibit set for a specific recipient, or null if not served to them. */
-DisclosurePackSchema.methods.servedEntryFor = function servedEntryFor(userId) {
-  const id = String(userId);
-  return this.servedTo.find((s) => String(s.userId) === id) ?? null;
-};
 
 export const DisclosurePack = mongoose.model('DisclosurePack', DisclosurePackSchema);
 export default DisclosurePack;

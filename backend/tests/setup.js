@@ -23,8 +23,25 @@ process.env.DEMO_ECHO_OTP = 'true';
 // refuses anything below 12 (see config/env.js).
 process.env.BCRYPT_ROUNDS = '4';
 
+// The replay test presents a consumed refresh token immediately; with the concurrency
+// grace on, that would be treated as a race. Tests that exercise the grace set it.
+process.env.REFRESH_REUSE_GRACE_SEC = '0';
+
 // Anchoring is off by default; the anchor suite enables it explicitly per-test.
 process.env.ANCHOR_ENABLED = 'false';
+
+// Gemini is never called for real from the suite. Integration tests that exercise the
+// analysis pipeline start the stub in tests/fixtures/geminiStub.js on this port; every
+// other test finds nothing listening there, so an analysis fails fast and is recorded
+// as FAILED — which is also the behaviour under test for an unreachable Gemini.
+const geminiPort = 30000 + (process.pid % 3000);
+process.env.GEMINI_STUB_PORT = String(geminiPort);
+process.env.GEMINI_API_BASE_URL = `http://127.0.0.1:${geminiPort}/v1beta`;
+process.env.GEMINI_API_KEY = 'test-gemini-key-not-a-real-credential';
+process.env.GEMINI_MODEL = 'gemini-test-model';
+process.env.GEMINI_MAX_RETRIES = '0';
+process.env.GEMINI_RETRY_BASE_MS = '10';
+process.env.GEMINI_TIMEOUT_MS = '5000';
 
 // Keep the vault out of the developer's real storage directory.
 process.env.STORAGE_DIR = './.data/test-vault';

@@ -1,49 +1,32 @@
 /**
  * Certificate routes.
  *
- * Two routers, and the split is the whole point:
- *
- *   default        →  app.use('/api/certificates', certificateRoutes)
- *                     authenticated, every request through the access resolver.
+ *   default            →  app.use('/api/certificates', certificateRoutes)
+ *                         authenticated (except the authority key), every request
+ *                         through the access resolver.
  *
  *   publicVerifyRouter →  app.use('/public', publicVerifyRouter)
- *                     NO authentication, NO session, NO resolver. It must be mounted
- *                     OUTSIDE /api, before the authenticated routers, so nothing in
- *                     the authenticated stack can ever be reached through it. Its
- *                     only credential is the 32-byte verification token in the path,
- *                     and its response carries validity, never contents.
+ *                         NO authentication, NO session, NO resolver. Its only
+ *                         credential is the 32-byte verification token in the path,
+ *                         and its response carries validity, never contents.
+ *
+ * There is no route to create or sign a certificate: the system issues and signs one
+ * per exhibit on upload (services/certificateIssuer.js).
  */
 import { Router } from 'express';
 import * as certificate from '../controllers/certificate.js';
 import { requireSession } from '../middleware/authenticate.js';
-import { authorize, authorizeCreate } from '../middleware/authorize.js';
+import { authorize } from '../middleware/authorize.js';
 import { ACTION, RESOURCE_TYPE } from '../models/enums.js';
+import { limiter } from '../middleware/rateLimit.js';
+import env from '../config/env.js';
 
 const router = Router();
-router.use(...requireSession);
 
-/**
- * Generate. Two guards, as with disclosure preparation:
- *   authorize(READ, EVIDENCE)   — is this caller entitled to THIS exhibit at all?
- *                                 The evidence id is read from the body, but the
- *                                 resolver loads the record itself and derives the
- *                                 case from it, so nothing is asserted by the caller.
- *   authorizeCreate(CERTIFICATE)— may this role author a certificate? (IO, JUDGE)
- */
-router.post(
-  '/generate',
-  certificate.validateGenerateBody,
-  authorize({
-    action: ACTION.READ,
-    resourceType: RESOURCE_TYPE.EVIDENCE,
-    idFrom: 'body.evidenceId',
-  }),
-  authorizeCreate(RESOURCE_TYPE.CERTIFICATE, (req) => ({
-    caseId: req.caseDoc?._id ?? null,
-    stationCode: req.caseDoc?.stationCode ?? null,
-  })),
-  certificate.generate
-);
+/** The authority's PUBLIC key. Declared before the session guard: it is public. */
+router.get('/authority-key', certificate.authorityKey);
+
+router.use(...requireSession);
 
 /** Every certificate for one exhibit — no more visible than the exhibit itself. */
 router.get(
@@ -53,38 +36,18 @@ router.get(
   certificate.listForEvidence
 );
 
-/** Metadata plus the canonical body hash a signer has to sign. */
 router.get(
   '/:id',
   authorize({ action: ACTION.READ, resourceType: RESOURCE_TYPE.CERTIFICATE }),
   certificate.getCertificate
 );
 
-/**
- * Part A is signed by the deponent it names; the controller enforces that identity.
- *
- * ATTEST, not WRITE: a signature attests to a record already collected and changes
- * nothing in it. As WRITE, the stage lock refused the investigating officer their own
- * signature once the chargesheet was filed — the moment a certificate is for.
- */
-router.post(
-  '/:id/sign-part-a',
-  authorize({ action: ACTION.ATTEST, resourceType: RESOURCE_TYPE.CERTIFICATE }),
-  certificate.signPartA
-);
+/** One-click verification. POST is the action; GET is kept for existing clients. */
+const verifyGuard = authorize({ action: ACTION.VERIFY, resourceType: RESOURCE_TYPE.CERTIFICATE });
+router.post('/:id/verify', verifyGuard, certificate.verifyCertificate);
+router.get('/:id/verify', verifyGuard, certificate.verifyCertificate);
 
-/**
- * Part B is signed by the examiner who filed the report. The resolver's FSL branch
- * already limits a certificate to an examiner whose lab holds a referral for the
- * exhibit; the controller then requires that they are the reporting examiner.
- */
-router.post(
-  '/:id/sign-part-b',
-  authorize({ action: ACTION.ATTEST, resourceType: RESOURCE_TYPE.CERTIFICATE }),
-  certificate.signPartB
-);
-
-/** The document itself. DOWNLOAD, so it is audited as one. */
+/** The stored document itself. DOWNLOAD, so it is audited as one. */
 router.get(
   '/:id/pdf',
   authorize({ action: ACTION.DOWNLOAD, resourceType: RESOURCE_TYPE.CERTIFICATE }),
@@ -94,9 +57,18 @@ router.get(
 /**
  * The public verifier. Deliberately its own router with no `requireSession`: adding
  * one would break every QR ever printed, and removing one from the router above
- * would expose the register. Keeping them apart makes both mistakes hard to make.
+ * would expose the register.
  */
 export const publicVerifyRouter = Router();
-publicVerifyRouter.get('/verify/:token', certificate.publicVerify);
+/**
+ * Both public verifiers re-hash the stored evidence file on every call, so they share a
+ * per-IP limit (RATE_LIMIT_LOOKUP per 15 minutes; see middleware/rateLimit.js for the
+ * test and development-loopback exemptions).
+ */
+const publicLimiter = limiter(env.RATE_LIMIT_LOOKUP);
+publicVerifyRouter.get('/verify/:token', publicLimiter, certificate.publicVerify);
+/** The permanent QR label on a physical exhibit: verification, uploader, lifecycle. */
+publicVerifyRouter.get('/evidence/:labelToken', publicLimiter, certificate.publicEvidence);
+publicVerifyRouter.get('/certificate-authority-key', certificate.authorityKey);
 
 export default router;

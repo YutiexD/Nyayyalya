@@ -61,6 +61,12 @@ export function verifyAccessToken(token) {
   }
 }
 
+/** Far enough ahead to mean "never"; the TTL index on expiresAt then never fires. */
+const NEVER = new Date('9999-12-31T23:59:59.000Z');
+
+const refreshExpiry = () =>
+  env.REFRESH_TTL_SEC === 0 ? NEVER : new Date(Date.now() + env.REFRESH_TTL_SEC * 1000);
+
 /** Issue a refresh token. Returns the plaintext exactly once. */
 export async function issueRefreshToken(userId, { familyId, ip, userAgent } = {}) {
   const token = randomBase64Url(48);
@@ -70,7 +76,7 @@ export async function issueRefreshToken(userId, { familyId, ip, userAgent } = {}
     userId,
     tokenHash,
     familyId: familyId ?? crypto.randomUUID(),
-    expiresAt: new Date(Date.now() + env.REFRESH_TTL_SEC * 1000),
+    expiresAt: refreshExpiry(),
     ip: ip ?? null,
     userAgent: userAgent ? String(userAgent).slice(0, 400) : null,
   });
@@ -94,6 +100,20 @@ export async function rotateRefreshToken(presentedToken, { ip, userAgent } = {})
   const record = await RefreshToken.findOne({ tokenHash });
 
   if (!record) throw Unauthorized('REFRESH_INVALID', 'Refresh token is not valid');
+
+  // A token consumed moments ago by a concurrent refresh from the same client (a second
+  // tab, parallel requests that all saw the access token expire) is a race, not a replay.
+  // Its successor's plaintext is gone, so a sibling in the same family is issued instead.
+  const graceMs = env.REFRESH_REUSE_GRACE_SEC * 1000;
+  if (
+    record.consumedAt &&
+    !record.revokedAt &&
+    graceMs > 0 &&
+    Date.now() - record.consumedAt.getTime() <= graceMs
+  ) {
+    const sibling = await issueRefreshToken(record.userId, { familyId: record.familyId, ip, userAgent });
+    return { refreshToken: sibling, userId: record.userId, familyId: record.familyId };
+  }
 
   if (record.consumedAt || record.revokedAt) {
     log.warn(

@@ -2,9 +2,9 @@
  * Single source of truth for every controlled vocabulary in the system.
  *
  * Terminology discipline matters here beyond ordinary tidiness: this system makes
- * legal claims. "Review Priority" is not "verification". A forensic opinion is not a
- * triage indicator. Keeping the words in one file keeps those distinctions from
- * eroding as the code grows.
+ * legal claims. "Review Priority" is not "verification". A forensic opinion is not an
+ * AI assessment. Keeping the words in one file keeps those distinctions from eroding
+ * as the code grows.
  */
 
 // ---------------------------------------------------------------- identity ----
@@ -19,18 +19,12 @@ export const AUTHORITY = Object.freeze({
 /**
  * The roles this product has.
  *
- * Two roles that existed here are deliberately gone, and their absence is a design
- * decision rather than an omission:
- *
- *   MALKHANA_CUSTODIAN — a separate store-keeper account made every physical
- *     movement wait on a third person. The station store is still a place
- *     (CUSTODY_LOCATION.MALKHANA, shown as "Station store"), and every handover is
- *     still a two-scan, ledgered handshake; it is the station's own officers who
- *     keep it, so no workflow blocks on a role nobody has logged in as.
- *
- *   REGISTRAR — every registry act (ruling on disclosure, serving it, putting an
- *     advocate on record, issuing a certificate) is now the presiding judge's. One
- *     court identity, one queue, no approval hop that adds nothing but latency.
+ * The court is ONE role. There used to be a presiding-judge role and a court
+ * evidence-room role, each scoped to a single bench, and a case filed before one bench
+ * was invisible from every other court login — which is how a chargesheet could be
+ * filed, verified and then appear on no court screen at all. Every court identity in
+ * the court directory (a judge on the roster, or registry staff) now resolves to
+ * `COURT`, scoped to the district court establishment its court belongs to.
  */
 export const ROLE = Object.freeze({
   // POLICE
@@ -38,8 +32,7 @@ export const ROLE = Object.freeze({
   SHO: 'SHO',
   DISTRICT_SP: 'DISTRICT_SP',
   // COURT
-  JUDGE: 'JUDGE',
-  EVIDENCE_CUSTODIAN: 'EVIDENCE_CUSTODIAN',
+  COURT: 'COURT',
   // FSL
   FSL_EXAMINER: 'FSL_EXAMINER',
   // LEGAL
@@ -49,10 +42,13 @@ export const ROLE = Object.freeze({
   PUBLIC_PROSECUTOR: 'PUBLIC_PROSECUTOR',
 });
 
+/** Court role values written by earlier versions. Migrated to ROLE.COURT at boot. */
+export const LEGACY_COURT_ROLES = Object.freeze(['JUDGE', 'EVIDENCE_CUSTODIAN', 'REGISTRAR']);
+
 /** Which authority may hold which role. Enforced at activation — never client-supplied. */
 export const ROLES_BY_AUTHORITY = Object.freeze({
   [AUTHORITY.POLICE]: [ROLE.IO, ROLE.SHO, ROLE.DISTRICT_SP],
-  [AUTHORITY.COURT]: [ROLE.JUDGE, ROLE.EVIDENCE_CUSTODIAN],
+  [AUTHORITY.COURT]: [ROLE.COURT],
   [AUTHORITY.FSL]: [ROLE.FSL_EXAMINER],
   [AUTHORITY.LEGAL]: [
     ROLE.DEFENCE_COUNSEL,
@@ -83,8 +79,13 @@ export const CREATED_VIA = Object.freeze({
 
 export const CASE_STAGE = Object.freeze({
   UNDER_INVESTIGATION: 'UNDER_INVESTIGATION',
+  /** Directed by the court after cognizance. Re-opens the police file; re-filing returns it. */
   FURTHER_INVESTIGATION: 'FURTHER_INVESTIGATION',
+  /** Filed by the police and listed before a court. Waiting for the court to take it up. */
   CHARGESHEET_FILED: 'CHARGESHEET_FILED',
+  /** The court has received and reviewed the chargesheet and taken cognizance. */
+  COGNIZANCE_TAKEN: 'COGNIZANCE_TAKEN',
+  /** Sessions-triable cases only: committed to the Court of Session for trial. */
   COMMITTED: 'COMMITTED',
   TRIAL: 'TRIAL',
   /** The court has closed the case. Nothing is deleted; the record is sealed as it stands. */
@@ -92,25 +93,61 @@ export const CASE_STAGE = Object.freeze({
   DISPOSED: 'DISPOSED',
 });
 
-/**
- * The lifecycle, in the order a person watching would expect to see it.
- *
- * The UI draws this as one strip so the whole journey is legible at a glance. Note
- * what it does NOT claim: a case does not wait at a stage for the next one. Forensic
- * review runs alongside the investigation, and the court reads the file whether or
- * not a laboratory has reported.
- */
+/** The lifecycle strip, in the order a person watching would expect to see it. */
 export const CASE_LIFECYCLE = Object.freeze([
   CASE_STAGE.UNDER_INVESTIGATION,
-  CASE_STAGE.FURTHER_INVESTIGATION,
   CASE_STAGE.CHARGESHEET_FILED,
+  CASE_STAGE.COGNIZANCE_TAKEN,
   CASE_STAGE.COMMITTED,
   CASE_STAGE.TRIAL,
   CASE_STAGE.CLOSED,
 ]);
 
+/**
+ * The acts that move a case from one stage to the next. Each is performed through one
+ * endpoint, by one authority, and validated against `services/caseWorkflow.js` —
+ * there is no route that sets a stage directly.
+ */
+export const CASE_ACTION = Object.freeze({
+  FILE_CHARGESHEET: 'FILE_CHARGESHEET',
+  TAKE_COGNIZANCE: 'TAKE_COGNIZANCE',
+  COMMIT_FOR_TRIAL: 'COMMIT_FOR_TRIAL',
+  BEGIN_TRIAL: 'BEGIN_TRIAL',
+  DIRECT_FURTHER_INVESTIGATION: 'DIRECT_FURTHER_INVESTIGATION',
+  CLOSE_CASE: 'CLOSE_CASE',
+});
+
 /** Stages in which the case is finished and nothing further may be recorded against it. */
 export const CLOSED_CASE_STAGES = Object.freeze([CASE_STAGE.CLOSED, CASE_STAGE.DISPOSED]);
+
+/**
+ * The signed document a court may attach when it closes a case. A PDF, hashed and
+ * signed in the judge's browser with their registered device key.
+ */
+export const CLOSURE_DOCUMENT_KIND = Object.freeze({
+  FINAL_JUDGMENT: 'FINAL_JUDGMENT',
+  DECLARATION: 'DECLARATION',
+  ORDER: 'ORDER',
+});
+
+export const CLOSURE_DOCUMENT_KIND_LABEL = Object.freeze({
+  [CLOSURE_DOCUMENT_KIND.FINAL_JUDGMENT]: 'Final judgment',
+  [CLOSURE_DOCUMENT_KIND.DECLARATION]: 'Declaration',
+  [CLOSURE_DOCUMENT_KIND.ORDER]: 'Closing order',
+});
+
+/** Plain-English role names, for surfaces a member of the public reads. */
+export const ROLE_LABEL = Object.freeze({
+  [ROLE.IO]: 'Investigating Officer',
+  [ROLE.SHO]: 'Station House Officer',
+  [ROLE.DISTRICT_SP]: 'Superintendent of Police',
+  [ROLE.COURT]: 'Court',
+  [ROLE.FSL_EXAMINER]: 'Forensic Examiner',
+  [ROLE.DEFENCE_COUNSEL]: 'Defence Counsel',
+  [ROLE.VICTIM_COUNSEL]: 'Victim’s Counsel',
+  [ROLE.LEGAL_AID_COUNSEL]: 'Legal Aid Counsel',
+  [ROLE.PUBLIC_PROSECUTOR]: 'Public Prosecutor',
+});
 
 /** Stages in which an investigating officer may still write. Spec §5. */
 export const WRITABLE_CASE_STAGES = Object.freeze([
@@ -148,13 +185,35 @@ export const SOURCE_TYPE = Object.freeze({
   OTHER: 'OTHER',
 });
 
+// ------------------------------------------------------------ AI analysis ----
+
 /**
- * AI output vocabulary. Deliberately small and deliberately not a verdict.
- * There is no "AUTHENTIC" here and there never will be — see FORENSIC_OPINION.
- *
- * Four bands, not three. CRITICAL exists because "look at this first" and "look at
- * this before anything else" are genuinely different instructions to a laboratory
- * with a queue, and collapsing them made the top of the queue unreadable.
+ * Where an exhibit's Gemini analysis stands. The UI shows each of these distinctly,
+ * and a result is only ever shown for COMPLETED — a failed analysis never renders as
+ * a score, and no score is ever invented to fill the gap.
+ */
+export const AI_ANALYSIS_STATUS = Object.freeze({
+  PENDING: 'PENDING',
+  PROCESSING: 'PROCESSING',
+  COMPLETED: 'COMPLETED',
+  FAILED: 'FAILED',
+  /** The format or size cannot be sent for analysis. Nothing is assessed, nothing invented. */
+  UNSUPPORTED: 'UNSUPPORTED',
+});
+
+/** Persisted for the record only. Never sent in an API response. */
+export const AI_PROVIDER = Object.freeze({ GEMINI: 'GEMINI' });
+
+/** Gemini's manipulation assessment. Never an authenticity finding — see FORENSIC_OPINION. */
+export const DEEPFAKE_ASSESSMENT = Object.freeze({
+  LIKELY_MANIPULATED: 'LIKELY_MANIPULATED',
+  LIKELY_AUTHENTIC: 'LIKELY_AUTHENTIC',
+  INCONCLUSIVE: 'INCONCLUSIVE',
+});
+
+/**
+ * Review priority vocabulary. The value is chosen by Gemini and validated against this
+ * enum before it is stored; the backend never derives it from a score.
  */
 export const TRIAGE_PRIORITY = Object.freeze({
   CRITICAL: 'CRITICAL',
@@ -176,11 +235,14 @@ export const TRIAGE_PRIORITY_RANK = Object.freeze(
   TRIAGE_PRIORITY_ORDER.reduce((acc, p, i) => ({ ...acc, [p]: i }), {})
 );
 
-export const TRIAGE_DISCLAIMER =
-  'Automated triage only. Not expert opinion under BSA s.39 / IT Act s.79A.';
+export const AI_DISCLAIMER =
+  'Automated preliminary assessment generated by an AI model. It orders the laboratory queue and is not expert opinion under BSA s.39 / IT Act s.79A; the FSL examiner’s verdict is the official forensic conclusion.';
 
-/** The label shown in every UI surface for triage. Never "verified", never a percentage. */
-export const TRIAGE_UI_LABEL = 'Review Priority';
+/** Kept under its historical name for every surface that already imports it. */
+export const TRIAGE_DISCLAIMER = AI_DISCLAIMER;
+
+/** The label shown in every UI surface for the AI-recommended priority. */
+export const TRIAGE_UI_LABEL = 'Review priority (AI)';
 
 export const FORENSIC_STATUS = Object.freeze({
   NOT_REFERRED: 'NOT_REFERRED',
@@ -205,6 +267,18 @@ export const COURT_STATUS = Object.freeze({
   DISPOSED: 'DISPOSED',
 });
 
+// ------------------------------------------------------------ certificates ----
+
+/**
+ * One ACTIVE certificate per exhibit, enforced by a partial unique index. SUPERSEDED
+ * exists only for records written before that rule, which are kept (nothing is ever
+ * deleted) and pointed at the certificate that replaced them.
+ */
+export const CERTIFICATE_STATUS = Object.freeze({
+  ACTIVE: 'ACTIVE',
+  SUPERSEDED: 'SUPERSEDED',
+});
+
 // ---------------------------------------------------------------- custody ----
 
 export const CUSTODY_STATUS = Object.freeze({
@@ -217,21 +291,29 @@ export const CUSTODY_STATUS = Object.freeze({
 });
 
 /**
- * Legal custody state machine. A jump that is not in this map is a chain gap.
- * Everything routes through the station store (IN_STORE) — that is the point of a
- * store. Who keeps it is the station's own officers; there is no separate custodian
- * account for a handover to wait on.
+ * Where an article may go next.
+ *
+ * Every movement is still a ledgered event with a reason and a seal check. What is
+ * gone is the requirement that every move pass back through the station store and wait
+ * on a second person scanning a handover token: an article seized at a scene can go
+ * straight to the laboratory, and a laboratory can send it straight to court.
+ * RETURNED and DESTROYED end the chain.
  */
 export const CUSTODY_TRANSITIONS = Object.freeze({
-  [CUSTODY_STATUS.SEIZED]: [CUSTODY_STATUS.IN_STORE],
+  [CUSTODY_STATUS.SEIZED]: [CUSTODY_STATUS.IN_STORE, CUSTODY_STATUS.AT_FSL, CUSTODY_STATUS.IN_COURT],
   [CUSTODY_STATUS.IN_STORE]: [
     CUSTODY_STATUS.AT_FSL,
     CUSTODY_STATUS.IN_COURT,
     CUSTODY_STATUS.RETURNED,
     CUSTODY_STATUS.DESTROYED,
   ],
-  [CUSTODY_STATUS.AT_FSL]: [CUSTODY_STATUS.IN_STORE],
-  [CUSTODY_STATUS.IN_COURT]: [CUSTODY_STATUS.IN_STORE, CUSTODY_STATUS.RETURNED],
+  [CUSTODY_STATUS.AT_FSL]: [CUSTODY_STATUS.IN_STORE, CUSTODY_STATUS.IN_COURT],
+  [CUSTODY_STATUS.IN_COURT]: [
+    CUSTODY_STATUS.IN_STORE,
+    CUSTODY_STATUS.AT_FSL,
+    CUSTODY_STATUS.RETURNED,
+    CUSTODY_STATUS.DESTROYED,
+  ],
   [CUSTODY_STATUS.RETURNED]: [],
   [CUSTODY_STATUS.DESTROYED]: [],
 });
@@ -248,6 +330,16 @@ export const CUSTODY_LOCATION = Object.freeze({
   FIELD: 'FIELD',
 });
 
+/** The location a status implies. Location is derived, never typed, so the two cannot disagree. */
+export const CUSTODY_LOCATION_FOR_STATUS = Object.freeze({
+  [CUSTODY_STATUS.SEIZED]: CUSTODY_LOCATION.FIELD,
+  [CUSTODY_STATUS.IN_STORE]: CUSTODY_LOCATION.MALKHANA,
+  [CUSTODY_STATUS.AT_FSL]: CUSTODY_LOCATION.FSL,
+  [CUSTODY_STATUS.IN_COURT]: CUSTODY_LOCATION.COURT,
+  [CUSTODY_STATUS.RETURNED]: CUSTODY_LOCATION.FIELD,
+  [CUSTODY_STATUS.DESTROYED]: CUSTODY_LOCATION.MALKHANA,
+});
+
 // ---------------------------------------------------------------- ledger ----
 
 export const LEDGER_EVENT = Object.freeze({
@@ -257,7 +349,9 @@ export const LEDGER_EVENT = Object.freeze({
   CASE_CLOSED: 'CASE_CLOSED',
   EVIDENCE_UPLOADED: 'EVIDENCE_UPLOADED',
   CUSTODY_ITEM_CREATED: 'CUSTODY_ITEM_CREATED',
+  /** Historical only: the two-scan handshake no longer exists. Kept for the ledger's past. */
   CUSTODY_TRANSFER_INITIATED: 'CUSTODY_TRANSFER_INITIATED',
+  /** A physical movement of an article, recorded in one step. */
   CUSTODY_TRANSFERRED: 'CUSTODY_TRANSFERRED',
   REFERRED_TO_FSL: 'REFERRED_TO_FSL',
   FSL_EXAMINATION_STARTED: 'FSL_EXAMINATION_STARTED',
@@ -268,7 +362,12 @@ export const LEDGER_EVENT = Object.freeze({
   DISCLOSURE_SERVED: 'DISCLOSURE_SERVED',
   DISCLOSURE_ACKNOWLEDGED: 'DISCLOSURE_ACKNOWLEDGED',
   CERTIFICATE_GENERATED: 'CERTIFICATE_GENERATED',
+  /** The laboratory's filed opinion was written into Part B of the exhibit's certificate. */
+  CERTIFICATE_PART_B_ATTACHED: 'CERTIFICATE_PART_B_ATTACHED',
   CERTIFICATE_SIGNED: 'CERTIFICATE_SIGNED',
+  CERTIFICATE_SUPERSEDED: 'CERTIFICATE_SUPERSEDED',
+  /** An authenticated user ran the one-click certificate verification. Carries the result. */
+  CERTIFICATE_VERIFIED: 'CERTIFICATE_VERIFIED',
   EXHIBIT_MARKED: 'EXHIBIT_MARKED',
   JUDICIAL_ORDER: 'JUDICIAL_ORDER',
   INTEGRITY_EXCEPTION: 'INTEGRITY_EXCEPTION',
@@ -296,28 +395,25 @@ export const ACTION = Object.freeze({
   DOWNLOAD: 'DOWNLOAD',
   LOGIN: 'LOGIN',
   VERIFY: 'VERIFY',
+  /** A judicial act on a case — cognizance, committal, trial, closure, a recorded order. */
   ORDER: 'ORDER',
   /**
-   * A judicial or registry ruling on something another party prepared — approving a
-   * disclosure pack and its exclusions. Distinct from WRITE (which is authorship,
-   * and belongs to the investigation) and from ORDER (which is a judge alone).
-   * Spec §7 gives approval to "REGISTRAR / JUDGE", and neither WRITE nor ORDER can
-   * express that pair.
+   * A court ruling on something another party prepared — a disclosure pack and its
+   * exclusions, a vakalatnama. Distinct from WRITE (authorship, which belongs to the
+   * investigation).
    */
   APPROVE: 'APPROVE',
   /**
-   * A party confirming receipt. It mutates one field the party owns — their own
-   * acknowledgement timestamp — so it is not READ, but it is emphatically not the
-   * general WRITE that advocates must never hold.
+   * RETIRED. A party acknowledging a served disclosure pack; no route uses it now that
+   * counsel on record read the case file directly. Kept only so audit rows written
+   * with it still validate against this enum.
    */
   ACKNOWLEDGE: 'ACKNOWLEDGE',
   /**
    * Signing one's own statement — the deponent's Part A, the examiner's Part B of a
    * s.63 certificate. It adds a signature over a record already collected and alters
-   * nothing in it, so it is not WRITE: treating it as WRITE locked the investigating
-   * officer out of signing their own certificate the moment the chargesheet closed
-   * the case, which is exactly when a certificate is needed. Who may attest is
-   * narrowed further by the controller: only the person the certificate names.
+   * nothing in it, so it is not WRITE. Who may attest is narrowed further by the
+   * controller: only the person the certificate names.
    */
   ATTEST: 'ATTEST',
 });
@@ -343,7 +439,6 @@ export const RESOURCE_TYPE = Object.freeze({
 /**
  * Denial reason codes. These are shown to users, so each must be safe on its own:
  * it may reveal *why the caller is not entitled*, never anything about the resource.
- * "EXHIBIT_NOT_IN_DISCLOSURE_SET" is safe — the advocate already knows the case exists.
  */
 export const DENY_REASON = Object.freeze({
   NOT_AUTHENTICATED: 'NOT_AUTHENTICATED',
@@ -353,20 +448,22 @@ export const DENY_REASON = Object.freeze({
   CASE_STAGE_CLOSED_TO_WRITES: 'CASE_STAGE_CLOSED_TO_WRITES',
   /** The court has closed the case. It stays readable forever; nothing new goes in. */
   CASE_IS_CLOSED: 'CASE_IS_CLOSED',
-  CUSTODIAN_SCOPE: 'CUSTODIAN_SCOPE',
   READ_ONLY_ROLE: 'READ_ONLY_ROLE',
   CASE_NOT_LISTED_IN_YOUR_COURT: 'CASE_NOT_LISTED_IN_YOUR_COURT',
-  OUT_OF_COURT_SCOPE: 'OUT_OF_COURT_SCOPE',
   NO_OPEN_REFERRAL_TO_YOUR_LAB: 'NO_OPEN_REFERRAL_TO_YOUR_LAB',
   NOT_ON_RECORD_FOR_THIS_CASE: 'NOT_ON_RECORD_FOR_THIS_CASE',
   GRANT_REVOKED: 'GRANT_REVOKED',
   GRANT_NOT_YET_VALID: 'GRANT_NOT_YET_VALID',
   GRANT_EXPIRED: 'GRANT_EXPIRED',
+  /**
+   * RETIRED. Counsel on record read every exhibit of their case, so no decision
+   * returns these any more. Kept because historical audit rows carry them.
+   */
   NO_DISCLOSURE_PACK_SERVED: 'NO_DISCLOSURE_PACK_SERVED',
   EXHIBIT_NOT_IN_DISCLOSURE_SET: 'EXHIBIT_NOT_IN_DISCLOSURE_SET',
-  NOT_CURRENT_HOLDER: 'NOT_CURRENT_HOLDER',
   CUSTODY_FROZEN: 'CUSTODY_FROZEN',
-  IO_CANNOT_HOLD_OWN_CASE_EVIDENCE: 'IO_CANNOT_HOLD_OWN_CASE_EVIDENCE',
+  /** A laboratory or court may only move an article that is currently with it. */
+  ARTICLE_NOT_WITH_YOU: 'ARTICLE_NOT_WITH_YOU',
   RESOURCE_NOT_FOUND: 'RESOURCE_NOT_FOUND',
   NO_MATCHING_POLICY: 'NO_MATCHING_POLICY',
 });
@@ -382,9 +479,9 @@ export const GRANT_BASIS = Object.freeze({
 });
 
 /**
- * A vakalatnama filed through Lexx. PENDING until the court registry rules on it;
- * only an ACCEPTED filing puts the advocate on record, and only by way of the court
- * registry recording it (see controllers/vakalatnama.js).
+ * A vakalatnama filed through Lexx. PENDING until the court rules on it; only an
+ * ACCEPTED filing puts the advocate on record, and only by way of the court register
+ * recording it (see controllers/vakalatnama.js).
  */
 export const VAKALATNAMA_STATUS = Object.freeze({
   PENDING: 'PENDING',
@@ -450,10 +547,24 @@ export const ANCHOR_INTEGRITY = Object.freeze({
    * The batch exists, the recomputed root matches it and this entry proves as a
    * member — but the batch was never submitted to a chain (DRY_RUN). That is a
    * self-consistency check, NOT external corroboration, and it must never be
-   * reported as ANCHOR_MATCH: the whole value of anchoring is that the root is
-   * held somewhere we cannot rewrite.
+   * reported as ANCHOR_MATCH.
    */
   ANCHOR_LOCAL_ONLY: 'ANCHOR_LOCAL_ONLY',
+});
+
+// ---------------------------------------------------------------- realtime ----
+
+/**
+ * Change-feed event types that are not ledger events. Ledger event types travel on the
+ * feed under their own names; these cover changes that have no ledger entry.
+ */
+export const REALTIME_EVENT = Object.freeze({
+  /** An exhibit's AI analysis moved to PROCESSING, COMPLETED, FAILED or UNSUPPORTED. */
+  AI_ANALYSIS_UPDATED: 'AI_ANALYSIS_UPDATED',
+  /** Who may read a case changed without a ledger entry (e.g. representation sync). */
+  CASE_ACCESS_CHANGED: 'CASE_ACCESS_CHANGED',
+  /** A user-visible record changed without a ledger entry. */
+  RECORD_UPDATED: 'RECORD_UPDATED',
 });
 
 export const values = (o) => Object.values(o);

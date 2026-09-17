@@ -45,6 +45,21 @@ for (const c of certs) {
   console.log(`    ${WEB}/verify?token=${c.verificationToken}`);
 }
 
+// ---- exhibit QR labels ----
+heading(
+  'Exhibit QR labels → print and stick on the article; a scan opens the public lifecycle page',
+  'phones can open these only if PUBLIC_WEB_URL is a LAN or tunnel address, not localhost'
+);
+if (!evidence.length) console.log('  no exhibits yet');
+for (const e of evidence) {
+  console.log(`  ${e.exhibitCode}`);
+  console.log(
+    e.labelToken
+      ? `    ${WEB}/verify?label=${encodeURIComponent(e.labelToken)}`
+      : '    (no label token yet — start the API once so the boot migration assigns one)'
+  );
+}
+
 // ---- upload receipts ----
 heading('Upload receipts → Public verifier, "Verify an upload receipt"', 'ledger sequence + entry hash');
 const uploads = await db
@@ -66,15 +81,17 @@ for (const i of items) {
   console.log(`    ${WEB}/scan?label=${encodeURIComponent(i.qrPayload)}`);
 }
 
-// ---- watermark tokens ----
-heading('Served copies → Court → Disclosure → "Trace a leaked copy"', 'one watermark token per advocate served');
-const packs = await db.collection('disclosure_packs').find({ status: 'SERVED' }).toArray();
-if (!packs.length) console.log('  no pack served yet');
-for (const p of packs) {
-  for (const s of p.servedTo ?? []) {
-    const u = userById.get(String(s.userId));
-    console.log(`  ${u?.authorityId ?? s.userId}  ${s.watermarkToken}`);
-  }
+// ---- counsel on record ----
+heading('Counsel on record → Counsel → Your cases', 'on record = the case and every exhibit in it, read-only; nothing to share');
+const grants = await db.collection('case_access_grants').find({ revokedAt: null }).sort({ createdAt: 1 }).toArray();
+const cases = await db.collection('cases').find().project({ firNumber: 1, cnrNumber: 1 }).toArray();
+const caseById = new Map(cases.map((c) => [String(c._id), c]));
+if (!grants.length) console.log('  nobody on record yet — Counsel files a vakalatnama, the Court accepts it');
+for (const g of grants) {
+  const u = userById.get(String(g.userId));
+  const c = caseById.get(String(g.caseId));
+  const n = evidence.filter((e) => String(e.caseId) === String(g.caseId)).length;
+  console.log(`  ${u?.authorityId ?? g.userId}  ${g.role}  FIR ${c?.firNumber ?? '?'}  ${c?.cnrNumber ?? ''}  (${n} exhibit${n === 1 ? '' : 's'} readable)`);
 }
 
 // ---- representation ----

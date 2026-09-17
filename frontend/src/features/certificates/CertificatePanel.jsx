@@ -1,186 +1,114 @@
 /**
- * BSA s.63 certificates for one exhibit: issue, sign, download, and — the point of
- * this panel — hand over the thing the public verifier needs.
+ * The s.63 certificate for one exhibit, as a compact card.
  *
- * Every certificate carries a verification token. The printed PDF encodes it as a
- * QR; this panel shows the same link, the same QR and a copy button, so the value a
- * court officer has to paste into /verify is never more than one click away.
- *
- * Signing is done here, in the browser: the signer's private key signs the canonical
- * body hash the server computed (`bodyHash`), exactly as evidence is signed. The server
- * then checks that the signer IS the person the certificate names in that part.
+ * The server issues and signs exactly one certificate per exhibit when the evidence is
+ * uploaded. Nobody signs or generates anything here: the card shows the certificate's
+ * status and lets anyone who can see the exhibit verify it in one click, download the
+ * PDF, or copy the public verification link.
  */
 import { useState } from 'react';
-import { useSelector } from 'react-redux';
 import { toast } from 'sonner';
-import { Copy, ExternalLink, FileBadge, FileDown, Loader2, PenLine } from 'lucide-react';
+import { Check, ChevronDown, FileBadge, FileDown, Link2, Loader2, ShieldCheck, ShieldX, X } from 'lucide-react';
 
-import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { KeyValue, Hash, EmptyState } from '@/components/common/Primitives';
-import { Denial, Note } from '@/components/common/Verdicts';
-import { QrImage } from '@/components/common/QrImage';
-import {
-  useCertificatesFor,
-  useGenerateCertificate,
-  useSignPartA,
-  useSignPartB,
-} from '@/hooks/queries';
-import { selectSession } from '@/features/auth/authSlice';
+import { Button } from '@/components/ui/button';
+import { Skeleton } from '@/components/ui/skeleton';
+import { MetaLine } from '@/components/common/Shell';
+import { Denial } from '@/components/common/Verdicts';
+import { useCertificateFor, useVerifyCertificate } from '@/hooks/queries';
 import { api } from '@/lib/api';
-import { getOrCreateKeyPair, signHashHex } from '@/lib/crypto';
 import { copyText, saveBlob } from '@/lib/download';
-import { cn, fmtDate } from '@/lib/utils';
+import { cn, fmtDate, humanise } from '@/lib/utils';
 
-/** The link a phone lands on. Built from this origin, so it works wherever the client is served. */
+const SIGNER = 'LEXX Certificate Authority';
+
+/** The public verifier link for a token, built from this origin. */
 export const verifyLinkFor = (token) =>
   token ? `${window.location.origin}/verify?token=${encodeURIComponent(token)}` : null;
 
-function SignatureBadge({ present, label }) {
+/** The link to share: the server's own URL when usable, else one built from the token. */
+function verificationLink(c) {
+  const url = c?.verificationUrl;
+  if (typeof url === 'string' && /^https?:\/\//i.test(url)) return url;
+  if (typeof url === 'string' && url.startsWith('/')) return `${window.location.origin}${url}`;
+  return verifyLinkFor(c?.verificationToken);
+}
+
+const STATUS = {
+  ACTIVE: { label: 'Issued', variant: 'success' },
+  ISSUED: { label: 'Issued', variant: 'success' },
+  SUPERSEDED: { label: 'Superseded', variant: 'muted' },
+  PENDING_ISSUE: { label: 'Pending', variant: 'warning' },
+  PENDING: { label: 'Pending', variant: 'warning' },
+};
+
+/** Issued / Superseded / Pending. */
+export function CertificateStatusBadge({ status, size = 'sm', className }) {
+  const s = STATUS[status] ?? { label: humanise(status) || 'Pending', variant: status ? 'neutral' : 'warning' };
   return (
-    <Badge
-      variant="outline"
-      className={cn(
-        'rounded-full',
-        present ? 'border-ok/40 bg-ok-muted text-ok' : 'border-warn/40 bg-warn-muted text-warn'
-      )}
-    >
-      {label} {present ? 'signed' : 'not signed'}
+    <Badge variant={s.variant} size={size} dot className={className}>
+      {s.label}
     </Badge>
   );
 }
 
-function CertificateCard({ certificate: c, canSignPartA, canSignPartB, exhibitCode }) {
-  const session = useSelector(selectSession);
-  const signA = useSignPartA();
-  const signB = useSignPartB();
-  const [signing, setSigning] = useState(null);
-  const [downloading, setDownloading] = useState(false);
+/**
+ * A verification result (`POST /api/certificates/:id/verify`, or the public verifier):
+ * a clear Verified / Failed banner, with the individual checks behind a toggle.
+ */
+export function VerificationResult({ result, className }) {
+  const [open, setOpen] = useState(false);
+  if (!result) return null;
 
-  const link = verifyLinkFor(c.verificationToken);
-  const hasA = c.signatures?.some((s) => s.role === 'PARTY');
-  const hasB = c.signatures?.some((s) => s.role === 'EXPERT');
-  const isDeponent = session?.authorityId && c.partA?.deponentAuthorityId === session.authorityId;
-
-  const sign = async (part) => {
-    setSigning(part);
-    try {
-      const keyPair = await getOrCreateKeyPair();
-      const signature = await signHashHex(c.bodyHash, keyPair.privateKey);
-      const mutation = part === 'A' ? signA : signB;
-      await mutation.mutateAsync({ id: c.certificateId, payload: { signature } });
-      toast.success(`Part ${part} signed`, {
-        description: 'The signature covers the certificate body; the PDF has been re-rendered to show it.',
-      });
-    } catch (err) {
-      toast.error(`Part ${part} not signed`, { description: err.message });
-    } finally {
-      setSigning(null);
-    }
-  };
-
-  const download = async () => {
-    setDownloading(true);
-    try {
-      saveBlob(await api.certificates.pdfBlob(c.certificateId), `s63-certificate-${exhibitCode ?? c.certificateId}.pdf`);
-    } catch (err) {
-      toast.error('The PDF could not be downloaded', { description: err.message });
-    } finally {
-      setDownloading(false);
-    }
-  };
+  const ok = result.result === 'VERIFIED';
+  const checks = Array.isArray(result.checks) ? result.checks : [];
+  const passed = checks.filter((c) => c.ok).length;
+  const Icon = ok ? ShieldCheck : ShieldX;
 
   return (
-    <div className="space-y-4 rounded-lg border p-4">
-      <div className="flex flex-wrap items-center gap-2">
-        <FileBadge className="size-4 text-muted-foreground" />
-        <span className="text-sm font-medium">Certificate {c.certificateId.slice(-6)}</span>
-        <span className="text-xs text-muted-foreground">issued {fmtDate(c.generatedAt)}</span>
-        <SignatureBadge present={hasA} label="Part A" />
-        <SignatureBadge present={hasB} label="Part B" />
-        {!c.partBComplete && (
-          <Badge variant="outline" className="rounded-full">
-            Part B blank — no laboratory report
-          </Badge>
+    <div
+      role="status"
+      className={cn(
+        'overflow-hidden rounded-lg border',
+        ok ? 'border-ok/25 bg-ok-muted' : 'border-bad/25 bg-bad-muted',
+        className
+      )}
+    >
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        aria-expanded={open}
+        disabled={!checks.length}
+        className="flex w-full items-center gap-2.5 px-3.5 py-2.5 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+      >
+        <Icon aria-hidden className={cn('size-5 shrink-0', ok ? 'text-ok' : 'text-bad')} />
+        <span className={cn('text-sm font-semibold', ok ? 'text-ok' : 'text-bad')}>{ok ? 'Verified' : 'Failed'}</span>
+        {result.verifiedAt && <span className="text-meta text-muted-foreground">{fmtDate(result.verifiedAt)}</span>}
+        {checks.length > 0 && (
+          <span className="ml-auto flex items-center gap-1 text-label text-muted-foreground">
+            {passed}/{checks.length} checks
+            <ChevronDown aria-hidden className={cn('size-3.5 transition-transform', open && 'rotate-180')} />
+          </span>
         )}
-      </div>
-
-      <div className="flex flex-wrap items-start gap-4">
-        <QrImage value={link} size={132} alt="QR code for the public verifier" />
-        <div className="min-w-0 flex-1 space-y-2">
-          <p className="text-xs font-medium uppercase tracking-wider text-muted-foreground">
-            What to paste into the public verifier
-          </p>
-          <Hash value={link} className="block rounded-md bg-muted/60 p-2" />
-          <div className="flex flex-wrap gap-2">
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={async () =>
-                (await copyText(link)) ? toast.success('Verification link copied') : toast.error('Copy failed')
-              }
-            >
-              <Copy className="size-3.5" /> Copy link
-            </Button>
-            <Button
-              size="sm"
-              variant="outline"
-              onClick={async () =>
-                (await copyText(c.verificationToken))
-                  ? toast.success('Token copied')
-                  : toast.error('Copy failed')
-              }
-            >
-              <Copy className="size-3.5" /> Copy token only
-            </Button>
-            <Button size="sm" variant="outline" asChild>
-              <a href={link} target="_blank" rel="noreferrer noopener">
-                <ExternalLink className="size-3.5" /> Open the verifier
-              </a>
-            </Button>
-            <Button size="sm" variant="outline" onClick={download} disabled={downloading}>
-              {downloading ? <Loader2 className="size-3.5 animate-spin" /> : <FileDown className="size-3.5" />}
-              Download PDF
-            </Button>
-          </div>
-          <p className="text-xs leading-relaxed text-muted-foreground">
-            The printed PDF carries this same QR. Anyone can scan it, with no account, and learn
-            whether the certificate is genuine and unaltered — never what it says. Whoever you
-            hand the PDF to (the other side, the court) can also drop the file itself on the
-            public verifier: it tells them whether their copy is the registered document.
-          </p>
-        </div>
-      </div>
-
-      <KeyValue
-        rows={[
-          ['Deponent (Part A)', `${c.partA?.deponentName ?? '—'} · ${c.partA?.deponentAuthorityId ?? ''}`],
-          ['Expert (Part B)', c.partB?.expertName ? `${c.partB.expertName} · ${c.partB.labName ?? ''}` : '—'],
-          ['Evidence digest', <Hash key="h" value={c.partA?.hashValue} />],
-          ['Document digest', <Hash key="d" value={c.pdfSha256} />],
-        ]}
-      />
-
-      {(canSignPartA || canSignPartB) && (
-        <div className="flex flex-wrap gap-2">
-          {canSignPartA && !hasA && (
-            <Button size="sm" onClick={() => sign('A')} disabled={Boolean(signing) || !isDeponent}>
-              {signing === 'A' ? <Loader2 className="size-3.5 animate-spin" /> : <PenLine className="size-3.5" />}
-              Sign Part A as deponent
-            </Button>
-          )}
-          {canSignPartB && !hasB && c.partBComplete && (
-            <Button size="sm" onClick={() => sign('B')} disabled={Boolean(signing)}>
-              {signing === 'B' ? <Loader2 className="size-3.5 animate-spin" /> : <PenLine className="size-3.5" />}
-              Sign Part B as examiner
-            </Button>
-          )}
-          {canSignPartA && !hasA && !isDeponent && (
-            <p className="text-xs text-muted-foreground">
-              Part A names {c.partA?.deponentAuthorityId}; only they can sign it.
-            </p>
-          )}
-        </div>
+      </button>
+      {open && checks.length > 0 && (
+        <ul className="space-y-1.5 border-t bg-card/70 px-3.5 py-3">
+          {checks.map((ch, i) => (
+            <li key={ch.key ?? i} className="flex items-start gap-2">
+              {ch.ok ? (
+                <Check aria-label="Passed" className="mt-0.5 size-3.5 shrink-0 text-ok" />
+              ) : (
+                <X aria-label="Failed" className="mt-0.5 size-3.5 shrink-0 text-bad" />
+              )}
+              <span className="min-w-0">
+                <span className="block text-meta text-foreground">{ch.label ?? humanise(ch.key)}</span>
+                {ch.detail && (
+                  <span className="block break-words text-label text-muted-foreground">{String(ch.detail)}</span>
+                )}
+              </span>
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   );
@@ -188,89 +116,117 @@ function CertificateCard({ certificate: c, canSignPartA, canSignPartB, exhibitCo
 
 /**
  * @param {object} props
- * @param {string} [props.evidenceId]  list by exhibit (everyone who may read it)
- * @param {string} [props.referralId]  list by referral (the examiner, after reporting)
- * @param {string} [props.exhibitCode]
- * @param {boolean} [props.canGenerate] the investigating officer, or the court
- * @param {boolean} [props.canSignPartA]
- * @param {boolean} [props.canSignPartB]
+ * @param {string} [props.evidenceId]     the exhibit; the card reads its certificate register
+ * @param {string} [props.exhibitCode]    for the PDF filename
+ * @param {object} [props.certificate]    a certificate view already in hand (skips the read)
+ * @param {'card'|'plain'} [props.variant='card']  `plain` drops the border (inside a Panel)
  */
-export function CertificatePanel({ evidenceId, referralId, exhibitCode, canGenerate, canSignPartA, canSignPartB }) {
-  const list = useCertificatesFor({ evidenceId, referralId });
-  const generate = useGenerateCertificate();
-  const certificates = list.data?.certificates ?? [];
+export function CertificateCard({ evidenceId, exhibitCode, certificate: provided, variant = 'card', className }) {
+  const list = useCertificateFor(provided ? null : evidenceId);
+  const verify = useVerifyCertificate();
+  const [downloading, setDownloading] = useState(false);
+
+  const data = list.data ?? {};
+  const c = provided ?? data.active ?? null;
+  const id = c?.certificateId ?? null;
+  const code = exhibitCode ?? c?.exhibitCode ?? data.exhibitCode;
+  const superseded = (data.certificates ?? []).filter((x) => x.status === 'SUPERSEDED').length;
+  const link = c ? verificationLink(c) : null;
+  // The mutation outlives a change of exhibit; only show a result for this certificate.
+  const verified = id && verify.variables === id ? verify : null;
+  const last = c?.lastVerification;
+
+  const card = variant === 'card';
+  const shell = cn(card && 'rounded-lg border bg-card', className);
+  const pad = card ? 'px-4' : '';
+
+  if (!provided && evidenceId && list.isPending) {
+    return (
+      <div className={cn(shell, 'space-y-2 py-3', pad)} aria-busy="true">
+        <Skeleton className="h-4 w-44" />
+        <Skeleton className="h-3 w-64" />
+      </div>
+    );
+  }
+  if (!provided && list.isError) {
+    return <Denial error={list.error} heading="Certificate not readable" className={className} />;
+  }
+
+  const download = async () => {
+    setDownloading(true);
+    try {
+      saveBlob(await api.certificates.pdfBlob(id), `s63-certificate-${code ?? id}.pdf`);
+    } catch (err) {
+      toast.error('The certificate could not be downloaded', { description: err.message });
+    } finally {
+      setDownloading(false);
+    }
+  };
+
+  const copy = async () => {
+    if (await copyText(link)) toast.success('Verification link copied');
+    else toast.error('Could not copy the link');
+  };
 
   return (
-    <div className="space-y-4">
-      {canGenerate && evidenceId && (
-        <div className="space-y-2">
-          <Button
-            onClick={() =>
-              generate.mutate(evidenceId, {
-                onSuccess: (d) =>
-                  toast.success('Section 63 certificate issued', {
-                    description: d.partBNote ?? 'Part B reproduces the laboratory report.',
-                  }),
-              })
+    <section className={shell} aria-label="Section 63 certificate">
+      <div className={cn('flex items-start gap-3 py-3', pad)}>
+        <FileBadge aria-hidden className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium text-foreground">Section 63 certificate</p>
+          <MetaLine
+            items={
+              c
+                ? [
+                    c.issuedAt && `Issued ${fmtDate(c.issuedAt)}`,
+                    `Signed by ${c.signedBy ?? SIGNER}`,
+                    superseded > 0 && `${superseded} superseded`,
+                  ]
+                : ['Not issued yet']
             }
-            disabled={generate.isPending}
-          >
-            {generate.isPending ? <Loader2 className="size-4 animate-spin" /> : <FileBadge className="size-4" />}
-            {certificates.length ? 'Issue a fresh certificate' : 'Generate s.63 certificate'}
+          />
+        </div>
+        <CertificateStatusBadge
+          status={!c || c.state === 'PENDING_ISSUE' ? 'PENDING_ISSUE' : c.status ?? c.state}
+        />
+      </div>
+
+      {c && (
+        <div className={cn('flex flex-wrap items-center gap-2 pb-3', pad)}>
+          <Button size="sm" onClick={() => verify.mutate(id)} disabled={!id || verify.isPending}>
+            {verify.isPending ? <Loader2 className="animate-spin" /> : <ShieldCheck />}
+            Verify certificate
           </Button>
-          <p className="text-xs text-muted-foreground">
-            Part A is filled from the exhibit record and the ledger; Part B only from a filed
-            laboratory report. If the record cannot support Part A, nothing is issued and the
-            missing fields are listed.
-          </p>
-          {generate.isError && (
-            <div className="space-y-2">
-              <Denial error={generate.error} heading="Certificate not generated" />
-              {Array.isArray(generate.error?.details?.missing) && (
-                <Note tone="warn">Missing: {generate.error.details.missing.join(', ')}</Note>
-              )}
-            </div>
+          <Button size="sm" variant="outline" onClick={download} disabled={!id || downloading}>
+            {downloading ? <Loader2 className="animate-spin" /> : <FileDown />}
+            Download PDF
+          </Button>
+          {link && (
+            <Button size="sm" variant="ghost" onClick={copy}>
+              <Link2 />
+              Copy link
+            </Button>
+          )}
+          {!verified?.data && last?.at && (
+            <span className="text-label text-muted-foreground">
+              Last verified {fmtDate(last.at)} · {last.result === 'VERIFIED' ? 'Verified' : 'Failed'}
+            </span>
           )}
         </div>
       )}
 
-      {list.isError && <Denial error={list.error} heading="Certificates not readable" />}
-      {/* A certificate is a point-in-time statement. One issued before the laboratory
-          reported has a blank Part B for good, and the examiner can sign nothing until a
-          fresh one exists — so whoever can issue is told, and the lab is told why it waits. */}
-      {list.isSuccess && list.data?.freshCertificateNeeded && (
-        <Note tone="warn">
-          {canGenerate
-            ? 'A laboratory report has been filed since the newest certificate was issued, so its Part B is blank. Issue a fresh certificate: it will carry Part B, and the examiner can then sign it. Part A must be signed again on the new one.'
-            : canSignPartB
-              ? 'Your report is filed, but the newest certificate was issued before it and so has no Part B to sign. Ask the investigating officer or the court registry to issue a fresh certificate; it will appear here to sign.'
-              : 'A laboratory report has been filed since the newest certificate was issued. A fresh certificate, carrying Part B, is due from the officer or the registry.'}
-        </Note>
+      {verified && (verified.data || verified.isError) && (
+        <div className={cn('pb-3', pad)}>
+          {verified.isError ? (
+            <Denial error={verified.error} heading="Verification not run" />
+          ) : (
+            <VerificationResult result={verified.data} />
+          )}
+        </div>
       )}
-      {list.isSuccess && list.data?.reportFiled && certificates.length === 0 && canSignPartB && (
-        <Note>
-          No certificate has been issued for this exhibit yet. The investigating officer or the
-          court registry issues it; once they do, Part B — your report — is here to sign.
-        </Note>
-      )}
-
-      {list.isSuccess && certificates.length === 0 && (
-        <EmptyState title="No certificate issued for this exhibit" icon={FileBadge}>
-          {canGenerate
-            ? 'Generate one above. Its QR and link are what the public verifier takes.'
-            : 'The investigating officer or the court registry issues certificates.'}
-        </EmptyState>
-      )}
-
-      {certificates.map((c) => (
-        <CertificateCard
-          key={c.certificateId}
-          certificate={c}
-          exhibitCode={exhibitCode ?? list.data?.exhibitCode}
-          canSignPartA={canSignPartA}
-          canSignPartB={canSignPartB}
-        />
-      ))}
-    </div>
+    </section>
   );
 }
+
+/** @deprecated Use `CertificateCard`. Kept so existing imports compile; extra props are ignored. */
+export const CertificatePanel = CertificateCard;

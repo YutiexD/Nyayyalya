@@ -97,25 +97,32 @@ describe('filing a chargesheet registers the case with that court', () => {
     expect(listed.court.code).toBe('UP-GZB-CJM-01');
   });
 
-  it('puts the case on the cause list of THAT court only', async () => {
+  it('puts the case before the Court of the district — every court login there sees it', async () => {
     const io = await activateUser(server, IO);
     const c = await openCase(io, '0124/2026');
     await as(io, request(server).post(`/api/cases/${c._id}/file-chargesheet`)).send({});
 
     const magistrate = await activateUser(server, MAGISTRATE_JUDGE);
     const sessions = await activateUser(server, SESSIONS_JUDGE);
-    const mine = await as(magistrate, request(server).get('/api/cases'));
-    const theirs = await as(sessions, request(server).get('/api/cases'));
+    for (const courtUser of [magistrate, sessions]) {
+      const list = await as(courtUser, request(server).get('/api/cases'));
+      const row = list.body.cases.find((x) => x._id === c._id);
+      expect(row, `${courtUser.authorityId} must see the filed case`).toBeTruthy();
+      expect(row.courtName).toMatch(/Chief Judicial Magistrate/);
+      expect(row.summary.workflow.nextCourtAction.action).toBe('TAKE_COGNIZANCE');
+      // The court-only representation view: APPROVE on the case.
+      const representation = await as(courtUser, request(server).get(`/api/vakalatnama/case/${c._id}`));
+      expect(representation.status).toBe(200);
+    }
 
-    expect(mine.body.cases.map((x) => x._id)).toContain(c._id);
-    expect(theirs.body.cases.map((x) => x._id)).not.toContain(c._id);
-
-    // The presiding judge of that court can reach its disclosure; the Sessions bench,
-    // which this case is not before, cannot.
-    const packs = await as(magistrate, request(server).get(`/api/disclosure/case/${c._id}/packs`));
-    expect(packs.status).toBe(200);
-    const notTheirs = await as(sessions, request(server).get(`/api/disclosure/case/${c._id}/packs`));
-    expect(notTheirs.status).toBe(403);
+    // A court identity from another district is not seized of it.
+    await mongoose.connection
+      .collection('users')
+      .updateOne({ authorityId: SESSIONS_JUDGE }, { $set: { 'scope.districtCode': 'UP-LKO' } });
+    const outside = await as(sessions, request(server).get('/api/cases'));
+    expect(outside.body.cases.map((x) => x._id)).not.toContain(c._id);
+    const denied = await as(sessions, request(server).get(`/api/vakalatnama/case/${c._id}`));
+    expect(denied.status).toBe(403);
   });
 
   it('keeps using the seeded listing where the court register already has one', async () => {
@@ -126,8 +133,8 @@ describe('filing a chargesheet registers the case with that court', () => {
   });
 });
 
-describe('a court sees custody items only in cases before it', () => {
-  it("does not list another court's custody items to a court's evidence room", async () => {
+describe('a court sees custody items only in cases before a court of its district', () => {
+  it("does not list another district's custody items to a court's registry", async () => {
     const io = await activateUser(server, IO);
     const magistrateCase = await openCase(io, '0124/2026');
     const item = await as(io, request(server).post('/api/custody/items')).send({
@@ -135,23 +142,24 @@ describe('a court sees custody items only in cases before it', () => {
       description: 'Handset',
       sealNumber: 'SEAL-T-1',
       identifiers: { imei: '356938035643809' },
-      location: 'FIELD',
     });
     expect(item.status).toBe(201);
     await as(io, request(server).post(`/api/cases/${magistrateCase._id}/file-chargesheet`)).send({});
 
-    // The Sessions Court evidence room has no case before it holding that item.
+    // The Sessions registry is the same Court role in the same district: it sees it.
     const room = await activateUser(server, SESSIONS_EVIDENCE_ROOM);
     const listed = await as(room, request(server).get('/api/custody/items'));
     expect(listed.status).toBe(200);
-    expect(listed.body.items.map((i) => i.id)).not.toContain(item.body.item.id);
+    expect(listed.body.items.map((i) => i.id)).toContain(item.body.item.id);
 
-    const gaps = await as(room, request(server).get('/api/custody/gaps'));
+    // A registry in another district does not.
+    const otherUser = await activateUser(server, MAGISTRATE_EVIDENCE_ROOM);
+    await mongoose.connection
+      .collection('users')
+      .updateOne({ authorityId: MAGISTRATE_EVIDENCE_ROOM }, { $set: { 'scope.districtCode': 'UP-LKO' } });
+    const theirs = await as(otherUser, request(server).get('/api/custody/items'));
+    expect(theirs.body.items.map((i) => i.id)).not.toContain(item.body.item.id);
+    const gaps = await as(otherUser, request(server).get('/api/custody/gaps'));
     expect(gaps.body.items.map((r) => r.itemId)).not.toContain(item.body.item.id);
-
-    // The Magistrate's registry, before whom it now is, does see it.
-    const custodian = await activateUser(server, MAGISTRATE_EVIDENCE_ROOM);
-    const theirs = await as(custodian, request(server).get('/api/custody/items'));
-    expect(theirs.body.items.map((i) => i.id)).toContain(item.body.item.id);
   });
 });

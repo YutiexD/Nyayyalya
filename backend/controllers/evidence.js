@@ -21,6 +21,7 @@
  * nuance that matters: a modified FILE with an intact CHAIN correctly says "the file
  * was touched, not the log".
  */
+import { seesAiAnalysis, aiAnalysisFor } from '../services/ai/visibility.js';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
@@ -50,7 +51,10 @@ import {
   ACTION,
   DECISION,
   TRIAGE_PRIORITY_ORDER,
-  TRIAGE_DISCLAIMER,
+  AI_ANALYSIS_STATUS,
+  AI_DISCLAIMER,
+  TRIAGE_UI_LABEL,
+  CERTIFICATE_STATUS,
 } from '../models/enums.js';
 import { appendEvent, verifyChain } from '../services/ledger.js';
 import { generateDek, wrapDek, unwrapDek } from '../services/envelope.js';
@@ -63,12 +67,20 @@ import {
   objectExists,
 } from '../services/storage.js';
 import { validateUpload } from '../services/fileType.js';
-import { triageEvidence } from '../services/triage.js';
+import { initialAnalysisState, requestAnalysis, retryAnalysis } from '../services/ai/analysisService.js';
+import { evidenceCards } from '../services/caseOverview.js';
 import { merkleRoot, merkleProof, verifyProof } from '../services/merkle.js';
 import { verifyEcdsaP256, sha256Hex, randomBase64Url } from '../config/crypto.js';
-import { materialiseScopeFilter, seesTriage } from '../services/accessResolver.js';
+import { materialiseScopeFilter } from '../services/accessResolver.js';
+import { ensureSystemCertificate, ensureSystemCertificateQuietly } from '../services/certificateIssuer.js';
+import { verificationUrlFor } from '../services/certificatePdf.js';
+import { labelFor } from '../services/evidenceLabel.js';
+import { certificateState } from '../services/certificateState.js';
+import { buildEvidenceLifecycle } from '../services/publicEvidenceView.js';
+import { LIFECYCLE_VARIANT } from '../services/lifecycleDetails.js';
+import { Certificate } from '../models/Certificate.js';
 import { writeAudit } from '../middleware/audit.js';
-import { BadRequest, NotFound, Forbidden } from '../utils/errors.js';
+import { BadRequest, NotFound, Forbidden, Conflict } from '../utils/errors.js';
 import { loggerFor } from '../utils/logger.js';
 
 const log = loggerFor('evidence');
@@ -143,22 +155,50 @@ const parse = (schema, data) => {
 
 const hex64 = z.string().regex(/^[0-9a-f]{64}$/i, 'Must be a SHA-256 hex digest');
 
+/** A multipart form sends an untouched optional input as "". Treat that as absent. */
+const blankAsAbsent = (inner) =>
+  z.preprocess((v) => (typeof v === 'string' && v.trim() === '' ? undefined : v), inner);
+
+/**
+ * Only the file, a title, the browser hash and its signature are required. Everything
+ * describing the source device is optional: the s.63 certificate is issued
+ * automatically and renders what was not recorded as "Not recorded".
+ */
 const uploadSchema = z.object({
   caseId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Malformed case id'),
   title: z.string().trim().min(1).max(300),
   description: z.string().max(5000).optional().default(''),
   sha256Client: hex64,
   signature: z.string().regex(/^[0-9a-f]{128}$/i, 'Signature must be 64 bytes of hex'),
-  sourceType: z.enum(Object.values(SOURCE_TYPE)),
-  make: z.string().max(120).optional(),
-  model: z.string().max(120).optional(),
-  colour: z.string().max(60).optional(),
-  serialNumber: z.string().max(120).optional(),
-  imeiOrUid: z.string().max(120).optional(),
-  macAddress: z.string().max(64).optional(),
-  capturedAt: z.coerce.date().optional(),
+  sourceType: blankAsAbsent(z.enum(Object.values(SOURCE_TYPE)).optional().default(SOURCE_TYPE.OTHER)),
+  make: blankAsAbsent(z.string().max(120).optional()),
+  model: blankAsAbsent(z.string().max(120).optional()),
+  colour: blankAsAbsent(z.string().max(60).optional()),
+  serialNumber: blankAsAbsent(z.string().max(120).optional()),
+  imeiOrUid: blankAsAbsent(z.string().max(120).optional()),
+  macAddress: blankAsAbsent(z.string().max(64).optional()),
+  capturedAt: blankAsAbsent(z.coerce.date().optional()),
   metadata: z.string().max(8000).optional(),
 });
+
+/**
+ * AI analysis output is for the forensic laboratory alone. Police, court and counsel
+ * never receive it from any evidence endpoint.
+ */
+export { seesAiAnalysis };
+
+/** The small certificate summary carried on the upload response. */
+const uploadCertificateSummary = (cert) =>
+  cert
+    ? {
+        certificateId: String(cert._id),
+        status: cert.status,
+        state: certificateState(cert),
+        issuedAt: cert.issuedAt ?? null,
+        verificationToken: cert.verificationToken,
+        verificationUrl: verificationUrlFor(cert.verificationToken),
+      }
+    : null;
 
 /** Sequential, human-readable exhibit code: EX-<fir>-<nnn>. */
 async function nextExhibitCode(caseDoc) {
@@ -293,42 +333,11 @@ export async function uploadEvidence(req, res, next) {
     const wrapped = wrapDek(dek, caseDoc._id);
     dek.fill(0);
 
-    // ---- 5. triage: review priority only, never a verdict ----
-    let parsedMetadata = {};
-    if (body.metadata) {
-      try {
-        parsedMetadata = JSON.parse(body.metadata);
-        if (typeof parsedMetadata !== 'object' || parsedMetadata === null) parsedMetadata = {};
-      } catch {
-        parsedMetadata = {}; // malformed client metadata is ignored, never fatal
-      }
-    }
-    /**
-     * Every exhibit gets a review priority, automatically, here — the one place a
-     * file becomes a record. Nobody is asked for it and nobody can supply it: the
-     * request has no field for a priority, and there is no endpoint that sets one.
-     *
-     * The model reads the case as well as the file. Both facts come from the server
-     * (the case was loaded by the resolver; the ingest results were computed above),
-     * so nothing a client could send changes where an exhibit lands in the queue.
-     */
-    const triage = triageEvidence({
-      mimeType: typeCheck.mimeType,
-      sizeBytes: req.file.size,
-      metadata: parsedMetadata,
-      originalFilename: req.file.originalname,
-      capturedAt: body.capturedAt ?? null,
-      kind: EVIDENCE_KIND.DIGITAL,
-      sourceType: body.sourceType,
-      // Both are true by the time we reach here — an upload that failed either check
-      // was refused above and never became a record. They are passed anyway so the
-      // model has one shape, and so a future ingest path that quarantines rather than
-      // refuses lands at CRITICAL without a second code path deciding that.
-      hashMatched: true,
-      signatureValid: true,
-      sensitivityClass: caseDoc.sensitivityClass,
-      maxPunishmentYears: caseDoc.maxPunishmentYears,
-    });
+    // ---- 5. AI analysis: requested, not computed ----
+    // The exhibit is recorded with its AI analysis PENDING and queued once the
+    // record and its ledger entry exist (step 8). Nobody supplies a priority, the
+    // request has no field for one, and this system never derives one: the analysis,
+    // its explanation and its recommended priority all come from the AI model.
 
     // ---- 6. the immutable record ----
     const exhibitCode = await nextExhibitCode(caseDoc);
@@ -365,7 +374,7 @@ export async function uploadEvidence(req, res, next) {
       },
 
       sourceDevice: {
-        sourceType: body.sourceType,
+        sourceType: body.sourceType ?? SOURCE_TYPE.OTHER,
         make: body.make ?? null,
         model: body.model ?? null,
         colour: body.colour ?? null,
@@ -376,7 +385,7 @@ export async function uploadEvidence(req, res, next) {
       capturedAt: body.capturedAt ?? null,
       capturedByUserId: req.user.userId,
 
-      triage,
+      aiAnalysis: initialAnalysisState(),
       uploadedByUserId: req.user.userId,
     });
 
@@ -397,13 +406,28 @@ export async function uploadEvidence(req, res, next) {
         mimeType: typeCheck.mimeType,
         sourceType: body.sourceType,
         signerFingerprint: signer.publicKeyFingerprint,
-        // Triage priority is recorded as investigative context. It is not a verdict,
-        // and no score or percentage is ever written here or on chain.
-        triagePriority: triage.priority,
+        // No AI output is ever written to the ledger or the chain.
       },
     });
 
     await Evidence.updateOne({ _id: evidence._id }, { $set: { ledgerSeq: entry.seq } });
+
+    // Only now that the record and its ledger entry exist is the analysis started. It
+    // runs in the background: an upload never waits on, or fails because of, the AI model.
+    requestAnalysis(evidence._id);
+
+    // ---- 7b. the s.63 certificate: issued and signed by the system ----
+    // Never allowed to fail the upload. If it throws, the exhibit is recorded anyway and
+    // the certificate is issued on the next read or by the boot migration.
+    let certificate = null;
+    try {
+      certificate = (await ensureSystemCertificate(evidence._id))?.certificate ?? null;
+    } catch (err) {
+      log.error(
+        { exhibitCode, err: err.message },
+        'automatic s.63 certificate issue failed; it will be retried on the next read'
+      );
+    }
 
     // ---- 8. the officer's independent receipt ----
     // Their own copy is a check on this entire system: it lets them prove later what
@@ -426,17 +450,24 @@ export async function uploadEvidence(req, res, next) {
     };
     receipt.receiptHash = sha256Hex(JSON.stringify(receipt));
 
+    const evidenceOut = {
+      ...evidence.toObject(),
+      // The document was serialised before the ledger sequence was written back to
+      // it, so `toObject()` still carries the null it was created with. Carry the
+      // real value: a client showing "—" for a record that IS in the ledger reads
+      // as a failure of the thing this endpoint exists to guarantee.
+      ledgerSeq: entry.seq,
+      encryption: undefined, // key material never leaves the server
+      // The permanent QR label for the physical article: printed once, valid forever.
+      label: labelFor(evidence),
+    };
+    evidenceOut.aiAnalysis = aiAnalysisFor(req.user, evidenceOut.aiAnalysis);
+    if (evidenceOut.aiAnalysis === undefined) delete evidenceOut.aiAnalysis;
+
     return res.status(201).json({
-      evidence: {
-        ...evidence.toObject(),
-        // The document was serialised before the ledger sequence was written back to
-        // it, so `toObject()` still carries the null it was created with. Carry the
-        // real value: a client showing "—" for a record that IS in the ledger reads
-        // as a failure of the thing this endpoint exists to guarantee.
-        ledgerSeq: entry.seq,
-        encryption: undefined, // key material never leaves the server
-      },
+      evidence: evidenceOut,
       receipt,
+      certificate: uploadCertificateSummary(certificate),
     });
   } catch (err) {
     return next(err);
@@ -466,12 +497,89 @@ export async function evidenceIdFromCode(req, res, next) {
   }
 }
 
-/** GET /api/evidence/:id — metadata only. */
-export async function getEvidence(req, res) {
-  const e = { ...req.resource };
-  delete e.encryption; // never expose wrapped keys or IVs
-  if (!seesTriage(req.user)) delete e.triage; // never disclosed to a party
-  return res.json({ evidence: e });
+/**
+ * GET /api/evidence/:id — metadata, AI analysis (FSL only), the physical article it comes
+ * from and its certificate. The analysis and the article are never disclosed to a party.
+ */
+export async function getEvidence(req, res, next) {
+  try {
+    const e = { ...req.resource };
+    delete e.encryption; // never expose wrapped keys or IVs
+    e.aiAnalysis = aiAnalysisFor(req.user, e.aiAnalysis);
+    if (e.aiAnalysis === undefined) delete e.aiAnalysis;
+    // Repairs a certificate that failed to issue at upload. Never fails the read.
+    await ensureSystemCertificateQuietly(req.resource._id);
+    const [card] = await evidenceCards([req.resource], req.user);
+    return res.json({
+      evidence: {
+        ...e,
+        label: labelFor(req.resource),
+        physicalCustody: card?.physicalCustody ?? undefined,
+        certificate: card?.certificate ?? null,
+      },
+    });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+/**
+ * GET /api/evidence/:id/lifecycle — the exhibit's lifecycle with a description, the
+ * actor and the proofs for every milestone. The authenticated variant: the court's
+ * recorded notes are included; the forensic opinion and the AI analysis are not.
+ */
+export async function getEvidenceLifecycle(req, res, next) {
+  try {
+    const e = req.resource;
+    const [caseDoc, activeCertificate] = await Promise.all([
+      req.caseDoc && String(req.caseDoc._id) === String(e.caseId) ? req.caseDoc : Case.findById(e.caseId).lean(),
+      Certificate.findOne({ evidenceId: e._id, status: CERTIFICATE_STATUS.ACTIVE }).lean(),
+    ]);
+    const lifecycle = await buildEvidenceLifecycle({
+      evidence: e,
+      caseDoc,
+      activeCertificate,
+      variant: LIFECYCLE_VARIANT.AUTHENTICATED,
+    });
+    return res.json({ evidenceId: String(e._id), exhibitCode: e.exhibitCode, lifecycle });
+  } catch (err) {
+    return next(err);
+  }
+}
+
+/**
+ * POST /api/evidence/:id/ai-analysis/retry
+ *
+ * Re-queue a FAILED AI analysis (or one abandoned mid-flight). A completed
+ * analysis is not re-run — its result is part of the record — and a party to the case
+ * cannot reach AI analysis at all.
+ */
+export async function retryAiAnalysis(req, res, next) {
+  try {
+    if (!seesAiAnalysis(req.user)) {
+      throw Forbidden('READ_ONLY_ROLE', 'AI analysis is available to the forensic laboratory only');
+    }
+    const updated = await retryAnalysis(req.resource._id);
+    if (!updated) {
+      throw Conflict(
+        'AI_ANALYSIS_NOT_RETRYABLE',
+        'Only a failed analysis can be retried. A completed, pending or in-progress analysis is left as it is.',
+        { status: req.resource.aiAnalysis?.status ?? null }
+      );
+    }
+    await writeAudit(req, {
+      action: ACTION.VERIFY,
+      resourceType: RESOURCE_TYPE.EVIDENCE,
+      resourceId: req.resource._id,
+      resourceLabel: req.resource.exhibitCode,
+      caseId: req.resource.caseId,
+      decision: DECISION.ALLOW,
+      reason: 'AI_ANALYSIS_RETRY_REQUESTED',
+    });
+    return res.status(202).json({ exhibitCode: updated.exhibitCode, aiAnalysis: aiAnalysisFor(req.user, updated.aiAnalysis) });
+  } catch (err) {
+    return next(err);
+  }
 }
 
 /** GET /api/evidence?caseId= — scope-filtered list. */
@@ -495,11 +603,15 @@ export async function listEvidence(req, res, next) {
     }
 
     const items = await Evidence.find(query)
-      .select(seesTriage(req.user) ? '-encryption' : '-encryption -triage')
+      .select(seesAiAnalysis(req.user) ? '-encryption' : '-encryption -aiAnalysis')
       .sort({ createdAt: -1 })
       .limit(Math.min(Number(req.query.limit) || 100, 200))
       .lean();
 
+    for (const item of items) {
+      if (seesAiAnalysis(req.user)) item.aiAnalysis = aiAnalysisFor(req.user, item.aiAnalysis);
+      item.label = labelFor(item);
+    }
     return res.json({ evidence: items, total: items.length });
   } catch (err) {
     return next(err);
@@ -821,7 +933,7 @@ export async function streamEvidence(req, res, next) {
  * derived from TRIAGE_PRIORITY_ORDER rather than written out by hand: adding a band
  * to the enum must not silently leave a queue sorting it last.
  */
-export const priorityRankStage = (field = '$triage.priority') => ({
+export const priorityRankStage = (field = '$aiAnalysis.triagePriority') => ({
   $switch: {
     branches: TRIAGE_PRIORITY_ORDER.map((priority, rank) => ({
       case: { $eq: [field, priority] },
@@ -831,46 +943,46 @@ export const priorityRankStage = (field = '$triage.priority') => ({
   },
 });
 
-/** GET /api/evidence/queue/triage — sorted by review priority. */
+/** GET /api/evidence/queue/triage — completed AI analyses, sorted by the recommended review priority (FSL only). */
 export async function triageQueue(req, res, next) {
   try {
     // Same per-exhibit scope as the list. The triage queue additionally exposes
-    // `triage.priority`, which `exhibitView` deliberately withholds from an
+    // the AI priority, which `exhibitView` deliberately withholds from an
     // advocate's disclosure pack — so a case-level filter here leaked the one field
     // the disclosure view is careful never to show them.
     const scope = await materialiseScopeFilter(req.user, RESOURCE_TYPE.EVIDENCE);
     if (!scope) return res.json({ queue: [], disclaimer: null });
-    // The queue IS triage. A party is never shown it — not even the order it puts
-    // their served exhibits in.
-    if (!seesTriage(req.user)) return res.json({ queue: [], disclaimer: null });
+    // The queue IS AI analysis. Only the forensic laboratory is shown it — not even the
+    // order it puts exhibits in.
+    if (!seesAiAnalysis(req.user)) return res.json({ queue: [], disclaimer: null });
 
     // Rank, sort and bound in the database.
     //
     // This was an unbounded find() followed by an in-JavaScript sort, which fetched
     // every exhibit in scope on every request. It cannot simply become
-    // `.sort({'triage.priority': 1}).limit(n)` — the values are strings, so a Mongo
+    // `.sort({'aiAnalysis.triagePriority': 1}).limit(n)` — the values are strings, so a Mongo
     // sort orders them HIGH, LOW, MEDIUM and a limit would then drop MEDIUM before
     // LOW. The rank has to be computed before the sort, which is what this does.
     const limit = Math.min(Number(req.query.limit) || 100, 200);
     const items = await Evidence.aggregate([
-      { $match: { ...scope, 'triage.priority': { $ne: null } } },
+      { $match: { ...scope, 'aiAnalysis.status': AI_ANALYSIS_STATUS.COMPLETED } },
       { $addFields: { __rank: priorityRankStage() } },
       { $sort: { __rank: 1, createdAt: -1 } },
       { $limit: limit },
       {
         $project: {
-          exhibitCode: 1, title: 1, caseId: 1, triage: 1,
+          exhibitCode: 1, title: 1, caseId: 1, aiAnalysis: 1,
           forensic: 1, mimeType: 1, createdAt: 1,
         },
       },
     ]);
 
     return res.json({
-      queue: items,
+      queue: items.map((item) => ({ ...item, aiAnalysis: aiAnalysisFor(req.user, item.aiAnalysis) })),
       // The label and the disclaimer travel with the data, so no client can render
       // this as anything other than what it is.
-      uiLabel: 'Review Priority',
-      disclaimer: items[0]?.triage?.disclaimer ?? TRIAGE_DISCLAIMER,
+      uiLabel: TRIAGE_UI_LABEL,
+      disclaimer: AI_DISCLAIMER,
     });
   } catch (err) {
     return next(err);
@@ -882,10 +994,12 @@ export default {
   uploadCaseContext,
   uploadEvidence,
   getEvidence,
+  getEvidenceLifecycle,
   listEvidence,
   verifyEvidence,
   createStreamToken,
   streamEvidence,
   triageQueue,
   priorityRankStage,
+  retryAiAnalysis,
 };

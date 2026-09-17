@@ -1,225 +1,328 @@
 /**
- * The components that carry this system's compliance rules.
+ * Verdicts, AI analysis and refusals.
  *
- * Three claims are rendered in this product and they must never look alike, because
- * they are not alike:
- *
- *   ReviewPriority   — machine triage. Labelled "Review Priority", one of four bands,
- *                      never "verified", never "confidence", never a percentage, and
- *                      never shown without the API's own disclaimer within reach.
- *   ForensicOpinion  — a s.79A laboratory's authenticity opinion. Deliberately a
- *                      different shape and weight, attributed to the lab and its
- *                      notification reference, because it is the only authenticity
- *                      finding the system carries.
- *   Denial           — a refusal. Always the machine code AND a plain sentence: a
- *                      denial the user cannot understand is a bug, not a security
- *                      feature.
- *
- * If these ever start looking similar, the product has begun claiming that an
- * automated score is a forensic finding, which is the single thing it must not do.
- *
- * ## The one change this redesign made to that rule
- *
- * The disclaimer used to be a paragraph printed under every priority badge, including
- * in table cells — so it appeared eight times on a screen, and by the third time
- * nobody was reading any of them. It is now attached to the badge as a tooltip and
- * stated once, in full, wherever a priority is the subject of the screen
- * (`PriorityLegend`). It is not optional in either place.
+ *   AiAnalysisPanel, AiAnalysisBadge, PriorityBadge, AiStatusBadge
+ *        The AI analysis of an exhibit. FOR THE LABORATORY ONLY: the server sends
+ *        `aiAnalysis` to FSL and to nobody else, and no other role's screen may render
+ *        these. Dashed and secondary, always called "AI analysis".
+ *   ForensicOpinion, ForensicBadge
+ *        The laboratory's verdict: the official finding. Solid and attributed, so it can
+ *        never be mistaken for the AI analysis.
+ *   Denial, Note
+ *        A refusal (code and a plain sentence) and a neutral note.
  */
-import { AlertTriangle, FlaskConical, Info, ShieldAlert } from 'lucide-react';
+import { useState } from 'react';
+import {
+  AlertTriangle, ChevronDown, FlaskConical, Info, Loader2, RotateCcw, ShieldAlert, Sparkles,
+} from 'lucide-react';
 
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
-import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
-import { explain } from '@/lib/api';
-import { cn, humanise, fmtDate } from '@/lib/utils';
+import { REASON_TEXT, explain } from '@/lib/api';
+import { cn, fmtDate, humanise } from '@/lib/utils';
 
-// ------------------------------------------------------------ machine triage ----
+// ------------------------------------------------------------ AI analysis ----
 
 /** Highest first. The one ordering every queue in the client sorts by. */
 export const PRIORITY_ORDER = Object.freeze(['CRITICAL', 'HIGH', 'MEDIUM', 'LOW']);
 
-/**
- * The wording that must accompany every priority.
- *
- * A fallback, not a substitute: the API sends its own text and that is what renders.
- * This exists so a response that somehow arrives without it still cannot put a
- * machine priority on screen unqualified.
- */
-export const TRIAGE_DISCLAIMER =
-  'Automated triage only. Not expert opinion under BSA s.39 / IT Act s.79A.';
+/** The one disclaimer line every AI result carries. */
+export const AI_DISCLAIMER = 'AI analysis is a preliminary aid, not a forensic finding.';
 
-const PRIORITY_STYLES = {
-  CRITICAL: 'border-priority-critical/35 bg-priority-critical-muted text-priority-critical',
-  HIGH: 'border-priority-high/35 bg-priority-high-muted text-priority-high',
-  MEDIUM: 'border-priority-medium/35 bg-priority-medium-muted text-priority-medium',
-  LOW: 'border-priority-low/30 bg-priority-low-muted text-priority-low',
+export const PRIORITY_LABEL = Object.freeze({
+  CRITICAL: 'Critical',
+  HIGH: 'High',
+  MEDIUM: 'Medium',
+  LOW: 'Low',
+});
+
+const PRIORITY_VARIANT = { CRITICAL: 'danger', HIGH: 'warning', MEDIUM: 'info', LOW: 'muted' };
+
+/** How each analysis state reads on screen. */
+export const AI_STATUS_LABEL = Object.freeze({
+  PENDING: 'AI queued',
+  PROCESSING: 'AI analysing',
+  COMPLETED: 'AI complete',
+  FAILED: 'AI failed',
+  UNSUPPORTED: 'AI not applicable',
+});
+
+const AI_STATUS_VARIANT = {
+  PENDING: 'muted',
+  PROCESSING: 'info',
+  COMPLETED: 'success',
+  FAILED: 'danger',
+  UNSUPPORTED: 'muted',
 };
 
-/** What each band is actually telling a human to do. */
-export const PRIORITY_MEANING = {
-  CRITICAL: 'Look at this before anything else.',
-  HIGH: 'Look at this first.',
-  MEDIUM: 'Worth a look.',
-  LOW: 'Nothing stood out.',
+const ASSESSMENT = {
+  LIKELY_MANIPULATED: { label: 'Likely manipulated', variant: 'danger' },
+  LIKELY_AUTHENTIC: { label: 'Likely authentic', variant: 'success' },
+  INCONCLUSIVE: { label: 'Inconclusive', variant: 'warning' },
 };
 
-/**
- * Machine triage, as a badge. Note what this is NOT allowed to say.
- *
- * @param {object} props
- * @param {string} props.priority CRITICAL | HIGH | MEDIUM | LOW
- * @param {string} [props.disclaimer] the API's own wording, rendered verbatim
- */
-export function PriorityBadge({ priority, disclaimer, className }) {
-  if (!priority) {
-    return <span className="text-[13px] text-muted-foreground">—</span>;
-  }
-  const style = PRIORITY_STYLES[priority] ?? PRIORITY_STYLES.LOW;
-
+/** Review priority as a badge; a dash when there is none. FSL screens only. */
+export function PriorityBadge({ priority, size = 'sm', className }) {
+  if (!priority) return <span className="text-meta text-muted-foreground">—</span>;
   return (
-    <Tooltip>
-      <TooltipTrigger asChild>
-        <Badge
-          variant="outline"
-          className={cn(
-            'rounded-full px-2.5 py-0 text-[11px] font-semibold uppercase tracking-wide',
-            style,
-            className
-          )}
-        >
-          {priority}
-        </Badge>
-      </TooltipTrigger>
-      <TooltipContent className="max-w-xs">
-        <p className="font-medium">Review Priority — {humanise(priority)}</p>
-        <p className="mt-0.5">{PRIORITY_MEANING[priority]}</p>
-        <p className="mt-1.5 text-muted-foreground">{disclaimer ?? TRIAGE_DISCLAIMER}</p>
-      </TooltipContent>
-    </Tooltip>
+    <Badge variant={PRIORITY_VARIANT[priority] ?? 'neutral'} size={size} dot className={className}>
+      {PRIORITY_LABEL[priority] ?? humanise(priority)} priority
+    </Badge>
+  );
+}
+
+/** Where an analysis stands. FSL screens only. */
+export function AiStatusBadge({ status, size = 'sm', className }) {
+  const s = status ?? 'PENDING';
+  return (
+    <Badge variant={AI_STATUS_VARIANT[s] ?? 'neutral'} size={size} className={className}>
+      {s === 'PROCESSING' ? <Loader2 aria-hidden className="animate-spin" /> : <Sparkles aria-hidden />}
+      {AI_STATUS_LABEL[s] ?? humanise(s)}
+    </Badge>
   );
 }
 
 /**
- * The standing statement about what a review priority is, for the screens where it is
- * the subject. Printed once per screen, in full, and never abbreviated.
+ * One badge for a row: the review priority once the analysis is complete, otherwise
+ * where the analysis stands. Renders nothing without an analysis — which is what every
+ * non-laboratory response looks like.
  */
-export function PriorityLegend({ disclaimer, className }) {
-  return (
-    <p className={cn('text-[13px] leading-relaxed text-muted-foreground text-pretty', className)}>
-      <span className="font-medium text-foreground">Review Priority</span> is computed
-      automatically for every exhibit at the moment it is registered, from its own metadata,
-      the integrity of its upload, its media type and the gravity of the case. Nobody sets it
-      and nobody can raise their own work up the queue.{' '}
-      {disclaimer ?? TRIAGE_DISCLAIMER}
-    </p>
-  );
+export function AiAnalysisBadge({ analysis, size = 'sm', className }) {
+  if (!analysis) return null;
+  if (analysis.status === 'COMPLETED' && analysis.triagePriority) {
+    return <PriorityBadge priority={analysis.triagePriority} size={size} className={className} />;
+  }
+  return <AiStatusBadge status={analysis.status} size={size} className={className} />;
 }
 
-/**
- * Why an exhibit landed in its band, in the system's own words.
- *
- * The working, shown. A band on its own is a number to be argued with; a band with
- * "container and stream durations disagree by 19s" underneath it is a statement an
- * examiner — or a judge — can evaluate.
- */
-export function PriorityReasons({ triage, limit = 4, className }) {
-  const findings = triage?.indicators ?? [];
-  if (!findings.length) {
-    return (
-      <p className={cn('text-[13px] text-muted-foreground', className)}>
-        Nothing was observed about this file: its capture timestamp, device and content
-        credentials are all present and consistent.
-      </p>
-    );
-  }
-  const shown = findings.slice(0, limit);
-  const rest = findings.length - shown.length;
+function FieldLabel({ children }) {
+  return <p className="text-label font-medium text-muted-foreground">{children}</p>;
+}
 
+function IndicatorList({ items }) {
+  const list = (Array.isArray(items) ? items : []).filter((x) => typeof x === 'string' && x.trim());
+  if (!list.length) return null;
   return (
-    <ul className={cn('space-y-1.5', className)}>
-      {shown.map((text) => (
-        <li key={text} className="flex gap-2 text-[13px] leading-relaxed">
-          <span aria-hidden className="mt-[7px] size-1 shrink-0 rounded-full bg-muted-foreground" />
-          <span>{text}</span>
+    <ul className="flex flex-wrap gap-1.5">
+      {list.map((text, i) => (
+        <li key={`${i}-${text}`} className="max-w-full">
+          <Badge variant="neutral" size="sm" className="whitespace-normal text-left font-normal leading-snug">
+            {text}
+          </Badge>
         </li>
       ))}
-      {rest > 0 && (
-        <li className="pl-3 text-[13px] text-muted-foreground">and {rest} more</li>
-      )}
     </ul>
   );
 }
 
-// -------------------------------------------------------- forensic opinion ----
-
-const OPINION_STYLES = {
-  AUTHENTIC: 'border-ok/35 bg-ok-muted',
-  MANIPULATED: 'border-bad/35 bg-bad-muted',
-  INCONCLUSIVE: 'border-warn/35 bg-warn-muted',
-};
-
-const OPINION_TEXT = {
-  AUTHENTIC: 'text-ok',
-  MANIPULATED: 'text-bad',
-  INCONCLUSIVE: 'text-warn',
-};
-
 /**
- * The laboratory's authenticity opinion — the only authenticity claim in the system.
- * Always attributed, always dated, always carrying the s.79A notification reference.
+ * The AI analysis of one exhibit, for the laboratory. Formats what the server stored;
+ * computes nothing. Render it ONLY for an FSL session.
+ *
+ * @param {object} props
+ * @param {object} props.analysis        `evidence.aiAnalysis`
+ * @param {() => void} [props.onRetry]   FSL retry for a failed analysis
+ * @param {boolean} [props.retrying]
+ * @param {Error} [props.retryError]
+ * @param {boolean} [props.compact]      hide indicators and summary
  */
-export function ForensicOpinion({ forensic, className }) {
-  if (!forensic?.opinion) return null;
+export function AiAnalysisPanel({ analysis, onRetry, retrying = false, retryError = null, compact = false, className }) {
+  const status = analysis?.status ?? null;
 
   return (
-    <div className={cn('rounded-lg border p-4', OPINION_STYLES[forensic.opinion], className)}>
-      <div className="flex items-center gap-2">
-        <FlaskConical aria-hidden className={cn('size-4', OPINION_TEXT[forensic.opinion])} />
-        <p className="text-sm font-semibold">
-          Laboratory opinion — {humanise(forensic.opinion)}
-        </p>
+    <section className={cn('space-y-4 rounded-lg border border-dashed p-4', className)} aria-label="AI analysis">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="flex items-center gap-2 text-section text-foreground">
+          <Sparkles aria-hidden className="size-4 text-muted-foreground" />
+          AI analysis
+        </h3>
+        {status && <AiStatusBadge status={status} />}
       </div>
-      <p className="mt-1.5 text-[13px] text-muted-foreground">
-        {forensic.labName ?? 'Forensic Science Laboratory'}
-        {forensic.examinerName ? ` · ${forensic.examinerName}` : ''}
-        {forensic.section79ARef ? ` · s.79A ${forensic.section79ARef}` : ''}
-        {forensic.reportedAt ? ` · ${fmtDate(forensic.reportedAt)}` : ''}
-      </p>
-      {forensic.examinationSummary && (
-        <p className="mt-2 whitespace-pre-line text-[13px] leading-relaxed">
-          {forensic.examinationSummary}
-        </p>
+
+      {!analysis && <p className="text-meta text-muted-foreground">Not requested.</p>}
+
+      {(status === 'PENDING' || status === 'PROCESSING') && (
+        <p className="text-meta text-muted-foreground">{status === 'PENDING' ? 'Queued.' : 'Analysing…'}</p>
       )}
-      <p className="mt-2.5 text-[12px] leading-relaxed text-muted-foreground">
-        Signed by the examining laboratory. It is not produced by, and cannot be produced by,
-        any automated step in this system.
-      </p>
+
+      {(status === 'FAILED' || status === 'UNSUPPORTED') && (
+        <AiFailure analysis={analysis} onRetry={onRetry} retrying={retrying} retryError={retryError} />
+      )}
+
+      {status === 'COMPLETED' && <AiResult analysis={analysis} compact={compact} />}
+
+      {analysis && <p className="border-t pt-3 text-label text-muted-foreground">{AI_DISCLAIMER}</p>}
+    </section>
+  );
+}
+
+function AiFailure({ analysis, onRetry, retrying, retryError }) {
+  const failed = analysis.status === 'FAILED';
+  const code = analysis.error?.code;
+  // Our own sentence for a known code first: a stored message could name a vendor.
+  const message =
+    (code && REASON_TEXT[code]) ||
+    (failed ? 'The analysis did not complete.' : 'This file type cannot be analysed.');
+  const canRetry = Boolean(onRetry) && (failed || analysis.error?.retryable === true);
+
+  return (
+    <div className="space-y-3">
+      <p className="text-meta text-foreground">{message}</p>
+      {code && <p className="font-mono text-[11px] text-muted-foreground">{code}</p>}
+      {canRetry && (
+        <Button size="sm" variant="outline" onClick={onRetry} disabled={retrying}>
+          {retrying ? <Loader2 className="animate-spin" /> : <RotateCcw />}
+          Retry
+        </Button>
+      )}
+      {retryError && <Denial error={retryError} heading="Retry not accepted" />}
     </div>
   );
 }
 
-/** The forensic state of an exhibit as a single word, for a list row. */
-const FORENSIC_BADGE = {
-  AUTHENTIC: 'border-ok/35 bg-ok-muted text-ok',
-  MANIPULATED: 'border-bad/35 bg-bad-muted text-bad',
-  INCONCLUSIVE: 'border-warn/35 bg-warn-muted text-warn',
-};
-
-export function ForensicBadge({ forensic, className }) {
-  const opinion = forensic?.opinion ?? null;
-  const label = opinion ? humanise(opinion) : 'Awaiting review';
+function AiResult({ analysis, compact }) {
+  const [showSummary, setShowSummary] = useState(false);
+  const score = Number.isFinite(analysis.deepfakeScore)
+    ? Math.max(0, Math.min(100, Math.round(analysis.deepfakeScore)))
+    : null;
+  const assessment =
+    ASSESSMENT[analysis.deepfakeAssessment] ??
+    (analysis.deepfakeAssessment ? { label: humanise(analysis.deepfakeAssessment), variant: 'neutral' } : null);
 
   return (
-    <Badge
-      variant="outline"
-      className={cn(
-        'rounded-full px-2.5 py-0 text-[11px] font-medium',
-        opinion ? FORENSIC_BADGE[opinion] : 'border-border bg-muted text-muted-foreground',
-        className
+    <div className="space-y-4">
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="space-y-1.5">
+          <FieldLabel>Assessment</FieldLabel>
+          {assessment ? (
+            <Badge variant={assessment.variant} dot>
+              {assessment.label}
+            </Badge>
+          ) : (
+            <span className="text-meta text-muted-foreground">—</span>
+          )}
+        </div>
+        <div className="space-y-1.5">
+          <FieldLabel>Manipulation score</FieldLabel>
+          {score === null ? (
+            <span className="text-meta text-muted-foreground">—</span>
+          ) : (
+            <div className="flex items-center gap-3">
+              <span className="text-sm font-semibold tabular text-foreground">{score}/100</span>
+              <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-muted" aria-hidden>
+                <span className="block h-full rounded-full bg-foreground/60" style={{ width: `${score}%` }} />
+              </span>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {analysis.analysisDescription && (
+        <div className="space-y-1">
+          <FieldLabel>Reasoning</FieldLabel>
+          <p className="text-meta text-foreground/90">{analysis.analysisDescription}</p>
+        </div>
       )}
-    >
-      {label}
+
+      {!compact && Array.isArray(analysis.detectedIndicators) && analysis.detectedIndicators.length > 0 && (
+        <div className="space-y-1.5">
+          <FieldLabel>Indicators</FieldLabel>
+          <IndicatorList items={analysis.detectedIndicators} />
+        </div>
+      )}
+
+      <div className="grid gap-4 sm:grid-cols-2">
+        <div className="space-y-1.5">
+          <FieldLabel>Review priority</FieldLabel>
+          <PriorityBadge priority={analysis.triagePriority} />
+          {analysis.priorityReason && <p className="text-meta text-muted-foreground">{analysis.priorityReason}</p>}
+        </div>
+        <div className="space-y-1.5">
+          <FieldLabel>FSL review</FieldLabel>
+          {typeof analysis.fslReviewRecommended === 'boolean' ? (
+            <Badge variant={analysis.fslReviewRecommended ? 'warning' : 'muted'} size="sm" dot>
+              {analysis.fslReviewRecommended ? 'Recommended' : 'Not required'}
+            </Badge>
+          ) : (
+            <span className="text-meta text-muted-foreground">—</span>
+          )}
+          {analysis.fslReviewReason && <p className="text-meta text-muted-foreground">{analysis.fslReviewReason}</p>}
+        </div>
+      </div>
+
+      {!compact && analysis.evidenceSummary && (
+        <div>
+          <button
+            type="button"
+            onClick={() => setShowSummary((v) => !v)}
+            aria-expanded={showSummary}
+            className="flex items-center gap-1 text-label font-medium text-muted-foreground hover:text-foreground"
+          >
+            Summary
+            <ChevronDown aria-hidden className={cn('size-3.5 transition-transform', showSummary && 'rotate-180')} />
+          </button>
+          {showSummary && <p className="mt-1 text-meta text-muted-foreground">{analysis.evidenceSummary}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------- FSL verdict ----
+
+const OPINION = {
+  AUTHENTIC: { label: 'Authentic', variant: 'success', box: 'border-ok/30 bg-ok-muted', icon: 'text-ok' },
+  MANIPULATED: { label: 'Manipulated', variant: 'danger', box: 'border-bad/30 bg-bad-muted', icon: 'text-bad' },
+  INCONCLUSIVE: { label: 'Inconclusive', variant: 'warning', box: 'border-warn/30 bg-warn-muted', icon: 'text-warn' },
+};
+
+/** The laboratory's verdict — the official finding. Attributed and dated. */
+export function ForensicOpinion({ forensic, className }) {
+  if (!forensic?.opinion) return null;
+  const o = OPINION[forensic.opinion] ?? {
+    label: humanise(forensic.opinion),
+    box: 'border-border bg-muted/50',
+    icon: 'text-muted-foreground',
+  };
+
+  return (
+    <section className={cn('space-y-1.5 rounded-lg border p-4', o.box, className)} aria-label="FSL verdict">
+      <p className="flex items-center gap-2 text-section text-foreground">
+        <FlaskConical aria-hidden className={cn('size-4', o.icon)} />
+        FSL verdict · {o.label}
+      </p>
+      <p className="text-meta text-muted-foreground">
+        {[
+          forensic.labName ?? 'Forensic Science Laboratory',
+          forensic.examinerName,
+          forensic.section79ARef && `s.79A ${forensic.section79ARef}`,
+          forensic.reportedAt && fmtDate(forensic.reportedAt),
+        ]
+          .filter(Boolean)
+          .join(' · ')}
+      </p>
+      {forensic.examinationSummary && (
+        <p className="whitespace-pre-line pt-1 text-meta text-foreground/90">{forensic.examinationSummary}</p>
+      )}
+    </section>
+  );
+}
+
+/** The FSL verdict as a single badge, for a list row. */
+export function ForensicBadge({ forensic, size = 'sm', className }) {
+  const opinion = forensic?.opinion ?? null;
+  if (!opinion) {
+    return (
+      <Badge variant="muted" size={size} className={className}>
+        Not examined
+      </Badge>
+    );
+  }
+  const o = OPINION[opinion];
+  return (
+    <Badge variant={o?.variant ?? 'neutral'} size={size} dot className={className}>
+      FSL: {o?.label ?? humanise(opinion)}
     </Badge>
   );
 }
@@ -227,10 +330,8 @@ export function ForensicBadge({ forensic, className }) {
 // -------------------------------------------------------------- refusals ----
 
 /**
- * A refusal, rendered so a human can act on it.
- *
- * The machine code stays visible because it is what an auditor cites; the sentence
- * underneath is what the user actually reads.
+ * A refusal, rendered so a human can act on it: the machine code (what an auditor
+ * cites) and a plain sentence (what the user reads).
  */
 export function Denial({ error, heading = 'Access denied', className }) {
   if (!error) return null;
@@ -259,7 +360,7 @@ export function Denial({ error, heading = 'Access denied', className }) {
   );
 }
 
-/** A neutral note. Used where an empty result or a constraint needs explaining. */
+/** A neutral note. */
 export function Note({ children, tone = 'info', className }) {
   const Icon = tone === 'warn' ? AlertTriangle : Info;
   const tones = {

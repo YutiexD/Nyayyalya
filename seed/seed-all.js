@@ -40,12 +40,10 @@ const {
  * One direct connection, used ONLY to manufacture the gap-detection demo item below.
  *
  * Every other write in this script goes through the real HTTP API, on purpose — see
- * the file header. This is the one deliberate exception, and it exists for the same
- * reason `custody.test.js` uses it: the two-scan transfer API *correctly* refuses to
- * produce an illegal state jump, so the only way such a record exists is the way it
- * would in reality — data that arrived some other way (a migration, a direct write,
- * an event that never got entered). Manufacturing that is the whole point of this
- * step; going through the API cannot do it.
+ * the file header. This is the one deliberate exception: the movement API correctly
+ * refuses to leave holes in an article's history, so the only way such a record exists
+ * is the way it would in reality — an event that arrived some other way. Manufacturing
+ * that is the whole point of this step; going through the API cannot do it.
  */
 await connectMongo({ uri: env.MONGO_URI, dbName: env.MONGO_DB_CORE, logger: { info() {}, warn() {}, error: console.error } });
 
@@ -136,11 +134,10 @@ const idOf = (o) =>
 /**
  * A valid JPEG — the server sniffs magic bytes, so the header must be real.
  *
- * Padded to a plausible size on purpose. A 500-byte "photograph" trips the triage
- * model's "unusually small for a camera original" finding, which is correct of a
- * 500-byte photograph and wrong about the exhibit this stands in for — and it
- * flattened every seeded exhibit into the same band, so the demo could not show the
- * scale it was demonstrating.
+ * These are synthetic placeholders. Gemini analyses whatever bytes it is given and
+ * will say, truthfully, that a padded placeholder shows nothing it can assess. For a
+ * demo that shows a real deepfake assessment, upload a real photograph or clip on
+ * stage (beat 3) — the seed never invents an AI result for the files it creates.
  */
 const JPEG_PAD = 420 * 1024;
 const jpeg = (marker, bytes = JPEG_PAD) =>
@@ -206,7 +203,7 @@ async function provision(authorityId) {
 }
 
 /** Upload as a browser would: hash locally, sign the hash, send both. */
-async function upload(actor, caseId, { title, bytes, sourceType = 'MOBILE', metadata, filename, contentType }) {
+async function upload(actor, caseId, { title, bytes, sourceType = 'MOBILE', filename, contentType }) {
   const hash = sha256(bytes);
   const form = new FormData();
   form.set('caseId', caseId);
@@ -219,7 +216,6 @@ async function upload(actor, caseId, { title, bytes, sourceType = 'MOBILE', meta
   form.set('colour', 'Black');
   form.set('serialNumber', 'R58T90ABCD');
   form.set('imeiOrUid', '354820100123456');
-  if (metadata) form.set('metadata', JSON.stringify(metadata));
   form.set('file', new Blob([bytes], { type: contentType ?? 'image/jpeg' }), filename ?? 'exhibit.jpg');
 
   const res = await api('POST', '/api/evidence/upload', { token: actor.token, form });
@@ -294,14 +290,11 @@ const sho = await provision('UP-GZB-4402');
 const store = await provision('UP-GZB-4455');
 const sp = await provision('UP-GZB-9001');
 const examiner = await provision('FSL-LKO-0091');
+// The court. One role, one login, every case listed before any court in Ghaziabad —
+// the Sessions court (FIR 0123/2026) and the Magistrate (FIR 0124/2026) alike.
 const judge = await provision('UP-JUD-2291');
 const advocateOnRecord = await provision('UP/1234/2015');
 const advocateNotOnRecord = await provision('UP/9876/2019');
-// The Magistrate bench (FIR 0124/2026 is routed there when its chargesheet is filed)
-// and the two evidence rooms, which receive articles produced in court.
-const magistrate = await provision('UP-JUD-1180');
-const evidenceRoom = await provision('UP-GZB-EVC-01');
-const magistrateEvidenceRoom = await provision('UP-GZB-EVC-02');
 
 // ------------------------------------------------------------------------ case
 
@@ -329,26 +322,23 @@ stage('Computing jurisdiction');
 
 stage('Uploading exhibits (browser hash + ECDSA signature, verified server-side)');
 
-// LOW — clean provenance: a capture timestamp, a named device, content credentials.
+// Every upload is queued for Gemini deepfake analysis on arrival. The seed does not
+// wait for, or print, an AI result — the analysis status is shown on each screen.
 const ex1 = await upload(io, caseId, {
   title: 'CCTV still — approach corridor',
-  bytes: jpeg('EX-001 CCTV still, clean provenance'),
+  bytes: jpeg('EX-001 CCTV still'),
   sourceType: 'DVR',
-  metadata: { dateTimeOriginal: '2026-01-04T21:14:02Z', make: 'Hikvision', model: 'DS-2CD', hasC2PA: true },
 });
-say(`   ${ex1.evidence.exhibitCode}  triage ${ex1.evidence.triage.priority.padEnd(8)} CCTV still`);
+say(`   ${ex1.evidence.exhibitCode}  AI analysis ${ex1.evidence.aiAnalysis?.status ?? '—'}  CCTV still`);
 
-// CRITICAL — an editing-software tag AND a nineteen-second disagreement between the
-// container and the stream. Two strong findings on one file, on a POCSO case.
 const ex2 = await upload(io, caseId, {
   title: 'Mobile video — recovered from handset',
-  bytes: mp4('EX-002 mobile video, several manipulation indicators'),
+  bytes: mp4('EX-002 mobile video'),
   sourceType: 'MOBILE',
   filename: 'VID-20260104-WA0007.mp4',
   contentType: 'video/mp4',
-  metadata: { software: 'Adobe Photoshop 25.0', containerDurationSec: 31, streamDurationSec: 12 },
 });
-say(`   ${ex2.evidence.exhibitCode}  triage ${ex2.evidence.triage.priority.padEnd(8)} mobile video  → will go to FSL`);
+say(`   ${ex2.evidence.exhibitCode}  AI analysis ${ex2.evidence.aiAnalysis?.status ?? '—'}  mobile video  → will go to FSL`);
 
 const ex3 = await upload(io, caseId, {
   title: 'Witness statement',
@@ -356,30 +346,23 @@ const ex3 = await upload(io, caseId, {
   sourceType: 'COMPUTER',
   filename: 'statement.pdf',
   contentType: 'application/pdf',
-  metadata: { dateTimeOriginal: '2026-01-05T10:00:00Z', hasC2PA: true, make: 'HP', model: 'ScanJet' },
 });
-say(`   ${ex3.evidence.exhibitCode}  triage ${ex3.evidence.triage.priority.padEnd(8)} witness statement`);
+say(`   ${ex3.evidence.exhibitCode}  AI analysis ${ex3.evidence.aiAnalysis?.status ?? '—'}  witness statement`);
 
-// MEDIUM — a real photograph with a capture timestamp, but no device recorded and no
-// content credentials: provenance gaps, nothing that says it was edited.
 const ex4 = await upload(io, caseId, {
   title: 'Seized phone — photograph of device',
   bytes: jpeg('EX-004 THE TAMPER TARGET — modify this file on stage'),
   sourceType: 'MOBILE',
-  metadata: { dateTimeOriginal: '2026-01-04T22:40:00Z' },
 });
-say(`   ${ex4.evidence.exhibitCode}  triage ${ex4.evidence.triage.priority.padEnd(8)} seized phone  ← THE TAMPER TARGET`);
+say(`   ${ex4.evidence.exhibitCode}  AI analysis ${ex4.evidence.aiAnalysis?.status ?? '—'}  seized phone  ← THE TAMPER TARGET`);
 
-// MEDIUM — a forwarded copy with no timestamp and no device, but nothing that says
-// it was edited. The band between "look at this now" and "nothing here".
 const ex5 = await upload(io, caseId, {
   title: 'Screenshot shared by a witness',
-  bytes: jpeg('EX-005 forwarded screenshot, provenance gaps only'),
+  bytes: jpeg('EX-005 forwarded screenshot'),
   sourceType: 'OTHER',
   filename: 'IMG-20260105-WA0031.jpg',
-  metadata: {},
 });
-say(`   ${ex5.evidence.exhibitCode}  triage ${ex5.evidence.triage.priority.padEnd(8)} forwarded screenshot`);
+say(`   ${ex5.evidence.exhibitCode}  AI analysis ${ex5.evidence.aiAnalysis?.status ?? '—'}  forwarded screenshot`);
 
 // --------------------------------------------------------------------- custody
 
@@ -401,32 +384,21 @@ const goodItem = expect(
 );
 say(`   ${goodItem.item.itemCode}  Samsung A54  seal SEAL-GZB-88231`);
 
-// Move it SEIZED → IN_STORE through the real two-scan handshake.
-{
-  const initiated = expect(
-    await api('POST', `/api/custody/items/${idOf(goodItem.item)}/initiate-transfer`, {
-      token: io.token,
-      body: {
-        toUserId: store.user.userId,
-        reason: 'Deposit into the station store after seizure',
-        toStatus: 'IN_STORE',
-        toLocation: 'MALKHANA',
-      },
-    }),
-    OK,
-    'initiate custody transfer'
-  );
-
-  expect(
-    await api('POST', `/api/custody/items/${idOf(goodItem.item)}/accept-transfer`, {
-      token: store.token,
-      body: { transferToken: initiated.transferToken, sealIntact: true },
-    }),
-    OK,
-    'accept custody transfer'
-  );
-  say('   transferred SEIZED → IN_STORE (two-scan handshake, seal intact)');
-}
+// Record its deposit in the station store: one movement, one ledger entry.
+expect(
+  await api('POST', `/api/custody/items/${idOf(goodItem.item)}/move`, {
+    token: store.token,
+    body: {
+      toStatus: 'IN_STORE',
+      reason: 'Deposited in the station store after seizure',
+      custodian: 'Station store, Kavi Nagar — HC Suresh Yadav',
+      sealIntact: true,
+    },
+  }),
+  OK,
+  'record custody movement'
+);
+say('   movement recorded SEIZED → IN_STORE (seal intact)');
 
 const brokenItem = expect(
   await api('POST', '/api/custody/items', {
@@ -444,13 +416,10 @@ const brokenItem = expect(
 );
 say(`   ${brokenItem.item.itemCode}  USB drive  ← seized, then an out-of-band FSL move (the gap demo)`);
 
-// Manufacture the actual gap. The two-scan transfer API correctly REFUSES an illegal
-// SEIZED → AT_FSL jump — that refusal is itself tested — so this writes the same kind
-// of out-of-band ledger event `custody.test.js` uses to prove the detector works: one
-// that arrived some other way, skipping the store deposit and leaving a custody
-// sequence gap. The CustodyItem document is deliberately left untouched (still
-// SEIZED), so its own record and the ledger's account of it disagree — which is
-// itself a finding (STATE_DIVERGENCE).
+// Manufacture the actual gap: an out-of-band ledger event that arrived some other way,
+// numbered as custody event 4 where 2 was due. The CustodyItem document is left
+// untouched (still SEIZED), so its record and the ledger's account disagree — two
+// findings the gap report names: SEQUENCE_DISCONTINUITY and STATE_DIVERGENCE.
 await appendEvent({
   eventType: LEDGER_EVENT.CUSTODY_TRANSFERRED,
   caseId,
@@ -467,7 +436,7 @@ await appendEvent({
     toLocation: CUSTODY_LOCATION.FSL,
   },
 });
-say('   out-of-band ledger event written: SEIZED → AT_FSL, skipping IN_STORE and the store deposit');
+say('   out-of-band ledger event written: two custody events missing, record and ledger disagree');
 
 // ------------------------------------------------------------------------- FSL
 
@@ -562,85 +531,40 @@ stage('Advocate files a vakalatnama; the court takes them on record');
     'accept vakalatnama'
   );
   say(`   accepted by the court · court register: ${accepted.courtRegister} · on record as ${accepted.grant?.role}`);
+  say(`   case file and every exhibit now open to counsel automatically (${accepted.access ?? 'read-only'})`);
   say('   UP/9876/2019 has filed nothing, so stays off record — file one live in the demo');
-}
-
-// ------------------------------------------------------------------ disclosure
-
-stage('The court shares the case file with counsel on record');
-{
-  // One decision by the court that holds the case: the set is every exhibit on it,
-  // minus anything the court withholds with a ground on the record. It is composed,
-  // ruled on and served in one act — and still written to the ledger as the three
-  // facts it legally is.
-  const shared = expect(
-    await api('POST', `/api/disclosure/${caseId}/share`, {
-      token: judge.token,
-      body: {
-        withheldItems: [
-          {
-            itemId: idOf(ex3.evidence),
-            reason: 'Witness statement withheld pending a protection application under BNSS s.398.',
-          },
-        ],
-        maskVictimIdentity: true,
-      },
-    }),
-    [200, 201],
-    'share the case file'
-  );
-  say(`   ${shared.pack.exhibitCount} exhibits served · 1 withheld with a ground on the record`);
-  say(`   served on ${shared.servedNow?.length ?? 0} recipient(s), each with a unique watermark`);
 }
 
 // ----------------------------------------------------------------- certificate
 
-stage('Generating a BSA s.63 certificate for the CCTV still');
+stage('Checking the automatic BSA s.63 certificates');
 let verifyLink = null;
 {
-  const cert = await api('POST', '/api/certificates/generate', {
-    token: io.token,
-    body: { evidenceId: idOf(ex1.evidence) },
-  });
-
-  if (cert.status === 201) {
-    const c = cert.body.certificate;
-    // The deponent signs Part A over the canonical body hash, as the browser does.
-    const signed = await api('POST', `/api/certificates/${c.certificateId}/sign-part-a`, {
-      token: io.token,
-      body: { signature: io.device.sign(c.bodyHash) },
-    });
-    say(`   certificate generated · Part A complete · Part A ${signed.status === 200 ? 'signed by the IO' : `NOT signed (${signed.status})`}`);
-    verifyLink = c.verificationUrl;
-  } else if (cert.status === 400) {
-    // Refusing to generate an incomplete certificate is a feature, not a failure.
-    say(`   certificate REFUSED (by design) — missing: ${JSON.stringify(cert.body.error?.details ?? {})}`);
-  } else {
-    say(`   (certificate returned ${cert.status})`);
+  // Every upload issued and system-signed its certificate on arrival. Nobody generates
+  // or signs one by hand; this only confirms each exhibit has exactly one.
+  for (const e of [ex1, ex2, ex3, ex4, ex5]) {
+    const listed = expect(
+      await api('GET', `/api/certificates?evidenceId=${idOf(e.evidence)}`, { token: io.token }),
+      200,
+      `certificate for ${e.evidence.exhibitCode}`
+    );
+    const active = listed.active;
+    if (!active) fail(`no certificate was issued for ${e.evidence.exhibitCode}`);
+    if (e === ex1) verifyLink = active.verificationUrl;
+    say(`   ${e.evidence.exhibitCode}  certificate ${active.status} · signed by ${active.signedBy}`);
   }
-}
 
-stage('Issuing a certificate for the mobile video — both parties sign it');
-let verifyLinkBoth = null;
-{
-  // The mobile video HAS a laboratory report, so its certificate carries Part B. Part A
-  // is signed by the investigating officer (the deponent) here; Part B is left for the
-  // examiner to sign LIVE on the Lab screen — the second party to the certificate.
-  const cert = await api('POST', '/api/certificates/generate', {
-    token: io.token,
-    body: { evidenceId: idOf(ex2.evidence) },
-  });
-  if (cert.status === 201) {
-    const c = cert.body.certificate;
-    const signed = await api('POST', `/api/certificates/${c.certificateId}/sign-part-a`, {
-      token: io.token,
-      body: { signature: io.device.sign(c.bodyHash) },
-    });
-    verifyLinkBoth = c.verificationUrl;
-    say(`   Part B complete: ${c.partBComplete} · Part A ${signed.status === 200 ? 'signed by the IO' : `NOT signed (${signed.status})`} · Part B awaits the examiner (Lab → EX-…-002 → Sign Part B)`);
-  } else {
-    say(`   (certificate returned ${cert.status}: ${JSON.stringify(cert.body.error ?? {})})`);
-  }
+  const certId = expect(
+    await api('GET', `/api/certificates?evidenceId=${idOf(ex1.evidence)}`, { token: io.token }),
+    200,
+    'certificate for EX-001'
+  ).active.certificateId;
+  const verified = expect(
+    await api('POST', `/api/certificates/${certId}/verify`, { token: examiner.token }),
+    200,
+    'verify certificate'
+  );
+  say(`   one-click verification by the examiner: ${verified.result}`);
 }
 
 // --------------------------------------------------------------- denial + anchor
@@ -721,7 +645,6 @@ stage('Writing demo identities');
       'device uses POST /api/auth/rotate-key instead.',
     accounts: [
       io, sho, store, sp, examiner, judge, advocateOnRecord, advocateNotOnRecord,
-      magistrate, evidenceRoom, magistrateEvidenceRoom,
     ].map(
       (a) => ({
         authorityId: a.authorityId,
@@ -744,34 +667,38 @@ console.log('Demo state ready.\n');
 console.log(`  Case          FIR ${demoCase.firNumber} · ${demoCase.stationCode}`);
 // The whole review-priority scale, on one case. If these are not four different
 // bands the demo cannot show what it is demonstrating, so they are printed.
-console.log('  Exhibits      (review priority, assigned automatically at ingest)');
+console.log('  Exhibits      (each queued for Gemini deepfake analysis on upload)');
 for (const e of [ex1, ex2, ex3, ex4, ex5]) {
   const ev = e.evidence;
-  console.log(`                ${ev.exhibitCode}  ${String(ev.triage?.priority ?? '—').padEnd(9)} ${ev.title}`);
+  console.log(`                ${ev.exhibitCode}  ${ev.title}`);
 }
 if (openCase) {
   console.log(`  Upload into   FIR ${openCase.firNumber} — still under investigation (beat 3)`);
 }
 console.log(`  Tamper target ${ex4.evidence.exhibitCode}  storage key:`);
 console.log(`                ${ex4.evidence.storageKey}`);
-console.log(`  Custody       ${goodItem.item.itemCode} (complete)   ${brokenItem.item.itemCode} (gap)`);
 console.log('  Unregistered  FIR 0125/2026 — in the police directory, NOT yet a case.');
 console.log('                Create the case from it live on stage; that is beat 2.');
 console.log('  On record     UP/1234/2015 (filed + accepted through Lexx)');
 console.log('  Off record    UP/9876/2019 — file a vakalatnama live from the advocate screen');
 if (verifyLink) {
-  console.log('  Verify link   (s.63 certificate for EX-…-001 — paste into /verify, or scan its QR)');
+  console.log('  Verify link   (s.63 certificate for EX-…-001 — open in /verify, one click)');
   console.log(`                ${verifyLink}`);
 }
-if (verifyLinkBoth) {
-  console.log('  Two parties   (EX-…-002: Part A signed by the IO; examiner FSL-LKO-0091 signs Part B on the Lab screen)');
-  console.log(`                ${verifyLinkBoth}`);
+// The permanent QR label printed for the physical article. A phone can only open it if
+// PUBLIC_WEB_URL is an address the phone can reach (the LAN IP or a tunnel, not localhost).
+console.log('  QR label (scan to verify lifecycle)');
+for (const e of [ex1, ex4]) {
+  console.log(`                ${e.evidence.exhibitCode}  ${e.evidence.label?.url ?? '(no label returned)'}`);
 }
-console.log('  Other courts  CJM-01: judge UP-JUD-1180, evidence room UP-GZB-EVC-02 · Sessions evidence room UP-GZB-EVC-01');
+if (/localhost|127\.0\.0\.1/.test(env.PUBLIC_WEB_URL)) {
+  console.log('                note: PUBLIC_WEB_URL is localhost — set it to this machine\'s LAN address for phones to open a scanned label');
+}
+console.log('  Court         UP-JUD-2291 — one Court role for every court in the district (Sessions and Magistrate)');
 console.log('  Everything else to paste:  node scripts/demo-lookup.js');
 console.log(`\n  Password for every demo account:  ${PASSWORD}`);
 console.log('  OTPs are returned by the API while DEMO_ECHO_OTP=true.\n');
-console.log('  Next:  see docs/DEMO_SCRIPT.md — the five-minute run is the first half.');
+console.log('  Next:  see PRESENTATION.md — the five-minute run, beat by beat.');
 console.log('='.repeat(70) + '\n');
 
 await sharedMongoose.disconnect();

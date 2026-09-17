@@ -7,12 +7,14 @@
  * reverse order. A process that accepts requests before its indexes exist would
  * silently lose the unique constraints that the ledger's integrity depends on.
  */
-import env from './config/env.js';
+import env, { assertGeminiConfigured } from './config/env.js';
 import { createApp } from './app.js';
 import { connectMongo, syncIndexes, disconnectMongo } from '../shared/mongo.js';
 import { allModels } from './models/index.js';
 import { startAnchorScheduler, stopAnchorScheduler } from './services/anchor.js';
 import { setSchedulerState } from './services/health.js';
+import { runMigrations } from './services/migrations.js';
+import { resumePendingAnalyses } from './services/ai/analysisService.js';
 import logger from './utils/logger.js';
 import fs from 'node:fs';
 
@@ -22,6 +24,11 @@ async function main() {
     'starting lexx-core'
   );
 
+  // Every exhibit is analysed by Gemini on ingest. Without a key and a model the API
+  // cannot do that, and it says so now rather than failing on the first upload.
+  assertGeminiConfigured();
+  logger.info({ geminiModel: env.GEMINI_MODEL }, 'gemini configured');
+
   fs.mkdirSync(env.STORAGE_DIR, { recursive: true });
 
   await connectMongo({
@@ -30,6 +37,9 @@ async function main() {
     logger,
     serverSelectionMs: env.MONGO_SERVER_SELECTION_MS,
   });
+  // Bring records written by earlier versions into line BEFORE indexes are built: the
+  // one-active-certificate index cannot be created while duplicates exist.
+  await runMigrations(logger);
   await syncIndexes(allModels, logger);
 
   // The batcher runs only after indexes exist — it writes AnchorBatch rows whose
@@ -48,6 +58,10 @@ async function main() {
   const app = createApp();
   const server = app.listen(env.PORT, () => {
     logger.info({ port: env.PORT }, 'lexx-core listening');
+    // Pick up analyses still pending from before a restart, or queued by migration.
+    resumePendingAnalyses()
+      .then((queued) => logger.info({ queued }, 'gemini analyses queued'))
+      .catch((err) => logger.error({ err: err.message }, 'could not resume gemini analyses'));
   });
 
   // Slowloris protection.

@@ -22,7 +22,6 @@ import { Case } from '../../models/Case.js';
 import { Evidence } from '../../models/Evidence.js';
 import { CustodyItem } from '../../models/CustodyItem.js';
 import { CaseAccessGrant } from '../../models/CaseAccessGrant.js';
-import { DisclosurePack } from '../../models/DisclosurePack.js';
 import { AuditEvent } from '../../models/AuditEvent.js';
 import { User } from '../../models/User.js';
 import { createApp } from '../../app.js';
@@ -32,7 +31,6 @@ import {
   CASE_STAGE,
   ROLE,
   GRANT_BASIS,
-  DISCLOSURE_STATUS,
   DENY_REASON,
   DECISION,
   SOURCE_TYPE,
@@ -186,26 +184,6 @@ const grantAdvocate = (caseDoc, userKey, overrides = {}) =>
       })
     );
 
-async function servePack(caseDoc, exhibitIds, userKey) {
-  const u = await User.findOne({ authorityId: ID[userKey] }).lean();
-  const io = await User.findOne({ authorityId: ID.IO }).lean();
-  return DisclosurePack.create({
-    caseId: caseDoc._id,
-    exhibitIds,
-    preparedBy: io._id,
-    status: DISCLOSURE_STATUS.SERVED,
-    servedOn: new Date(),
-    servedTo: [
-      {
-        userId: u._id,
-        servedAt: new Date(),
-        watermarkToken: 'wm-token-123',
-        watermarkLabel: 'Adv. Priya Sharma · UP/1234/2015 · 2026-09-04',
-      },
-    ],
-  });
-}
-
 const getCase = (id, who) => auth(request(server).get(`/api/cases/${id}`), who);
 const getEvidence = (id, who) => auth(request(server).get(`/api/evidence/${id}`), who);
 
@@ -342,41 +320,48 @@ describe('POLICE — District SP (read-only oversight)', () => {
  * actually end up holding the article, rather than by requiring a separate account
  * that every handover had to queue behind.
  */
-describe('POLICE — the station store', () => {
-  it('refuses to make the case IO the store keeper for their own evidence', async () => {
-    const c = await makeCase();
-    const item = await makeCustodyItem(c, 'SHO', 'UP-GZB-KVN', CUSTODY_STATUS.SEIZED);
-    const io = await User.findOne({ authorityId: ID.IO }).lean();
-
-    const res = await auth(
-      request(server).post(`/api/custody/items/${item._id}/initiate-transfer`),
-      'SHO'
-    ).send({
-      toUserId: String(io._id),
-      reason: 'Deposit to the station store',
-      toStatus: CUSTODY_STATUS.IN_STORE,
-      toLocation: CUSTODY_LOCATION.MALKHANA,
+describe('POLICE — physical custody', () => {
+  const moveAs = (who, itemId, toStatus) =>
+    auth(request(server).post(`/api/custody/items/${itemId}/move`), who).send({
+      toStatus,
+      reason: 'Recorded in the authorization matrix',
+      sealIntact: true,
     });
 
-    expect(res.status).toBe(403);
-    expect(res.body.error.code).toBe(DENY_REASON.IO_CANNOT_HOLD_OWN_CASE_EVIDENCE);
-  });
-
-  it('does not offer the case IO as a recipient for the station store', async () => {
+  it('lets any officer at the station record a movement — there is no second scan to wait for', async () => {
     const c = await makeCase();
     const item = await makeCustodyItem(c, 'SHO', 'UP-GZB-KVN', CUSTODY_STATUS.SEIZED);
-    const io = await User.findOne({ authorityId: ID.IO }).lean();
+    const res = await moveAs('IO', item._id, CUSTODY_STATUS.IN_STORE);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.item.status).toBe(CUSTODY_STATUS.IN_STORE);
+  });
 
-    const res = await auth(
-      request(server).get(`/api/custody/items/${item._id}/recipients`),
-      'SHO'
-    );
-    expect(res.status).toBe(200);
+  it('refuses an officer from another station', async () => {
+    const c = await makeCase({ firNumber: '0777/2026', stationCode: 'UP-GZB-OTHER' });
+    const item = await makeCustodyItem(c, 'SHO', 'UP-GZB-OTHER', CUSTODY_STATUS.SEIZED);
+    const res = await moveAs('IO', item._id, CUSTODY_STATUS.IN_STORE);
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe(DENY_REASON.OUT_OF_JURISDICTION);
+  });
 
-    const offered = (res.body.candidates ?? []).find((x) => x.userId === String(io._id));
-    // Either absent altogether, or present without IN_STORE among the states they
-    // could receive it into. Never offered for the one thing they may not do.
-    expect(offered?.forStates ?? []).not.toContain(CUSTODY_STATUS.IN_STORE);
+  it('keeps the District SP read-only over custody', async () => {
+    const c = await makeCase();
+    const item = await makeCustodyItem(c, 'SHO', 'UP-GZB-KVN', CUSTODY_STATUS.SEIZED);
+    const res = await moveAs('SP', item._id, CUSTODY_STATUS.IN_STORE);
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe(DENY_REASON.READ_ONLY_ROLE);
+  });
+
+  it('refuses the laboratory and the court an article that is not with them', async () => {
+    const c = await makeCase({ stage: CASE_STAGE.CHARGESHEET_FILED, courtId: 'UP-GZB-SESS-02' });
+    const item = await makeCustodyItem(c, 'SHO', 'UP-GZB-KVN', CUSTODY_STATUS.IN_STORE);
+
+    const court = await moveAs('JUDGE', item._id, CUSTODY_STATUS.RETURNED);
+    expect(court.status).toBe(403);
+    expect(court.body.error.code).toBe(DENY_REASON.ARTICLE_NOT_WITH_YOU);
+
+    const lab = await moveAs('EXAMINER', item._id, CUSTODY_STATUS.AT_FSL);
+    expect(lab.status).toBe(403);
   });
 });
 
@@ -395,8 +380,18 @@ describe('COURT — Judge (court from the roster, never assigned by Lexx)', () =
     expect((await getCase(c._id, 'JUDGE')).status).toBe(200);
   });
 
-  it('is DENIED a case bound to a DIFFERENT court', async () => {
+  it('reads a case listed before ANOTHER court of the same district — the Court is one role', async () => {
     const c = await makeCase({ stage: CASE_STAGE.COMMITTED, courtId: 'UP-GZB-CJM-01' });
+    expect((await getCase(c._id, 'JUDGE')).status).toBe(200);
+  });
+
+  it('is DENIED a case listed in another district', async () => {
+    const c = await makeCase({
+      stationCode: 'UP-LKO-HZG',
+      districtCode: 'UP-LKO',
+      stage: CASE_STAGE.COMMITTED,
+      courtId: 'UP-LKO-SESS-01',
+    });
     const res = await getCase(c._id, 'JUDGE');
     expect(res.status).toBe(403);
     expect(res.body.error.code).toBe(DENY_REASON.CASE_NOT_LISTED_IN_YOUR_COURT);
@@ -437,18 +432,18 @@ describe('COURT — Judge (court from the roster, never assigned by Lexx)', () =
     expect(d.allow).toBe(true);
   });
 
-  it('may author a disclosure pack; the investigation may not', async () => {
+  it('nobody authors a disclosure pack any more — sharing is not a step', async () => {
     const { resolveCreate } = await import('../../services/accessResolver.js');
     const c = await makeCase({ stage: CASE_STAGE.COMMITTED, courtId: 'UP-GZB-SESS-02' });
 
-    for (const [who, expected] of [['JUDGE', true], ['IO', false], ['SHO', false]]) {
+    for (const who of ['JUDGE', 'IO', 'SHO', 'ADVOCATE_ON']) {
       const u = await User.findOne({ authorityId: ID[who] }).lean();
       const d = await resolveCreate({
         user: { ...u, userId: u._id, scope: u.scope ?? {} },
         resourceType: 'DISCLOSURE_PACK',
         context: { caseId: c._id },
       });
-      expect(d.allow, `${who} should ${expected ? '' : 'NOT '}author disclosure`).toBe(expected);
+      expect(d.allow, `${who} must not author a disclosure pack`).toBe(false);
     }
   });
 
@@ -494,7 +489,7 @@ describe('COURT — Judge (court from the roster, never assigned by Lexx)', () =
 
   it('DENIES closing to everyone but the court', async () => {
     const c = await makeCase({ stage: CASE_STAGE.TRIAL, courtId: 'UP-GZB-SESS-02' });
-    for (const who of ['IO', 'SHO', 'SP', 'EVIDENCE_ROOM', 'ADVOCATE_ON']) {
+    for (const who of ['IO', 'SHO', 'SP', 'EXAMINER', 'ADVOCATE_ON']) {
       const res = await auth(request(server).post(`/api/cases/${c._id}/close`), who).send({
         reason: 'Trying to close a case that is not mine to close.',
       });
@@ -503,25 +498,23 @@ describe('COURT — Judge (court from the roster, never assigned by Lexx)', () =
   });
 });
 
-// ============================================== COURT: THE EVIDENCE ROOM ======
+// ============================================ COURT: ONE ROLE FOR EVERY OFFICER ====
 
 /**
- * The registrar is gone; the court's evidence room is not. What it keeps is what
- * only it can keep — the physical articles produced in court — and what it must not
- * acquire is the authority the registrar used to hold over representation and
- * disclosure, which is now the presiding judge's alone.
+ * The court used to be two roles — a presiding judge and an evidence room — each
+ * scoped to one bench. Registry staff now resolve to the same Court role as a judge,
+ * scoped to the district court establishment, so there is one court identity, one
+ * dashboard and one set of powers.
  */
-describe('COURT — evidence room', () => {
-  it('reads a case in its own court', async () => {
-    const c = await makeCase({ stage: CASE_STAGE.COMMITTED, courtId: 'UP-GZB-SESS-02' });
-    expect((await getCase(c._id, 'EVIDENCE_ROOM')).status).toBe(200);
+describe('COURT — registry staff hold the same single Court role', () => {
+  it('resolves every court identity to COURT', () => {
+    expect(users.EVIDENCE_ROOM.user.role).toBe(ROLE.COURT);
+    expect(users.JUDGE.user.role).toBe(ROLE.COURT);
   });
 
-  it('is DENIED a case in another court', async () => {
-    const c = await makeCase({ stage: CASE_STAGE.COMMITTED, courtId: 'UP-GZB-CJM-01' });
-    const res = await getCase(c._id, 'EVIDENCE_ROOM');
-    expect(res.status).toBe(403);
-    expect(res.body.error.code).toBe(DENY_REASON.OUT_OF_COURT_SCOPE);
+  it('reads a case listed in the district', async () => {
+    const c = await makeCase({ stage: CASE_STAGE.COMMITTED, courtId: 'UP-GZB-SESS-02' });
+    expect((await getCase(c._id, 'EVIDENCE_ROOM')).status).toBe(200);
   });
 
   it('is DENIED an unbound case', async () => {
@@ -529,27 +522,13 @@ describe('COURT — evidence room', () => {
     expect((await getCase(c._id, 'EVIDENCE_ROOM')).status).toBe(403);
   });
 
-  it('cannot record a judicial order', async () => {
+  it('records an order like any Court login', async () => {
     const c = await makeCase({ stage: CASE_STAGE.COMMITTED, courtId: 'UP-GZB-SESS-02' });
-    const res = await auth(
-      request(server).post(`/api/cases/${c._id}/record-order`),
-      'EVIDENCE_ROOM'
-    ).send({ orderType: 'BAIL', text: 'x' });
-    expect(res.status).toBe(403);
-  });
-
-  it('cannot rule on disclosure — that came with the registrar and did not survive it', async () => {
-    const { resolve } = await import('../../services/accessResolver.js');
-    const c = await makeCase({ stage: CASE_STAGE.COMMITTED, courtId: 'UP-GZB-SESS-02' });
-    const u = await User.findOne({ authorityId: ID.EVIDENCE_ROOM }).lean();
-
-    const d = await resolve({
-      user: { ...u, userId: u._id, scope: u.scope ?? {} },
-      action: ACTION.APPROVE,
-      resourceType: 'CASE',
-      resourceId: c._id,
+    const res = await auth(request(server).post(`/api/cases/${c._id}/record-order`), 'EVIDENCE_ROOM').send({
+      orderType: 'ADJOURNMENT',
+      text: 'Adjourned to the next date.',
     });
-    expect(d.allow).toBe(false);
+    expect(res.status).toBe(201);
   });
 });
 
@@ -655,48 +634,57 @@ describe('LEGAL — Advocate (the confidentiality boundary)', () => {
     expect((await getCase(c._id, 'ADVOCATE_ON')).status).toBe(200);
   });
 
-  it('DENIES evidence when no disclosure pack has been served', async () => {
+  it('allows EVERY exhibit of a case they are on record for — no pack, no share step', async () => {
     const c = await makeCase();
     await grantAdvocate(c, 'ADVOCATE_ON');
-    const e = await makeEvidence(c);
+    const first = await makeEvidence(c);
+    const second = await makeEvidence(c);
+
+    expect((await getEvidence(first._id, 'ADVOCATE_ON')).status).toBe(200);
+    expect((await getEvidence(second._id, 'ADVOCATE_ON')).status).toBe(200);
+  });
+
+  it('DENIES an exhibit in a case they are NOT on record for — the line that matters', async () => {
+    const mine = await makeCase();
+    const other = await makeCase({ firNumber: '0777/2026', ioUserKey: 'SHO' });
+    await grantAdvocate(mine, 'ADVOCATE_ON');
+    const e = await makeEvidence(other);
 
     const res = await getEvidence(e._id, 'ADVOCATE_ON');
     expect(res.status).toBe(403);
-    expect(res.body.error.code).toBe(DENY_REASON.NO_DISCLOSURE_PACK_SERVED);
+    expect(res.body.error.code).toBe(DENY_REASON.NOT_ON_RECORD_FOR_THIS_CASE);
   });
 
-  it('allows an exhibit that IS in the served set', async () => {
-    const c = await makeCase();
-    await grantAdvocate(c, 'ADVOCATE_ON');
-    const e = await makeEvidence(c);
-    await servePack(c, [e._id], 'ADVOCATE_ON');
+  it('lists every exhibit of their cases, and nothing from anyone else’s', async () => {
+    const mine = await makeCase();
+    const other = await makeCase({ firNumber: '0777/2026', ioUserKey: 'SHO' });
+    await grantAdvocate(mine, 'ADVOCATE_ON');
+    const a = await makeEvidence(mine);
+    const b = await makeEvidence(mine);
+    const foreign = await makeEvidence(other);
 
-    expect((await getEvidence(e._id, 'ADVOCATE_ON')).status).toBe(200);
+    const res = await auth(request(server).get('/api/evidence'), 'ADVOCATE_ON');
+    expect(res.status).toBe(200);
+    const codes = res.body.evidence.map((e) => e.exhibitCode);
+    expect(codes).toContain(a.exhibitCode);
+    expect(codes).toContain(b.exhibitCode);
+    expect(codes).not.toContain(foreign.exhibitCode);
   });
 
-  it('DENIES an exhibit outside the served set — the line that matters', async () => {
+  it('DENIES a custody item, even in a case they are on record for', async () => {
+    const { resolve } = await import('../../services/accessResolver.js');
     const c = await makeCase();
     await grantAdvocate(c, 'ADVOCATE_ON');
-    const served = await makeEvidence(c);
-    const withheld = await makeEvidence(c);
-    await servePack(c, [served._id], 'ADVOCATE_ON');
+    const item = await makeCustodyItem(c);
+    const u = await User.findOne({ authorityId: ID.ADVOCATE_ON }).lean();
 
-    const res = await getEvidence(withheld._id, 'ADVOCATE_ON');
-    expect(res.status).toBe(403);
-    expect(res.body.error.code).toBe(DENY_REASON.EXHIBIT_NOT_IN_DISCLOSURE_SET);
-  });
-
-  it('DENIES a pack served to a DIFFERENT advocate', async () => {
-    const c = await makeCase();
-    await grantAdvocate(c, 'ADVOCATE_ON');
-    await grantAdvocate(c, 'ADVOCATE_OFF');
-    const e = await makeEvidence(c);
-    // Served on co-accused counsel only.
-    await servePack(c, [e._id], 'ADVOCATE_OFF');
-
-    const res = await getEvidence(e._id, 'ADVOCATE_ON');
-    expect(res.status).toBe(403);
-    expect(res.body.error.code).toBe(DENY_REASON.NO_DISCLOSURE_PACK_SERVED);
+    const d = await resolve({
+      user: { ...u, userId: u._id, scope: u.scope ?? {} },
+      action: ACTION.READ,
+      resourceType: 'CUSTODY_ITEM',
+      resourceId: item._id,
+    });
+    expect(d.allow).toBe(false);
   });
 
   it('DENIES access once the grant is revoked', async () => {
@@ -812,14 +800,13 @@ describe('cross-cutting authorization invariants', () => {
   });
 });
 
-// ============================================ APPROVE / ACKNOWLEDGE semantics ==
+// ======================================================= APPROVE semantics ==
 
-describe('APPROVE and ACKNOWLEDGE are distinct from WRITE and ORDER', () => {
+describe('APPROVE is distinct from WRITE and ORDER, and counsel hold no mutation at all', () => {
   /**
-   * These two actions exist because neither WRITE nor ORDER could express what the
-   * statute needs: approval is ruling on what someone else prepared, which is not
-   * authorship, and acknowledgement belongs to counsel who are otherwise strictly
-   * read-only.
+   * APPROVE exists because neither WRITE nor ORDER could express what the statute
+   * needs: ruling on what someone else prepared (a vakalatnama) is not authorship.
+   * Counsel, on record or not, are strictly read-only.
    *
    * The resolver is exercised directly here — the point is the policy itself, not any
    * one route that happens to use it.
@@ -835,85 +822,71 @@ describe('APPROVE and ACKNOWLEDGE are distinct from WRITE and ORDER', () => {
     });
   };
 
-  it('lets a JUDGE approve a pack in their court', async () => {
+  it('lets any Court login APPROVE on a case listed in the district', async () => {
     const c = await makeCase({ stage: CASE_STAGE.COMMITTED, courtId: 'UP-GZB-SESS-02' });
-    const e = await makeEvidence(c);
-    const pack = await servePack(c, [e._id], 'ADVOCATE_ON');
-
-    const d = await resolveFor('JUDGE', ACTION.APPROVE, 'DISCLOSURE_PACK', pack._id);
-    expect(d.allow).toBe(true);
-  });
-
-  it('DENIES approval to the court evidence room', async () => {
-    // Keeping the articles is not ruling on the file.
-    const c = await makeCase({ stage: CASE_STAGE.COMMITTED, courtId: 'UP-GZB-SESS-02' });
-    const e = await makeEvidence(c);
-    const pack = await servePack(c, [e._id], 'ADVOCATE_ON');
-
-    const d = await resolveFor('EVIDENCE_ROOM', ACTION.APPROVE, 'DISCLOSURE_PACK', pack._id);
-    expect(d.allow).toBe(false);
+    for (const who of ['JUDGE', 'EVIDENCE_ROOM']) {
+      const d = await resolveFor(who, ACTION.APPROVE, 'CASE', c._id);
+      expect(d.allow, `${who} should hold APPROVE`).toBe(true);
+    }
   });
 
   it('DENIES approval to the investigating officer', async () => {
-    // Disclosure is decided by the court. A party to the case never rules on what
-    // the other party gets to see.
     const c = await makeCase();
-    const e = await makeEvidence(c);
-    const pack = await servePack(c, [e._id], 'ADVOCATE_ON');
-
-    const d = await resolveFor('IO', ACTION.APPROVE, 'DISCLOSURE_PACK', pack._id);
+    const d = await resolveFor('IO', ACTION.APPROVE, 'CASE', c._id);
     expect(d.allow).toBe(false);
     expect(d.reason).toBe(DENY_REASON.READ_ONLY_ROLE);
   });
 
   it('DENIES approval to an SHO', async () => {
     const c = await makeCase();
-    const e = await makeEvidence(c);
-    const pack = await servePack(c, [e._id], 'ADVOCATE_ON');
-
-    const d = await resolveFor('SHO', ACTION.APPROVE, 'DISCLOSURE_PACK', pack._id);
+    const d = await resolveFor('SHO', ACTION.APPROVE, 'CASE', c._id);
     expect(d.allow).toBe(false);
   });
 
-  it('still DENIES a judicial ORDER to the court evidence room', async () => {
+  it('DENIES a judicial ORDER to the laboratory', async () => {
     const c = await makeCase({ stage: CASE_STAGE.COMMITTED, courtId: 'UP-GZB-SESS-02' });
-    const d = await resolveFor('EVIDENCE_ROOM', ACTION.ORDER, 'CASE', c._id);
+    const d = await resolveFor('EXAMINER', ACTION.ORDER, 'CASE', c._id);
     expect(d.allow).toBe(false);
   });
 
-  it('lets an advocate ACKNOWLEDGE a pack served to them', async () => {
+  it('DENIES counsel on record every mutation on their own case and its exhibits', async () => {
     const c = await makeCase();
     await grantAdvocate(c, 'ADVOCATE_ON');
     const e = await makeEvidence(c);
-    const pack = await servePack(c, [e._id], 'ADVOCATE_ON');
 
-    const d = await resolveFor('ADVOCATE_ON', ACTION.ACKNOWLEDGE, 'DISCLOSURE_PACK', pack._id);
-    expect(d.allow).toBe(true);
+    for (const action of [ACTION.WRITE, ACTION.APPROVE, ACTION.ORDER, ACTION.ACKNOWLEDGE, ACTION.ATTEST]) {
+      for (const [type, id] of [['CASE', c._id], ['EVIDENCE', e._id]]) {
+        const d = await resolveFor('ADVOCATE_ON', action, type, id);
+        expect(d.allow, `counsel must not hold ${action} on ${type}`).toBe(false);
+        expect(d.reason).toBe(DENY_REASON.READ_ONLY_ROLE);
+      }
+    }
+    for (const action of [ACTION.READ, ACTION.VERIFY, ACTION.DOWNLOAD]) {
+      const d = await resolveFor('ADVOCATE_ON', action, 'EVIDENCE', e._id);
+      expect(d.allow, `counsel on record should hold ${action} on an exhibit`).toBe(true);
+    }
   });
 
-  it('DENIES acknowledgement of a pack served to someone else', async () => {
-    const c = await makeCase();
+  it('a disclosure pack is no longer a resource anyone can act on', async () => {
+    const c = await makeCase({ stage: CASE_STAGE.COMMITTED, courtId: 'UP-GZB-SESS-02' });
     await grantAdvocate(c, 'ADVOCATE_ON');
-    await grantAdvocate(c, 'ADVOCATE_OFF');
-    const e = await makeEvidence(c);
-    const pack = await servePack(c, [e._id], 'ADVOCATE_OFF');
+    const packId = new mongoose.Types.ObjectId();
+    await mongoose.connection.collection('disclosure_packs').insertOne({
+      _id: packId,
+      caseId: c._id,
+      exhibitIds: [],
+      status: 'SERVED',
+      servedTo: [],
+    });
 
-    const d = await resolveFor('ADVOCATE_ON', ACTION.ACKNOWLEDGE, 'DISCLOSURE_PACK', pack._id);
-    expect(d.allow).toBe(false);
+    for (const [who, action] of [['JUDGE', ACTION.APPROVE], ['ADVOCATE_ON', ACTION.READ]]) {
+      const d = await resolveFor(who, action, 'DISCLOSURE_PACK', packId);
+      expect(d.allow).toBe(false);
+      expect(d.reason).toBe(DENY_REASON.RESOURCE_NOT_FOUND);
+    }
   });
 
-  it('acknowledging does NOT give an advocate a general WRITE', async () => {
-    const c = await makeCase();
-    await grantAdvocate(c, 'ADVOCATE_ON');
-    const e = await makeEvidence(c);
-    const pack = await servePack(c, [e._id], 'ADVOCATE_ON');
-
-    const d = await resolveFor('ADVOCATE_ON', ACTION.WRITE, 'DISCLOSURE_PACK', pack._id);
-    expect(d.allow).toBe(false);
-    expect(d.reason).toBe(DENY_REASON.READ_ONLY_ROLE);
-  });
-
-  it('only the presiding judge may put an advocate on record', async () => {
+  it('only the Court may put an advocate on record', async () => {
     const { resolveCreate } = await import('../../services/accessResolver.js');
     const c = await makeCase({ stage: CASE_STAGE.COMMITTED, courtId: 'UP-GZB-SESS-02' });
 
@@ -921,7 +894,7 @@ describe('APPROVE and ACKNOWLEDGE are distinct from WRITE and ORDER', () => {
       ['JUDGE', true],
       ['IO', false],
       ['SHO', false],
-      ['EVIDENCE_ROOM', false],
+      ['EVIDENCE_ROOM', true],
     ]) {
       const u = await User.findOne({ authorityId: ID[who] }).lean();
       const d = await resolveCreate({

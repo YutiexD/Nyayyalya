@@ -309,11 +309,11 @@ describe('the two operations that may not happen unrecorded', () => {
     for (let i = 0; i < AUDIT_UNHEALTHY_THRESHOLD; i += 1) recordAuditFailure('audit down');
   };
 
-  it('refuses to SERVE disclosure while the audit trail is broken', async () => {
+  it('refuses a JUDICIAL STEP on a case while the audit trail is broken', async () => {
     unhealthy();
     const res = await as(
       io,
-      request(server).post(`/api/disclosure/${new mongoose.Types.ObjectId()}/serve`)
+      request(server).post(`/api/cases/${new mongoose.Types.ObjectId()}/transition`)
     ).send({});
 
     expect(res.status).toBe(503);
@@ -337,7 +337,7 @@ describe('the two operations that may not happen unrecorded', () => {
     const before = await AuditEvent.countDocuments({});
     await as(
       io,
-      request(server).post(`/api/disclosure/${new mongoose.Types.ObjectId()}/serve`)
+      request(server).post(`/api/cases/${new mongoose.Types.ObjectId()}/transition`)
     ).send({});
     // The guard is the first middleware on the route: no decision was reached, so
     // there is nothing to record — which is the point, since recording is broken.
@@ -350,7 +350,7 @@ describe('the two operations that may not happen unrecorded', () => {
 
     const res = await as(
       io,
-      request(server).post(`/api/disclosure/${new mongoose.Types.ObjectId()}/serve`)
+      request(server).post(`/api/cases/${new mongoose.Types.ObjectId()}/transition`)
     ).send({});
 
     // Past the audit gate now: the resolver takes over and refuses it on its merits.

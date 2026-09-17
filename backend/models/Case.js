@@ -7,7 +7,7 @@
  * correct posture rather than an oversight.
  */
 import mongoose from 'mongoose';
-import { CASE_STAGE, SENSITIVITY_CLASS, COURT_TYPE, values } from './enums.js';
+import { CASE_STAGE, SENSITIVITY_CLASS, COURT_TYPE, CLOSURE_DOCUMENT_KIND, values } from './enums.js';
 
 const { Schema } = mongoose;
 
@@ -36,6 +36,45 @@ const ClocksSchema = new Schema(
   { _id: false }
 );
 
+const ClosureSchema = new Schema(
+  {
+    /** CLOSURE_DOCUMENT_KIND, or null when the court closed the case without a document. */
+    kind: { type: String, enum: [...values(CLOSURE_DOCUMENT_KIND), null], default: null },
+    note: { type: String, default: null, maxlength: 2000 },
+    signedBy: {
+      type: new Schema(
+        {
+          userId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
+          name: { type: String, default: null },
+          authorityId: { type: String, default: null },
+          role: { type: String, default: null },
+        },
+        { _id: false }
+      ),
+      default: null,
+    },
+    uploadedAt: { type: Date, default: null },
+
+    // ---- the document, when one was attached ----
+    fileName: { type: String, default: null },
+    mimeType: { type: String, default: null },
+    sizeBytes: { type: Number, default: null },
+    /** SHA-256 recomputed by the server; equal to the one the judge's browser signed. */
+    sha256: { type: String, default: null },
+    /** ECDSA P-256 (IEEE P1363) over the hex `sha256` string, stored as 128 hex chars. */
+    signature: { type: String, default: null },
+    signerKeyFingerprint: { type: String, default: null },
+    /** The key that made the signature, pinned so it stays verifiable across rotation. */
+    signerPublicKeyJwk: {
+      type: new Schema({ kty: String, crv: String, x: String, y: String }, { _id: false }),
+      default: null,
+    },
+    /** Vault key of the sealed (envelope-encrypted) PDF. Internal; never selected by default. */
+    storageKey: { type: String, default: null, select: false },
+  },
+  { _id: false }
+);
+
 const CaseSchema = new Schema(
   {
     firNumber: { type: String, required: true, immutable: true, trim: true },
@@ -48,6 +87,8 @@ const CaseSchema = new Schema(
     stationCode: { type: String, required: true, immutable: true, index: true },
     districtCode: { type: String, required: true, immutable: true, index: true },
     stateCode: { type: String, required: true, immutable: true },
+    /** The station's name as the directory gave it at case creation. Display only. */
+    stationName: { type: String, default: null },
 
     bnsSections: { type: [String], default: [] },
     maxPunishmentYears: { type: Number, required: true, min: 0, max: 200 },
@@ -76,9 +117,20 @@ const CaseSchema = new Schema(
     courtName: { type: String, default: null },
     chargesheetFiledOn: { type: Date, default: null },
 
+    // ---- judicial progression: each set by its own court act (services/caseWorkflow.js) ----
+    cognizanceTakenOn: { type: Date, default: null },
+    committedOn: { type: Date, default: null },
+    trialStartedOn: { type: Date, default: null },
+
     // ---- the end: set when the court closes the case. Nothing is removed. ----
     closedOn: { type: Date, default: null },
     closedByUserId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
+    /**
+     * How the court closed it: who, why, and the signed document (judgment, declaration
+     * or order) it attached, if any. Never served as stored — `closureView` in
+     * controllers/cases.js is the only shape a client sees.
+     */
+    closure: { type: ClosureSchema, default: null },
 
     jurisdictionComputed: { type: JurisdictionSchema, default: null },
     clocks: { type: ClocksSchema, default: () => ({}) },

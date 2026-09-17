@@ -6,8 +6,10 @@
  * The access token lives in a module variable first and in `sessionStorage` second.
  * Not `localStorage`: a token in localStorage outlives the tab, survives the browser
  * being closed, and is readable by any script on the origin forever. sessionStorage
- * is cleared when the tab closes, which is the right lifetime for a 15-minute
- * credential on a shared station machine. Tokens are never logged, never put in a
+ * is per tab — so one browser can hold an officer, an examiner and a court session
+ * side by side — and survives reloads. The session itself has no time limit: the
+ * 15-minute access token is renewed silently from a refresh token that never expires,
+ * so a signed-in tab stays signed in until someone signs out or closes the tab. Tokens are never logged, never put in a
  * URL, and never rendered.
  *
  * # Errors
@@ -115,47 +117,29 @@ export class ApiError extends Error {
 /**
  * Plain-English readings of the codes a user can actually hit.
  *
- * Every denial in this system shows its reason code AND one of these sentences. The
- * codes come from `backend/models/enums.js` DENY_REASON and from the controllers'
- * typed errors; anything unmapped falls back to the server's own safe message.
+ * Every refusal shows its code AND one of these sentences. Anything unmapped falls
+ * back to the server's own safe message.
  */
 export const REASON_TEXT = Object.freeze({
-  // --- authorization: the resolver's vocabulary ---
+  // --- authorization ---
   NOT_ASSIGNED_IO: 'You are not the investigating officer recorded for this case.',
   OUT_OF_JURISDICTION: 'This case belongs to a station outside your posting.',
-  CASE_STAGE_CLOSED_TO_WRITES:
-    'This case has moved past investigation, so it is closed to new entries.',
-  CASE_IS_CLOSED:
-    'The court has closed this case. It stays readable in full — nothing has been removed — but nothing further can be recorded against it.',
-  CUSTODIAN_SCOPE: 'Custody items can only be acted on at the station that holds them.',
+  CASE_STAGE_CLOSED_TO_WRITES: 'This case has moved past investigation, so it is closed to new entries.',
+  CASE_IS_CLOSED: 'The court has closed this case. It stays readable, but nothing further can be recorded.',
   READ_ONLY_ROLE: 'Your role may read this record but may not change it.',
-  CASE_NOT_LISTED_IN_YOUR_COURT: 'This case is not listed in the court you are rostered to today.',
-  OUT_OF_COURT_SCOPE: 'This record belongs to a different court.',
-  NO_OPEN_REFERRAL_TO_YOUR_LAB:
-    'This exhibit is outside your laboratory: it has not been referred to you, and it is not registered in the state your laboratory serves.',
+  CASE_NOT_LISTED_IN_YOUR_COURT: 'This case is not before a court in your district yet.',
+  NO_OPEN_REFERRAL_TO_YOUR_LAB: 'This exhibit is outside your laboratory.',
   NOT_ON_RECORD_FOR_THIS_CASE:
-    'You are not on record for this case. A vakalatnama accepted by the court, or a legal aid order, puts an advocate on record.',
-  GRANT_REVOKED: 'Your authority to act on this case has been revoked.',
-  GRANT_NOT_YET_VALID: 'Your authority to act on this case has not started yet.',
-  GRANT_EXPIRED: 'Your authority to act on this case has expired.',
-  NO_DISCLOSURE_PACK_SERVED:
-    'The court has not shared the case file with you yet. Until it does, there is nothing here to read.',
-  EXHIBIT_NOT_IN_DISCLOSURE_SET:
-    'This exhibit is not part of the disclosure set served on you. Material outside the served set is not accessible, and this attempt has been logged.',
-  NOT_CURRENT_HOLDER: 'Only the officer currently holding this item can move it.',
-  CUSTODY_FROZEN: 'Custody of this item is frozen after a seal exception. A supervisor must act.',
-  IO_CANNOT_HOLD_OWN_CASE_EVIDENCE:
-    'The investigating officer cannot be the store keeper for evidence in their own case.',
+    'You are not on record for this case. Access starts when the court accepts your vakalatnama.',
+  GRANT_REVOKED: 'Your access to this case has been revoked.',
+  GRANT_NOT_YET_VALID: 'Your access to this case has not started yet.',
+  GRANT_EXPIRED: 'Your access to this case has expired.',
   RESOURCE_NOT_FOUND: 'No such record, or none you are entitled to see.',
-  NO_MATCHING_POLICY: 'No access policy covers this combination of role and record.',
-  USER_NOT_ACTIVE: 'This account is not active in Lexx.',
+  NO_MATCHING_POLICY: 'Your role has no access to this record.',
+  USER_NOT_ACTIVE: 'This account is not active.',
   AUDIT_NOT_PERMITTED: 'Your role cannot read the audit feed.',
-  AUDIT_UNAVAILABLE:
-    'This action is refused because the audit trail cannot currently be written. Serving disclosure and filing a forensic report are not permitted to happen unrecorded. Tell an operator, and try again once /readyz reports the audit writer healthy.',
-  CERTIFICATE_NOT_FOUND:
-    'No certificate on the register matches that token. An unknown token and a malformed one answer identically here, so the shape of the token space cannot be probed from outside.',
-  SEARCH_UNAVAILABLE:
-    'Search is temporarily unavailable. This is NOT a statement that no records matched — nothing was searched. Do not treat this as an absence of evidence.',
+  AUDIT_UNAVAILABLE: 'The audit trail cannot be written right now, so this action is refused. Try again shortly.',
+  SEARCH_UNAVAILABLE: 'Search is unavailable. Nothing was searched, so this is not a "no results" answer.',
 
   // --- identity and session ---
   IDENTITY_NOT_VERIFIED:
@@ -179,97 +163,97 @@ export const REASON_TEXT = Object.freeze({
   RATE_LIMITED: 'Too many attempts from this machine. Wait and try again.',
 
   // --- integrity ---
-  HASH_MISMATCH:
-    'The bytes that arrived do not hash to what your browser computed. The upload was refused and the exception was written to the ledger.',
-  SIGNATURE_INVALID:
-    'The signature does not verify against the key registered to this account. The upload was refused and the exception was written to the ledger.',
+  HASH_FAILED: 'The file could not be read in this browser, so nothing was uploaded.',
+  SIGNING_FAILED: 'This browser could not sign the file, so nothing was uploaded.',
+  HASH_MISMATCH: 'The file that arrived does not match the fingerprint taken in your browser. The upload was refused.',
+  SIGNATURE_INVALID: 'The signature does not match the key registered to this account. The upload was refused.',
   NO_REGISTERED_KEY: 'No signing key is registered for this account on this device.',
   MIME_TYPE_NOT_ALLOWED: 'That file type is not accepted as evidence.',
   MIME_TYPE_MISMATCH: 'The file contents do not match the type it claims to be.',
-  CERTIFICATE_PART_A_INCOMPLETE:
-    'Part A cannot be completed from the record, so no certificate was generated. Record the missing particulars and try again.',
   PAYLOAD_TOO_LARGE: 'That file is larger than this deployment accepts.',
   VALIDATION_FAILED: 'The request was not in the form the server accepts.',
   ROUTE_NOT_FOUND: 'That endpoint is not available on this server.',
 
   // --- representation (vakalatnama) ---
-  CNR_NOT_FOUND:
-    'No case before a court carries that CNR number in Lexx. A vakalatnama can only be filed in a case that has been committed to a court.',
-  VAKALATNAMA_ALREADY_FILED:
-    'A filing for this appearance is already before the court. Wait for it to be ruled on.',
+  CNR_NOT_FOUND: 'No case before a court carries that CNR number.',
+  VAKALATNAMA_ALREADY_FILED: 'A filing for this appearance is already before the court.',
+  VAKALATNAMA_ALREADY_ON_RECORD: 'You are already on record for this party in this case.',
+  VAKALATNAMA_WITHDRAWN: 'This filing has been withdrawn.',
+  LEGAL_AID_ASSIGNMENT_CLOSED: 'This legal aid assignment is closed.',
   ALREADY_ON_RECORD: 'You are already on record for this party in this case.',
-  DOCUMENT_MUST_BE_PDF: 'The vakalatnama must be filed as a PDF.',
-  DOCUMENT_HASH_MISMATCH:
-    'The document that arrived does not hash to what your browser computed, so the filing was refused.',
-  COURT_REGISTER_REFUSED:
-    'The court register did not record this appearance, so nothing changed in Lexx. The filing is still pending.',
+  DOCUMENT_MUST_BE_PDF: 'The vakalatnama must be a PDF.',
+  DOCUMENT_HASH_MISMATCH: 'The document that arrived does not match the fingerprint taken in your browser.',
+  COURT_REGISTER_REFUSED: 'The court register did not record this appearance. The filing is still pending.',
   VAKALATNAMA_NOT_PENDING: 'This filing has already been ruled on.',
   ADVOCATE_NOT_ACTIVE: 'The filing advocate no longer holds an active account.',
 
   // --- forensic laboratory ---
-  REFERRAL_NOT_ACCEPTED:
-    'The referral must be accepted before a report can be filed — or a report has already been filed on it.',
+  REFERRAL_NOT_ACCEPTED: 'Accept the referral before filing a report, or a report is already filed.',
   REFERRAL_NOT_OPEN: 'Only an open referral can be accepted.',
-  REPORT_MUST_BE_PDF: 'A forensic report must be filed as a PDF.',
-  VERDICT_HASH_MISMATCH:
-    'The digest signed on this device is not the digest of the verdict that arrived, so the verdict was refused. Try recording it again.',
-  REPORT_HASH_MISMATCH: 'The report that arrived does not hash to what your browser computed.',
-  DUPLICATE_LIVE_REFERRAL: 'This exhibit is already referred to that laboratory and the referral is still live.',
-  LAB_NOT_FOUND: 'No such laboratory in the FSL directory.',
+  REPORT_MUST_BE_PDF: 'A forensic report must be a PDF.',
+  VERDICT_HASH_MISMATCH: 'The verdict that arrived does not match what was signed. Record it again.',
+  REPORT_HASH_MISMATCH: 'The report that arrived does not match the fingerprint taken in your browser.',
+  DUPLICATE_LIVE_REFERRAL: 'This exhibit is already referred to that laboratory.',
+  LAB_NOT_FOUND: 'No such laboratory.',
   DISCIPLINE_NOT_OFFERED: 'That laboratory does not run this discipline.',
+  VERDICT_ALREADY_RECORDED: 'An FSL verdict is already recorded for this exhibit.',
 
   // --- certificates ---
-  NOT_THE_DEPONENT: 'Part A names a different deponent. Only the person whose statement it is can sign it.',
-  ALREADY_SIGNED: 'That part of the certificate is already signed.',
-  PART_B_NOT_FILED: 'Part B is blank until a laboratory files its report, so there is nothing to sign.',
-  NOT_THE_REPORTING_EXAMINER: 'Part B may only be signed by the examiner who filed the report.',
+  CERTIFICATE_NOT_FOUND: 'No certificate matches this link.',
+  LABEL_NOT_FOUND: 'No exhibit matches this label.',
+  CERTIFICATE_DOCUMENT_UNAVAILABLE: 'The certificate PDF is not available right now.',
+  CERTIFICATE_PDF_CORRUPT: 'The stored certificate PDF failed its integrity check.',
+  CERTIFICATE_VERIFICATION_FAILED: 'The certificate did not verify.',
+  CERTIFICATE_SUPERSEDED: 'This certificate has been replaced by a newer one.',
+  EVIDENCE_HAS_NO_HASH: 'This exhibit has no recorded fingerprint, so no certificate can be issued for it.',
 
-  // --- custody ---
-  INVALID_OR_FORGED_TAG: 'That label does not carry a valid Lexx signature. It is not a label this system printed.',
-  TRANSFER_TOKEN_INVALID: 'That handover code is not valid for this item.',
-  TRANSFER_TOKEN_EXPIRED: 'That handover code has expired. The holder must start the handover again.',
-  TRANSFER_WRONG_RECIPIENT: 'This handover was addressed to someone else.',
-  TRANSFER_ALREADY_PENDING: 'A handover of this item is already waiting to be accepted.',
-  ILLEGAL_CUSTODY_TRANSITION:
-    'That is not a lawful next step for this article. Every movement routes through the station store.',
-  RECIPIENT_NOT_AVAILABLE: 'That person cannot take custody.',
+  // --- AI analysis ---
+  AI_ANALYSIS_NOT_RETRYABLE: 'Only a failed analysis can be retried.',
+  AI_ANALYSIS_FAILED: 'The AI analysis did not complete.',
+  AI_NOT_CONFIGURED: 'AI analysis is not configured on this server.',
+  AI_INVALID_API_KEY: 'AI analysis is misconfigured on this server. Tell an operator.',
+  AI_PERMISSION_DENIED: 'AI analysis is misconfigured on this server. Tell an operator.',
+  AI_MODEL_NOT_FOUND: 'AI analysis is misconfigured on this server. Tell an operator.',
+  AI_UNAVAILABLE: 'The AI analysis service is unavailable. Retry later.',
+  AI_TIMEOUT: 'The AI analysis timed out. Retry later.',
+  AI_RATE_LIMITED: 'The AI analysis service is busy. Retry in a few minutes.',
+  AI_UNSUPPORTED_FORMAT: 'This file type cannot be analysed.',
+  AI_FILE_TOO_LARGE: 'This file is too large to analyse.',
+  AI_PAYLOAD_TOO_LARGE: 'This file is too large to analyse.',
+  AI_RESPONSE_BLOCKED: 'The AI analysis declined to assess this file.',
+  AI_EMPTY_RESPONSE: 'The AI analysis returned no result. Retry.',
+  AI_INVALID_JSON: 'The AI analysis returned an unusable result. Retry.',
+  AI_PARTIAL_RESPONSE: 'The AI analysis returned an incomplete result. Retry.',
+  AI_RESPONSE_SCHEMA_INVALID: 'The AI analysis returned an unusable result. Retry.',
+  AI_RESPONSE_INCOHERENT: 'The AI analysis returned an inconsistent result. Retry.',
+  AI_INVALID_REQUEST: 'The analysis request was rejected. Retry.',
 
-  // --- disclosure ---
-  PACK_ALREADY_SERVED:
-    'The court has already shared this case file. Changing what is in it needs a fresh order; serving a newly appointed advocate uses the file that was shared.',
-  PACK_NOT_APPROVED: 'The pack must be approved before it can be served.',
-  UNAPPROVED_EXCLUSIONS:
-    'Every withholding request must be ruled on — approved or refused — before the pack can be served.',
-  UNKNOWN_EXCLUSION: 'An approval named an exhibit that was never requested for exclusion on this pack.',
-  ALREADY_SERVED: 'Everyone named has already been served this pack.',
-  NO_RECIPIENTS_ON_RECORD:
-    'No advocate is on record for this case yet. An advocate comes on record when the court accepts their vakalatnama.',
-  RECIPIENT_NOT_ON_RECORD: 'A named recipient is not on record for this case.',
-  WATERMARK_NOT_FOUND: 'No served copy carries that watermark token.',
-  NO_COURT_LISTING: 'The court directory has no listing for this FIR yet, so the chargesheet cannot bind it to a court.',
-  NO_COURT_FOR_JURISDICTION:
-    'No court in this district holds the designation this case requires, so there is no court to file the chargesheet in. Escalate to the District Judge.',
+  // --- judicial workflow ---
+  INVALID_TRANSITION: 'That judicial step is not available at the stage this case is in.',
+  TRANSITION_NOT_APPLICABLE: 'That step does not apply to this case.',
+  NOTE_REQUIRED: 'Record the reason for this order.',
+  NO_COURT_LISTING: 'The court directory has no listing for this FIR yet.',
+  NO_COURT_FOR_JURISDICTION: 'No court in this district can take this case. Escalate to the District Judge.',
   COURT_REGISTRATION_REFUSED: 'The court registry did not register this chargesheet.',
-  SIMULATED_FILING_DISABLED:
-    'The court registry simulator is switched off in this environment, so it cannot register a filing.',
+  SIMULATED_FILING_DISABLED: 'The court registry simulator is switched off in this environment.',
+  CLOSURE_DOCUMENT_NOT_PDF: 'The closing document must be a PDF.',
+  CLOSURE_DOCUMENT_TOO_LARGE: 'The closing document is larger than 20 MB.',
+  CLOSURE_DOCUMENT_KIND_REQUIRED: 'Say whether the document is a final judgment, a declaration or an order.',
+  CLOSURE_DOCUMENT_HASH_MISMATCH:
+    'The document that arrived does not match the fingerprint taken in your browser. The case was not closed.',
+  CLOSURE_DOCUMENT_NOT_FOUND: 'No closing document was filed with this case.',
+  CLOSURE_DOCUMENT_UNAVAILABLE: 'The closing document is not available right now.',
+  CLOSURE_DOCUMENT_CORRUPT: 'The stored closing document failed its integrity check.',
+  CLOSURE_NOT_SIGNED: 'This browser could not sign the document, so the case was not closed.',
 
   // --- cases ---
   FIR_NOT_FOUND: 'The police directory holds no FIR with that number.',
   CASE_ALREADY_EXISTS: 'A case has already been opened from this FIR.',
   INVALID_STAGE: 'That step is not available at the stage this case is in.',
   CONCURRENT_UPDATE: 'Someone else changed this record at the same moment. Refresh and try again.',
-
-  // --- disclosure ---
-  DISCLOSURE_PACK_LOCKED:
-    'The court has already ruled on this pack, so it can no longer be re-prepared. A revised set needs a fresh order.',
-  EXCLUDED_ITEM_NOT_IN_CASE: 'An exhibit you asked to withhold does not belong to this case.',
-  RECIPIENT_NOT_ACTIVE: 'A recipient on record no longer holds an active account.',
   CASE_NOT_LISTED: 'This case is not listed before a court yet.',
-  CONFLICTING_RULING: 'An exclusion cannot be both approved and refused.',
-  EXCLUSION_ALREADY_RULED: 'The court has already ruled the other way on this exclusion.',
-
-  // --- custody ---
-  CUSTODY_NOT_FROZEN: 'This item is not frozen.',
+  EVIDENCE_NOT_IN_CASE: 'That exhibit does not belong to this case.',
+  EVIDENCE_NOT_FOUND: 'No such exhibit.',
 
   // --- evidence and downloads ---
   FILE_REQUIRED: 'Choose a file first.',
@@ -279,7 +263,7 @@ export const REASON_TEXT = Object.freeze({
   STREAM_TOKEN_REQUIRED: 'A download link is required.',
   STREAM_TOKEN_WRONG_USER: 'That download link was issued to someone else.',
   STREAM_TOKEN_WRONG_RESOURCE: 'That download link is for a different item.',
-  OBJECT_NOT_FOUND: 'The stored file is missing. The register still holds its hash and history.',
+  OBJECT_NOT_FOUND: 'The stored file is missing. The register still holds its fingerprint and history.',
 
   // --- session ---
   TOKEN_EXPIRED: 'Your session has expired. Sign in again.',
@@ -353,7 +337,7 @@ async function send(path, { method = 'GET', json, form, query, auth = true } = {
  * the session rather than looping — an unauthenticated client retrying forever is
  * how a rate limiter gets tripped during a demo.
  */
-async function refreshSession() {
+export async function refreshSession() {
   const refreshToken = readStore(REFRESH_KEY);
   if (!refreshToken) return false;
 
@@ -367,8 +351,12 @@ async function refreshSession() {
         setSession(result);
         return true;
       })
-      .catch(() => {
-        clearSession();
+      .catch((err) => {
+        // Only the server saying "this session is over" ends it. A network blip, an API
+        // restart, a rate limit or a briefly unreachable directory must not sign anyone
+        // out — the next request simply tries again.
+        const ended = err instanceof ApiError && (err.status === 401 || err.status === 403);
+        if (ended) clearSession();
         return false;
       })
       .finally(() => {
@@ -481,12 +469,21 @@ export const api = {
     timeline: (id) => get(`/api/cases/${id}/timeline`),
     computeJurisdiction: (id) => post(`/api/cases/${id}/compute-jurisdiction`, {}),
     fileChargesheet: (id) => post(`/api/cases/${id}/file-chargesheet`, {}),
-    recordOrder: (id, payload) => post(`/api/cases/${id}/record-order`, payload),
+    /** Where the case stands and every act that can move it now (server state machine). */
+    workflow: (id) => get(`/api/cases/${id}/workflow`),
+    /** The case grouped for a dashboard: exhibits, pending actions, activity. */
+    overview: (id) => get(`/api/cases/${id}/overview`),
+    /** A judicial act — TAKE_COGNIZANCE, COMMIT_FOR_TRIAL, BEGIN_TRIAL, DIRECT_FURTHER_INVESTIGATION, CLOSE_CASE. */
+    transition: (id, action, note) => post(`/api/cases/${id}/transition`, { action, ...(note ? { note } : {}) }),
     /**
-     * The court's final act. Nothing is deleted: the stage moves to CLOSED, the
-     * ledger records who closed it and why, and every exhibit, opinion, certificate
-     * and custody record stays exactly where it is.
+     * CLOSE_CASE with a signed document. Multipart: `action`, `note`, `document` (PDF),
+     * `documentKind`, `documentSha256`, `documentSignature`.
      */
+    transitionWithDocument: (id, form) => postForm(`/api/cases/${id}/transition`, form),
+    /** The judgment / declaration / order filed when the case was closed. Audited download. */
+    closureDocumentBlob: (id) => fetchBlob(`/api/cases/${id}/closure-document`),
+    recordOrder: (id, payload) => post(`/api/cases/${id}/record-order`, payload),
+    /** The court's final act. Nothing is deleted; the case becomes read-only. */
     close: (id, reason) => post(`/api/cases/${id}/close`, { reason }),
   },
 
@@ -495,17 +492,22 @@ export const api = {
     get: (id) => get(`/api/evidence/${id}`),
     /** By register code (EX-…). Audited either way, like any exhibit read. */
     byCode: (code) => get(`/api/evidence/by-code/${encodeURIComponent(code)}`),
+    /**
+     * Multipart: `file, caseId, title, sha256Client, signature` and optional
+     * `description`. Responds `{ evidence, receipt, certificate }`; the s.63
+     * certificate is issued by the server as part of the upload.
+     */
     upload: (form) => postForm('/api/evidence/upload', form),
     verify: (id) => post(`/api/evidence/${id}/verify`, {}),
+    /** `{ evidenceId, exhibitCode, lifecycle }` — each step with who, when and the proof. */
+    lifecycle: (id) => get(`/api/evidence/${id}/lifecycle`),
     triageQueue: (query) => get('/api/evidence/queue/triage', query),
+    /** Re-queue a failed AI analysis. FSL only. */
+    retryAiAnalysis: (id) => post(`/api/evidence/${id}/ai-analysis/retry`, {}),
     referFsl: (id, payload) => post(`/api/evidence/${id}/refer-fsl`, payload),
     /**
-     * A laboratory's verdict on an exhibit, in one step.
-     *
-     * Multipart, because a report document may travel with it — but the document is
-     * optional and the signature is not. `verdictSignature` is made in the browser
-     * over `verdictSha256`, which is the digest of a statement the server recomputes
-     * from the fields it receives: the opinion cannot be swapped after signing.
+     * A laboratory's verdict on an exhibit, in one step. Multipart: the report document
+     * is optional, the browser signature over `verdictSha256` is not.
      */
     recordVerdict: (id, form) => postForm(`/api/evidence/${id}/forensic-verdict`, form),
     streamToken: (id) => post(`/api/evidence/${id}/stream-token`, {}),
@@ -520,33 +522,14 @@ export const api = {
     },
   },
 
-  custody: {
-    create: (payload) => post('/api/custody/items', payload),
-    /** The custody register: what this user's scope actually contains. */
-    items: (query) => get('/api/custody/items', query),
-    scan: (qrToken) => get(`/api/custody/scan/${encodeURIComponent(qrToken)}`),
-    chain: (id) => get(`/api/custody/items/${id}/chain`),
-    gaps: (query) => get('/api/custody/gaps', query),
-    initiateTransfer: (id, payload) => post(`/api/custody/items/${id}/initiate-transfer`, payload),
-    acceptTransfer: (id, payload) => post(`/api/custody/items/${id}/accept-transfer`, payload),
-    /** SHO only: lift a seal-exception freeze with a recorded decision. */
-    liftFreeze: (id, payload) => post(`/api/custody/items/${id}/lift-freeze`, payload),
-    /** Named people this item could lawfully be handed to next. */
-    recipients: (id) => get(`/api/custody/items/${id}/recipients`),
-  },
-
   fsl: {
-    /**
-     * The examiner's review queue: every exhibit their laboratory may need to look
-     * at, ordered by the review priority computed at ingest. `state` is PENDING
-     * (the default, and the work), REVIEWED, or ALL.
-     */
+    /** The examiner's review queue. `state` is PENDING (default), REVIEWED or ALL. */
     queue: (query) => get('/api/fsl/queue', query),
+    /** The laboratory's work grouped by case, exhibits ordered by review priority. */
+    cases: (query) => get('/api/fsl/cases', query),
     referrals: (query) => get('/api/fsl/referrals', query),
     accept: (id) => post(`/api/fsl/referrals/${id}/accept`, {}),
     report: (id, form) => postForm(`/api/fsl/referrals/${id}/report`, form),
-    /** Certificates for the referred exhibit — where the examiner signs Part B. */
-    certificates: (id) => get(`/api/fsl/referrals/${id}/certificates`),
   },
 
   vakalatnama: {
@@ -555,47 +538,29 @@ export const api = {
     mine: () => get('/api/vakalatnama/mine'),
     forCase: (caseId) => get(`/api/vakalatnama/case/${caseId}`),
     documentBlob: (id) => fetchBlob(`/api/vakalatnama/${id}/document`),
+    /** Puts the advocate on record; the response carries `access: 'CASE_AND_EXHIBITS_READ_ONLY'`. */
     accept: (id) => post(`/api/vakalatnama/${id}/accept`, {}),
     reject: (id, note) => post(`/api/vakalatnama/${id}/reject`, { note }),
   },
 
   disclosure: {
     /**
-     * THE disclosure route: the court gives the advocates on record the case file.
-     * Composes the set, rules on anything withheld and serves it, in one act.
+     * The case and every exhibit in it, for counsel on record (and anyone else who may
+     * read the case). Nothing is shared by hand: acceptance of the vakalatnama is the grant.
      */
-    share: (caseId, payload) => post(`/api/disclosure/${caseId}/share`, payload ?? {}),
-    prepare: (caseId, payload) => post(`/api/disclosure/${caseId}/prepare`, payload),
-    /** Court-side discovery: the packs on a case that the registry has to act on. */
-    packsForCase: (caseId, status) =>
-      get(`/api/disclosure/case/${caseId}/packs${status ? `?status=${encodeURIComponent(status)}` : ''}`),
+    caseFile: (caseId) => get(`/api/disclosure/case-file/${caseId}`),
+    /** Court: mirror accepted appearances from the court register into access grants. */
     syncRepresentation: (caseId) => post(`/api/disclosure/${caseId}/sync-representation`, {}),
-    approve: (packId, payload) => post(`/api/disclosure/${packId}/approve`, payload),
-    serve: (packId, payload) => post(`/api/disclosure/${packId}/serve`, payload ?? {}),
-    myPack: (caseId) => get(`/api/disclosure/my-pack/${caseId}`),
-    acknowledge: (packId) => post(`/api/disclosure/${packId}/acknowledge`, {}),
-    /** Court-only: whose served copy does this watermark token belong to? */
-    trace: (token) => get(`/api/disclosure/trace/${encodeURIComponent(token)}`),
   },
 
   certificates: {
-    generate: (evidenceId) => post('/api/certificates/generate', { evidenceId }),
     get: (id) => get(`/api/certificates/${id}`),
-    /** Every certificate for one exhibit — never more visible than the exhibit. */
+    /** `{ evidenceId, exhibitCode, active, certificates, total }` — never more visible than the exhibit. */
     forEvidence: (evidenceId) => get('/api/certificates', { evidenceId }),
-    /**
-     * The PDF is an authenticated, audited DOWNLOAD, so it cannot be reached with a
-     * plain `<a href>` — a link carries no Authorization header. It is fetched with
-     * the session token and handed to the user as a blob instead.
-     */
+    /** An authenticated, audited DOWNLOAD, so it is fetched as a blob rather than linked. */
     pdfBlob: (id) => fetchBlob(`/api/certificates/${id}/pdf`),
-    /**
-     * Part A is signed by the deponent the certificate names; Part B by the examiner
-     * who filed the report. Both signatures are produced in the browser over the
-     * canonical body hash the GET returns — the private key never leaves the device.
-     */
-    signPartA: (id, payload) => post(`/api/certificates/${id}/sign-part-a`, payload),
-    signPartB: (id, payload) => post(`/api/certificates/${id}/sign-part-b`, payload),
+    /** One-click verification: `{ result: 'VERIFIED'|'FAILED', verifiedAt, checks }`. Audited. */
+    verify: (id) => post(`/api/certificates/${id}/verify`, {}),
   },
 
   ledger: {
@@ -610,17 +575,20 @@ export const api = {
 
   search: (query) => get('/api/search', query),
 
-  /** PUBLIC. No session, no Authorization header — that is the point of both. */
   /**
+   * PUBLIC. No session, no Authorization header — that is the point.
+   *
    * `copySha256` is the digest of a PDF the caller holds, hashed in the browser. Only
-   * the digest leaves the machine; the register answers whether it is the current
-   * document, an earlier version of it, or not this certificate at all.
+   * the digest leaves the machine.
    */
   publicVerifyCertificate: (token, copySha256) =>
     request(`/public/verify/${encodeURIComponent(token)}`, {
       auth: false,
       query: copySha256 ? { copy: copySha256 } : undefined,
     }),
+  /** The exhibit behind a printed QR label: same result shape as the certificate check. */
+  publicEvidenceByLabel: (labelToken) =>
+    request(`/public/evidence/${encodeURIComponent(labelToken)}`, { auth: false }),
   publicLatestAnchor: () => request('/api/anchors/latest', { auth: false }),
   publicRecentAnchors: (limit = 8) => request('/api/anchors/recent', { auth: false, query: { limit } }),
   /** An officer's upload receipt, checked against the register and the anchored root. */
@@ -644,8 +612,7 @@ export const HOME_FOR_ROLE = Object.freeze({
   IO: '/officer',
   SHO: '/station',
   DISTRICT_SP: '/station',
-  JUDGE: '/court',
-  EVIDENCE_CUSTODIAN: '/court',
+  COURT: '/court',
   FSL_EXAMINER: '/lab',
   DEFENCE_COUNSEL: '/counsel',
   VICTIM_COUNSEL: '/counsel',
@@ -658,8 +625,7 @@ export const ROLE_LABEL = Object.freeze({
   IO: 'Investigating Officer',
   SHO: 'Station House Officer',
   DISTRICT_SP: 'District SP',
-  JUDGE: 'Presiding Judge',
-  EVIDENCE_CUSTODIAN: 'Court Evidence Room',
+  COURT: 'Court',
   FSL_EXAMINER: 'Forensic Examiner',
   DEFENCE_COUNSEL: 'Defence Counsel',
   VICTIM_COUNSEL: 'Victim Counsel',
@@ -674,21 +640,6 @@ export const ROLES_FOR_ROUTE = Object.freeze(
     return acc;
   }, {})
 );
-
-/**
- * Who a scanned custody label can be opened by: everyone who can hold, receive or
- * supervise a physical article. Counsel see custody only through disclosure. The
- * server decides per item regardless — this only keeps the route out of reach of
- * roles for whom every scan would be a refusal.
- */
-export const SCAN_ROLES = Object.freeze([
-  'IO',
-  'SHO',
-  'DISTRICT_SP',
-  'JUDGE',
-  'EVIDENCE_CUSTODIAN',
-  'FSL_EXAMINER',
-]);
 
 /**
  * End the session.

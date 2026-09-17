@@ -80,10 +80,27 @@ const schema = z.object({
   REFRESH_SECRET: z.string().min(32, 'REFRESH_SECRET must be at least 32 characters'),
   MASTER_KEK: hexKey(32),
   QR_SECRET: z.string().min(32, 'QR_SECRET must be at least 32 characters'),
+  /**
+   * The LEXX Certificate Authority's ECDSA P-256 private key, which signs every s.63
+   * certificate. Optional: 64 hex characters (the raw private scalar) or a PKCS#8 PEM
+   * ("\n" escapes accepted). Unset, it is derived deterministically from MASTER_KEK —
+   * see services/systemSigner.js. Parsed and validated there.
+   */
+  CERTIFICATE_SIGNING_KEY: optional(z.string().min(64, 'CERTIFICATE_SIGNING_KEY is malformed')),
 
   // ---- Token lifetimes ----
   JWT_ACCESS_TTL_SEC: z.coerce.number().int().min(60).max(3600).default(900), // 15 min (spec)
-  REFRESH_TTL_SEC: z.coerce.number().int().min(300).default(60 * 60 * 12),
+  // 0 = a session never expires on its own: it ends only on sign-out, a directory
+  // re-verification failure, or refresh-token reuse. Any other value is a lifetime in seconds.
+  REFRESH_TTL_SEC: z.coerce
+    .number()
+    .int()
+    .refine((v) => v === 0 || v >= 300, 'REFRESH_TTL_SEC must be 0 (never expires) or at least 300')
+    .default(0),
+  // Two requests racing to refresh with the same token (two tabs, a burst of 401s) are
+  // not an attack. A consumed token presented again within this window gets a fresh
+  // token in the same family instead of revoking the family. 0 disables the grace.
+  REFRESH_REUSE_GRACE_SEC: z.coerce.number().int().min(0).max(600).default(60),
   OTP_TTL_SEC: z.coerce.number().int().min(30).max(1800).default(300),
   OTP_MAX_ATTEMPTS: z.coerce.number().int().min(1).max(10).default(5),
   /** bcrypt cost. Lowered only under test, where 9 logins per case is the bottleneck. */
@@ -148,6 +165,36 @@ const schema = z.object({
 
   // ---- Demo affordances (refused in production) ----
   DEMO_ECHO_OTP: bool('false'),
+
+  // ---- Gemini: deepfake analysis and evidence triage ----
+  /**
+   * The AI layer's only credentials. Required for the API to start (see
+   * `assertGeminiConfigured`, called by server.js); optional here so that scripts
+   * which never analyse anything — reset, tamper, lookups — still run without one.
+   * Read by services/ai/geminiClient.js and nothing else. Never sent to the client.
+   */
+  GEMINI_API_KEY: optional(z.string().min(10, 'GEMINI_API_KEY looks truncated')),
+  /** Changing the model is an environment change; no code names a model. */
+  GEMINI_MODEL: optional(
+    z.string().regex(/^[A-Za-z0-9._\-/]+$/, 'GEMINI_MODEL must be a model id such as the one in .env.example')
+  ),
+  GEMINI_API_BASE_URL: z.string().url().default('https://generativelanguage.googleapis.com/v1beta'),
+  GEMINI_TIMEOUT_MS: z.coerce.number().int().min(1000).max(600_000).default(90_000),
+  /** Extra attempts for retryable failures (timeouts, 429, 5xx, unparseable output). */
+  GEMINI_MAX_RETRIES: z.coerce.number().int().min(0).max(5).default(2),
+  GEMINI_RETRY_BASE_MS: z.coerce.number().int().min(10).max(60_000).default(1500),
+  /**
+   * Largest file sent inline. Inline requests are capped at 20 MB and base64 grows the
+   * bytes by a third, so the default leaves headroom. Larger files are marked
+   * UNSUPPORTED rather than truncated or guessed at.
+   */
+  GEMINI_MAX_INLINE_BYTES: z.coerce.number().int().min(1024).max(15 * 1024 * 1024).default(14 * 1024 * 1024),
+  /**
+   * Analyses running at once. 1 by default: each is one request carrying a whole file,
+   * and a free-tier key's per-minute quota is the usual limit, not throughput.
+   * Boot-time resumption goes through the same queue.
+   */
+  AI_ANALYSIS_CONCURRENCY: z.coerce.number().int().min(1).max(8).default(1),
 });
 
 function fail(message, details) {
@@ -202,6 +249,25 @@ export const anchorCanSubmit = Boolean(
 
 export const isProd = env.NODE_ENV === 'production';
 export const isTest = env.NODE_ENV === 'test';
+
+/**
+ * Refuse to start the API without Gemini configuration.
+ *
+ * Called once from server.js at boot, not at import, so a maintenance script that
+ * never analyses evidence is not forced to hold an AI key. The API itself cannot do
+ * its job without one: every exhibit is analysed on ingest, and a registry that
+ * silently skipped that step would put exhibits in the laboratory queue with no
+ * priority and no explanation of why.
+ */
+export function assertGeminiConfigured() {
+  const missing = ['GEMINI_API_KEY', 'GEMINI_MODEL'].filter((k) => !env[k]);
+  if (missing.length) {
+    fail(
+      `Gemini is not configured: ${missing.join(', ')} ${missing.length === 1 ? 'is' : 'are'} missing.`,
+      'Set them in .env (see .env.example). The key is read only by backend/services/ai/geminiClient.js and is never sent to the browser.'
+    );
+  }
+}
 
 export { env };
 export default env;

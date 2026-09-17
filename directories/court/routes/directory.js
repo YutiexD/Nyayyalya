@@ -369,25 +369,41 @@ export function directoryRouter(config = {}) {
         throw NotFound('LISTING_NOT_FOUND', 'No case is listed under that CNR number.');
       }
 
-      const judge = await Judge.findOne({ judgeCode: acceptedBy }).lean();
-      if (!judge || judge.serviceStatus !== 'ACTIVE') {
-        throw NotFound('JUDGE_NOT_FOUND', 'No serving judge with that code.');
-      }
-
-      // Same validity window as the roster lookup above: a judge who has rotated out
-      // of this court cannot take an advocate on record in it, and the register is
-      // where that is decided rather than anywhere in Lexx.
+      // The officer taking the advocate on record must serve in the district the case is
+      // listed in: a judge on a roster order in force at any court of the district, or
+      // registry staff of one of its courts. Lexx has one court role, scoped to the
+      // district court establishment, and the register checks the same thing against
+      // its own records rather than trusting the caller.
+      const listingCourt = await Court.findById(listing.courtId).lean();
       const now = new Date();
-      const roster = await Roster.findOne({
-        judgeId: judge._id,
-        courtId: listing.courtId,
-        validFrom: { $lte: now },
-        $or: [{ validTo: null }, { validTo: { $gte: now } }],
-      }).lean();
-      if (!roster) {
+      let acceptor = null;
+      let officerFound = false;
+
+      const judge = await Judge.findOne({ judgeCode: acceptedBy }).lean();
+      if (judge && judge.serviceStatus === 'ACTIVE') {
+        officerFound = true;
+        const rosters = await Roster.find({
+          judgeId: judge._id,
+          validFrom: { $lte: now },
+          $or: [{ validTo: null }, { validTo: { $gte: now } }],
+        }).lean();
+        const courts = await Court.find({ _id: { $in: rosters.map((r) => r.courtId) } }).lean();
+        if (courts.some((c) => c.districtCode === listingCourt?.districtCode)) acceptor = judge.judgeCode;
+      } else {
+        const staff = await RegistryStaff.findOne({ staffCode: acceptedBy }).lean();
+        if (staff && staff.serviceStatus === 'ACTIVE') {
+          officerFound = true;
+          const court = await Court.findById(staff.courtId).lean();
+          if (court && court.districtCode === listingCourt?.districtCode) acceptor = staff.staffCode;
+        }
+      }
+      if (!officerFound) {
+        throw NotFound('COURT_OFFICER_NOT_FOUND', 'No serving judge or registry officer with that code.');
+      }
+      if (!acceptor) {
         throw Conflict(
-          'JUDGE_OUT_OF_COURT_SCOPE',
-          'No roster order in force places that judge in the court this case is listed before.'
+          'OUT_OF_COURT_SCOPE',
+          'That court officer does not serve in the district this case is listed in.'
         );
       }
 
@@ -409,7 +425,7 @@ export function directoryRouter(config = {}) {
         appearingFor,
         partyName,
         filedOn: now,
-        acceptedBy: judge.judgeCode,
+        acceptedBy: acceptor,
         acceptedOn: now,
         status: 'ACCEPTED',
       });

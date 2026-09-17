@@ -10,9 +10,8 @@ export function cn(...inputs) {
  * Acronyms that must survive humanise() intact.
  *
  * The naive "lowercase everything, capitalise the first letter" produced `Pocso`,
- * `At fsl`, `Referred to fsl` and `District sp` — on the case table, the ledger
- * timeline and the custody status, which is to say on almost every screen. POCSO and
- * FSL are not words, and an Indian audience reads `Pocso` as a typo.
+ * `At fsl`, `Referred to fsl` and `District sp` on almost every screen. POCSO and FSL
+ * are not words, and an Indian audience reads `Pocso` as a typo.
  */
 const ACRONYMS = new Set([
   'AI', 'BNS', 'BNSS', 'CCTV', 'CCTNS', 'CD', 'CNR', 'DNA', 'DVD', 'DVR', 'FIR', 'FSL', 'GPS', 'HDD',

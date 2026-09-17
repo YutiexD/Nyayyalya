@@ -7,171 +7,164 @@
  *
  * ## What this palette is for
  *
- * People use this product for a whole shift. An officer books evidence into it, an
- * examiner reads a queue in it, a judge reads a case file in it. So the base is
- * deliberately QUIET: warm-neutral paper, hairline borders, one restrained indigo for
- * anything interactive, and semantic colour reserved for the four things that carry
- * meaning — a review priority, a forensic opinion, an integrity result, a refusal.
+ * People use this product for a whole shift, and it is shown to judges on a projector.
+ * So the base is deliberately QUIET: cool slate neutrals, hairline borders, one deep
+ * blue accent for anything interactive, and semantic colour reserved for meaning:
+ * a review priority, a forensic opinion, an integrity result, a refusal.
  *
- * The previous sheet had a luminous indigo-to-cyan gradient available everywhere, and
- * it ended up everywhere: on cards, on beams, on stat tiles, on section borders. The
- * gradient survives, but it is now spent in one place — the brand mark — because an
- * accent that appears six times on a screen has stopped being an accent and become a
- * texture, and texture is what made these screens tiring to read.
+ * ## Roles
  *
- * ## The rules a component can rely on
+ *   background / foreground      the page
+ *   card                         a surface on the page (panels, dialogs, popovers)
+ *   muted / muted-foreground     quiet fills and secondary text (meta, labels)
+ *   primary                      the single accent: primary buttons, selection, links
+ *   border / input / ring        hairlines, form borders, focus
+ *   ok   (alias success)         a check passed, AUTHENTIC
+ *   warn (alias warning)         needs a person
+ *   bad  (alias danger)          a failure, MANIPULATED, a refusal
+ *   info                         a neutral fact worth noticing
+ *   each semantic colour has     -muted (tinted fill) and -foreground (text on solid)
+ *
+ * ## Rules a component can rely on
  *
  *   - Colour is never the only carrier of meaning. Every tone has a label beside it.
- *   - Borders are hairlines. Depth comes from a very low-alpha shadow, not a box.
- *   - Nothing on a working screen animates unless it is reporting progress.
- *   - Every colour is an HSL triple here; no component hard-codes one, so the theme
- *     swap is one class on <html>.
+ *   - Borders are 1px hairlines. Depth is at most a very soft shadow.
+ *   - No gradients, glows, beams or animated decoration on working screens.
+ *   - Semantic text on its own -muted tint meets WCAG AA in both themes.
+ *   - Every colour is an HSL triple here; the theme swap is one class on the root.
  */
 @layer base {
   :root {
-    /* Warm-neutral paper rather than blue-white: easier to sit in front of, and it
-       makes the one cool accent read as deliberate. */
-    --background: 40 22% 97%;
-    --foreground: 225 25% 14%;
+    --background: 210 20% 98%;
+    --foreground: 222 40% 12%;
 
     --card: 0 0% 100%;
-    --card-foreground: 225 25% 14%;
+    --card-foreground: 222 40% 12%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 225 25% 14%;
+    --popover-foreground: 222 40% 12%;
 
-    --primary: 230 45% 32%;
-    --primary-foreground: 40 30% 98%;
+    /* Deep institutional blue. */
+    --primary: 222 62% 36%;
+    --primary-foreground: 210 40% 98%;
 
-    --secondary: 40 14% 93%;
-    --secondary-foreground: 225 22% 22%;
+    --secondary: 214 22% 94%;
+    --secondary-foreground: 222 35% 18%;
 
-    --muted: 40 14% 94%;
-    --muted-foreground: 225 8% 46%;
+    --muted: 214 24% 95.5%;
+    --muted-foreground: 217 13% 40%;
 
-    --accent: 40 14% 93%;
-    --accent-foreground: 225 22% 22%;
+    --accent: 214 24% 94%;
+    --accent-foreground: 222 35% 18%;
 
-    --destructive: 0 62% 45%;
-    --destructive-foreground: 40 30% 98%;
+    --destructive: 356 66% 44%;
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 38 12% 88%;
-    --input: 38 12% 86%;
-    --ring: 230 55% 48%;
+    --border: 216 20% 89%;
+    --input: 216 17% 83%;
+    --ring: 222 70% 48%;
 
-    /* The one flourish. Spent on the brand mark, and almost nowhere else. */
-    --accent-from: 232 60% 52%;
-    --accent-to: 200 65% 46%;
+    /* Legacy accent ends. Both are the accent now, so nothing renders as a gradient. */
+    --accent-from: 222 62% 42%;
+    --accent-to: 222 50% 50%;
 
-    /* ---- meaning, not decoration ------------------------------------------
-       ok    a check that passed, an opinion of AUTHENTIC
-       warn  something that needs a person
-       bad   a failure, an opinion of MANIPULATED, a refusal
-       info  a neutral fact worth noticing                                    */
-    --ok: 158 52% 28%;
-    --ok-foreground: 150 60% 97%;
-    --ok-muted: 158 38% 94%;
+    --ok: 155 62% 25%;
+    --ok-foreground: 0 0% 100%;
+    --ok-muted: 150 45% 94%;
 
-    --warn: 32 78% 38%;
-    --warn-foreground: 40 90% 98%;
-    --warn-muted: 36 72% 94%;
+    --warn: 30 82% 31%;
+    --warn-foreground: 0 0% 100%;
+    --warn-muted: 40 85% 93%;
 
-    --bad: 358 62% 45%;
-    --bad-foreground: 0 80% 98%;
-    --bad-muted: 358 62% 96%;
+    --bad: 356 66% 42%;
+    --bad-foreground: 0 0% 100%;
+    --bad-muted: 356 75% 96%;
 
-    --info: 220 50% 42%;
-    --info-foreground: 220 60% 98%;
-    --info-muted: 220 50% 95%;
+    --info: 216 64% 38%;
+    --info-foreground: 0 0% 100%;
+    --info-muted: 214 70% 95.5%;
 
-    /* Review priority. Four bands, and they must be distinguishable at a glance AND
-       in order — so they run one way round the wheel (red → amber → blue → grey)
-       rather than being four unrelated colours. CRITICAL borrows `bad` on purpose:
-       it is the only band that means "before anything else". */
-    --p-critical: 358 62% 45%;
-    --p-critical-muted: 358 62% 96%;
-    --p-high: 24 76% 42%;
-    --p-high-muted: 28 74% 95%;
-    --p-medium: 220 45% 44%;
-    --p-medium-muted: 220 45% 95%;
-    --p-low: 225 6% 48%;
-    --p-low-muted: 40 12% 94%;
+    /* Review priority. One ramp, four stops, in order of urgency. */
+    --p-critical: 356 66% 42%;
+    --p-critical-muted: 356 75% 96%;
+    --p-high: 24 80% 36%;
+    --p-high-muted: 30 85% 94%;
+    --p-medium: 216 60% 40%;
+    --p-medium-muted: 214 70% 95.5%;
+    --p-low: 217 10% 42%;
+    --p-low-muted: 214 20% 94%;
 
+    /* rounded-lg = 10px, rounded-md = 8px (controls), rounded-sm = 6px.
+       Surfaces use rounded-xl (12px); pills use rounded-full. */
     --radius: 0.625rem;
 
-    /* Depth without a drop shadow. Two layers, both very low alpha. */
-    --shadow-1: 0 1px 1px hsl(225 25% 14% / 0.03), 0 1px 2px hsl(225 25% 14% / 0.04);
-    --shadow-2: 0 1px 2px hsl(225 25% 14% / 0.04), 0 6px 16px -8px hsl(225 25% 14% / 0.10);
-    --shadow-3: 0 2px 4px hsl(225 25% 14% / 0.04), 0 16px 32px -16px hsl(225 25% 14% / 0.14);
-    --glow: 0 0 0 1px hsl(var(--ring) / 0.22), 0 6px 20px -8px hsl(var(--ring) / 0.25);
+    --shadow-1: 0 1px 2px hsl(222 40% 12% / 0.04);
+    --shadow-2: 0 1px 2px hsl(222 40% 12% / 0.04), 0 4px 12px -4px hsl(222 40% 12% / 0.08);
+    --shadow-3: 0 2px 4px hsl(222 40% 12% / 0.04), 0 16px 40px -12px hsl(222 40% 12% / 0.18);
+    --glow: 0 0 0 1px hsl(var(--ring) / 0.35);
   }
 
   .dark {
-    /* Not black. A very dark blue-grey, so white text sits on it without the halo
-       that pure black gives at small sizes. */
-    --background: 226 24% 9%;
-    --foreground: 220 18% 92%;
+    --background: 222 22% 8%;
+    --foreground: 214 25% 92%;
 
-    --card: 226 22% 12%;
-    --card-foreground: 220 18% 92%;
+    --card: 222 20% 11%;
+    --card-foreground: 214 25% 92%;
 
-    --popover: 226 22% 12%;
-    --popover-foreground: 220 18% 92%;
+    --popover: 222 20% 12%;
+    --popover-foreground: 214 25% 92%;
 
-    /* Lifted, not dimmed: on a dark surface the navy has to come forward to read as
-       an accent at all. */
-    --primary: 228 72% 72%;
-    --primary-foreground: 226 30% 10%;
+    --primary: 217 88% 70%;
+    --primary-foreground: 222 45% 10%;
 
-    --secondary: 226 16% 18%;
-    --secondary-foreground: 220 18% 92%;
+    --secondary: 220 16% 17%;
+    --secondary-foreground: 214 25% 92%;
 
-    --muted: 226 16% 16%;
-    --muted-foreground: 220 10% 62%;
+    --muted: 220 16% 15%;
+    --muted-foreground: 216 12% 66%;
 
-    --accent: 226 16% 18%;
-    --accent-foreground: 220 18% 92%;
+    --accent: 220 16% 17%;
+    --accent-foreground: 214 25% 92%;
 
-    --destructive: 358 58% 55%;
-    --destructive-foreground: 0 80% 98%;
+    --destructive: 356 70% 60%;
+    --destructive-foreground: 0 0% 100%;
 
-    --border: 226 14% 20%;
-    --input: 226 14% 22%;
-    --ring: 228 70% 62%;
+    --border: 220 14% 19%;
+    --input: 220 13% 25%;
+    --ring: 217 88% 65%;
 
-    --accent-from: 232 74% 66%;
-    --accent-to: 196 72% 56%;
+    --accent-from: 217 88% 70%;
+    --accent-to: 217 70% 64%;
 
-    --ok: 158 48% 52%;
-    --ok-foreground: 158 60% 8%;
-    --ok-muted: 158 34% 15%;
+    --ok: 152 50% 58%;
+    --ok-foreground: 155 60% 8%;
+    --ok-muted: 155 35% 13%;
 
-    --warn: 34 80% 58%;
+    --warn: 38 88% 62%;
     --warn-foreground: 32 90% 8%;
-    --warn-muted: 34 40% 16%;
+    --warn-muted: 34 45% 13%;
 
-    --bad: 358 70% 63%;
-    --bad-foreground: 0 80% 8%;
-    --bad-muted: 358 40% 17%;
+    --bad: 356 85% 70%;
+    --bad-foreground: 356 60% 8%;
+    --bad-muted: 356 40% 15%;
 
-    --info: 220 70% 68%;
-    --info-foreground: 220 60% 8%;
-    --info-muted: 220 40% 18%;
+    --info: 214 90% 72%;
+    --info-foreground: 222 60% 8%;
+    --info-muted: 218 40% 16%;
 
-    --p-critical: 358 70% 63%;
-    --p-critical-muted: 358 40% 17%;
-    --p-high: 30 82% 60%;
-    --p-high-muted: 30 40% 16%;
-    --p-medium: 218 72% 68%;
-    --p-medium-muted: 218 38% 18%;
-    --p-low: 220 10% 60%;
-    --p-low-muted: 226 14% 18%;
+    --p-critical: 356 85% 70%;
+    --p-critical-muted: 356 40% 15%;
+    --p-high: 30 88% 62%;
+    --p-high-muted: 30 45% 13%;
+    --p-medium: 214 90% 72%;
+    --p-medium-muted: 218 40% 16%;
+    --p-low: 216 12% 64%;
+    --p-low-muted: 220 14% 17%;
 
-    /* In the dark, depth is a highlight on the top edge rather than a shadow below. */
-    --shadow-1: inset 0 1px 0 hsl(220 30% 100% / 0.03), 0 1px 2px hsl(0 0% 0% / 0.3);
-    --shadow-2: inset 0 1px 0 hsl(220 30% 100% / 0.04), 0 6px 16px -8px hsl(0 0% 0% / 0.5);
-    --shadow-3: inset 0 1px 0 hsl(220 30% 100% / 0.05), 0 16px 32px -16px hsl(0 0% 0% / 0.6);
-    --glow: 0 0 0 1px hsl(var(--ring) / 0.3), 0 6px 24px -8px hsl(var(--ring) / 0.3);
+    --shadow-1: 0 1px 2px hsl(0 0% 0% / 0.3);
+    --shadow-2: 0 1px 2px hsl(0 0% 0% / 0.3), 0 6px 16px -8px hsl(0 0% 0% / 0.5);
+    --shadow-3: 0 2px 4px hsl(0 0% 0% / 0.3), 0 16px 40px -12px hsl(0 0% 0% / 0.6);
+    --glow: 0 0 0 1px hsl(var(--ring) / 0.45);
   }
 }
 
@@ -191,16 +184,25 @@
 
   body {
     @apply bg-background text-foreground;
-    /* Tabular numerals everywhere: figures in a column have to line up, and a count
-       that reflows as it changes is a count nobody trusts. */
-    font-feature-settings: 'cv11', 'ss01', 'tnum';
+    font-size: 0.9375rem; /* 15px reading size */
+    line-height: 1.55;
+    /* Tabular numerals: dates, counts and codes line up in columns. */
+    font-feature-settings: 'cv11', 'tnum';
     font-variation-settings: 'opsz' 32;
   }
 
   h1,
   h2,
-  h3 {
-    letter-spacing: -0.015em;
+  h3,
+  h4 {
+    letter-spacing: -0.012em;
+  }
+
+  code,
+  kbd,
+  samp,
+  .font-mono {
+    font-variant-numeric: tabular-nums slashed-zero;
   }
 
   ::selection {
@@ -212,7 +214,7 @@
     @apply font-mono text-hash break-all select-all text-muted-foreground;
   }
 
-  /* A focus ring that is visible on every surface, and only for keyboard users. */
+  /* A focus ring visible on every surface, and only for keyboard users. */
   :focus-visible {
     outline: 2px solid hsl(var(--ring));
     outline-offset: 2px;
@@ -231,65 +233,63 @@
 }
 
 @layer components {
-  /**
-   * A panel. Hairline border, a shadow you feel rather than see.
-   *
-   * There is no hover lift any more. A card that moves when the pointer crosses it is
-   * telling the reader it is clickable, and most of these are not — on a dense screen
-   * that reads as the whole page twitching.
-   */
+  /** The one content width, shared by the app header and every page (max 1280px). */
+  .page-container {
+    @apply mx-auto w-full max-w-[1280px] px-4 sm:px-6 lg:px-8;
+  }
+
+  /** A surface. Hairline border, a shadow you feel rather than see. No hover lift. */
   .surface {
     @apply rounded-xl border bg-card text-card-foreground;
     box-shadow: var(--shadow-1);
   }
 
-  /** A surface that IS clickable. Reserved for rows and cards that open something. */
+  /* Retained so older markup keeps compiling; there is no lift any more. */
+  .surface-lift {
+    transform: none;
+  }
+
+  /** A surface that IS clickable. */
   .surface-interactive {
     @apply cursor-pointer transition-colors duration-150;
   }
   .surface-interactive:hover {
-    background-color: hsl(var(--muted) / 0.55);
+    background-color: hsl(var(--muted) / 0.6);
   }
 
-  /* Frosted. For chrome that floats over content: the header, a sticky toolbar. */
+  /* Chrome that sits over content. Near-opaque; the blur is barely perceptible. */
   .surface-glass {
-    background: hsl(var(--background) / 0.82);
-    backdrop-filter: saturate(140%) blur(12px);
-    -webkit-backdrop-filter: saturate(140%) blur(12px);
+    background: hsl(var(--card) / 0.92);
+    backdrop-filter: saturate(140%) blur(8px);
+    -webkit-backdrop-filter: saturate(140%) blur(8px);
   }
 
-  /* The accent gradient, as text. The hero headline, and nothing else. */
+  /* Formerly gradient text. Now simply the accent colour. */
   .text-gradient {
-    background: linear-gradient(100deg, hsl(var(--accent-from)), hsl(var(--accent-to)));
-    -webkit-background-clip: text;
-    background-clip: text;
-    color: transparent;
+    color: hsl(var(--primary));
   }
 
-  /* The accent gradient, as a 1px hairline (border-box trick keeps it crisp). */
+  /* Formerly a gradient hairline. Now a plain surface border. */
   .border-gradient {
     position: relative;
-    background:
-      linear-gradient(hsl(var(--card)), hsl(var(--card))) padding-box,
-      linear-gradient(120deg, hsl(var(--accent-from) / 0.6), hsl(var(--accent-to) / 0.6)) border-box;
-    border: 1px solid transparent;
+    background-color: hsl(var(--card));
+    border: 1px solid hsl(var(--border));
   }
 
-  /* Emphasis ring for the one thing on screen that matters most right now. */
+  /* Emphasis for the one thing on screen that matters right now: a quiet ring. */
   .glow {
     box-shadow: var(--glow);
   }
 
-  /**
-   * The marker on a selected row. A 3px bar on the leading edge — it survives both
-   * themes, needs no colour to be understood, and does not move the row.
-   */
+  /** A selected row: faint accent tint and a 2px leading bar. Does not move the row. */
   .row-selected {
-    box-shadow: inset 3px 0 0 0 hsl(var(--ring));
-    background-color: hsl(var(--muted) / 0.6);
+    box-shadow: inset 2px 0 0 0 hsl(var(--primary));
+    background-color: hsl(var(--primary) / 0.06);
+  }
+  .dark .row-selected {
+    background-color: hsl(var(--primary) / 0.1);
   }
 
-  /* Fades a pattern out towards the edges so it never competes with content. */
   .mask-radial {
     -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 30%, black 20%, transparent 75%);
     mask-image: radial-gradient(ellipse 70% 60% at 50% 30%, black 20%, transparent 75%);
@@ -301,8 +301,7 @@
 }
 
 @layer utilities {
-  /* Elements a reveal animation will bring in start invisible, so there is no flash
-     of finished layout before the timeline runs. The reveal removes the class. */
+  /* Elements a reveal animation will bring in start invisible. The reveal removes it. */
   .will-reveal {
     opacity: 0;
   }
@@ -319,9 +318,8 @@
     font-variant-numeric: tabular-nums;
   }
 
-  /* A label above a value: small, uppercase, quiet. Used on every detail panel, so it
-     is one utility rather than five slightly different class lists. */
+  /* A small label above a value or a group. Quiet, uppercase, 12px. */
   .label-xs {
-    @apply text-[11px] font-medium uppercase tracking-wider text-muted-foreground;
+    @apply text-xs font-medium uppercase tracking-[0.05em] text-muted-foreground;
   }
 }

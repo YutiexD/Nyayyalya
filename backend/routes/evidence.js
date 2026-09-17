@@ -38,7 +38,7 @@ router.get(
 /**
  * Open an exhibit by its register code (EX-…). The code only locates an id; the
  * resolver decides as for `/:id`, so counsel reaching for an exhibit outside the set
- * served on them is refused EXHIBIT_NOT_IN_DISCLOSURE_SET — and the attempt is in the
+ * not on record is refused NOT_ON_RECORD_FOR_THIS_CASE — and the attempt is in the
  * audit feed. Declared before `/:id`.
  */
 router.get(
@@ -54,10 +54,30 @@ router.get(
   evidence.getEvidence
 );
 
+/**
+ * The exhibit's lifecycle, every milestone with who did it and its proofs (hashes, key
+ * fingerprints, ledger entries, anchoring). Same visibility as the exhibit itself.
+ */
+router.get(
+  '/:id/lifecycle',
+  authorize({ action: ACTION.READ, resourceType: RESOURCE_TYPE.EVIDENCE }),
+  evidence.getEvidenceLifecycle
+);
+
 router.post(
   '/:id/verify',
   authorize({ action: ACTION.VERIFY, resourceType: RESOURCE_TYPE.EVIDENCE }),
   evidence.verifyEvidence
+);
+
+/**
+ * Retry a failed AI analysis. VERIFY on the exhibit — reading-level access, since
+ * re-asking changes nothing in the record — and the controller refuses a party.
+ */
+router.post(
+  '/:id/ai-analysis/retry',
+  authorize({ action: ACTION.VERIFY, resourceType: RESOURCE_TYPE.EVIDENCE }),
+  evidence.retryAiAnalysis
 );
 
 router.post(

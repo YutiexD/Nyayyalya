@@ -27,6 +27,8 @@ import { createApp } from '../../app.js';
 import fslRoutes, { evidenceFslRouter } from '../../routes/fsl.js';
 import { activateUser } from '../helpers/client.js';
 import { verifyChain } from '../../services/ledger.js';
+import { drainAnalyses } from '../../services/ai/analysisService.js';
+import { createGeminiStub } from '../fixtures/geminiStub.js';
 import {
   LEDGER_EVENT,
   REFERRAL_STATUS,
@@ -38,6 +40,7 @@ import {
 
 let mongo;
 let server;
+let stub;
 
 const IO = 'UP-GZB-4471';
 const SHO = 'UP-GZB-4402';
@@ -76,9 +79,13 @@ beforeAll(async () => {
   for (const m of allModels) await m.createIndexes();
 
   server = appWithFslRoutes();
+  stub = createGeminiStub();
+  await stub.listen(Number(process.env.GEMINI_STUB_PORT));
 }, 120_000);
 
 afterAll(async () => {
+  await drainAnalyses();
+  await stub.close();
   await mongoose.disconnect();
   await stopDirectories();
   await mongo.stop();
@@ -489,28 +496,29 @@ describe('accept, then report', () => {
 
 // ================================================ triage and opinion apart ====
 
-describe('automated triage and forensic opinion are separate claims', () => {
-  it('leaves triage untouched through referral, acceptance and report', async () => {
-    const { evidence } = await caseWithExhibit();
+describe('the Gemini analysis and the forensic opinion are separate claims', () => {
+  it('leaves the Gemini analysis untouched through referral, acceptance and report', async () => {
+    const { evidence } = await caseWithExhibit('STUB:HIGH separate');
+    await drainAnalyses();
     const sho = await activateUser(server, SHO);
     const examiner = await activateUser(server, EXAMINER);
 
-    const before = (await Evidence.findById(evidence._id).lean()).triage;
-    expect(before.priority).toBeTruthy();
-    expect(before.disclaimer).toMatch(/Not expert opinion under BSA s\.39/);
+    const before = (await Evidence.findById(evidence._id).lean()).aiAnalysis;
+    expect(before.status).toBe('COMPLETED');
+    expect(before.disclaimer).toMatch(/not expert opinion under BSA s\.39/i);
 
     const referral = (await refer(sho, evidence._id)).body.referral;
     await auth(request(server).post(`/api/fsl/referrals/${referral.id}/accept`), examiner);
     const filed = await fileReport(examiner, referral.id, {
       opinion: FORENSIC_OPINION.AUTHENTIC,
-      bytes: pdfBytes('triage-check'),
+      bytes: pdfBytes('analysis-check'),
     });
     expect(filed.status).toBe(201);
 
-    const after = (await Evidence.findById(evidence._id).lean()).triage;
+    const after = (await Evidence.findById(evidence._id).lean()).aiAnalysis;
     expect(after).toEqual(before);
 
-    // And no ledger event in this flow carries a triage claim.
+    // And no ledger event in this flow carries an AI claim.
     const entries = await Ledger.find({
       eventType: {
         $in: [
@@ -523,7 +531,8 @@ describe('automated triage and forensic opinion are separate claims', () => {
     expect(entries).toHaveLength(3);
     for (const e of entries) {
       expect(e.payload.triagePriority).toBeUndefined();
-      expect(e.payload.triage).toBeUndefined();
+      expect(e.payload.aiAnalysis).toBeUndefined();
+      expect(e.payload.deepfakeScore).toBeUndefined();
     }
   });
 });
@@ -540,11 +549,9 @@ describe('automated triage and forensic opinion are separate claims', () => {
  * state it serves, in the order the system says it should be looked at.
  */
 describe('the laboratory review queue', () => {
-  it('lists evidence never referred to anyone, worst first', async () => {
-    const { caseId, io } = await caseWithExhibit('queue-1');
-    // A second exhibit with several manipulation indicators, so the two land in
-    // different bands and the ordering is a real assertion rather than a tautology.
-    const bytes = pngBytes('queue-2');
+  it('lists evidence never referred to anyone, in the priority Gemini recommended', async () => {
+    const { caseId, io } = await caseWithExhibit('STUB:LOW queue-1');
+    const bytes = pngBytes('STUB:CRITICAL queue-2');
     const digest = sha256(bytes);
     await auth(request(server).post('/api/evidence/upload'), io)
       .field('caseId', caseId)
@@ -552,8 +559,8 @@ describe('the laboratory review queue', () => {
       .field('sha256Client', digest)
       .field('signature', io.keys.sign(digest))
       .field('sourceType', 'MOBILE')
-      .field('metadata', JSON.stringify({ software: 'Adobe Photoshop 25.0' }))
       .attach('file', bytes, { filename: 'whatsapp-forward.png', contentType: 'image/png' });
+    await drainAnalyses();
 
     const examiner = await activateUser(server, EXAMINER);
     const res = await auth(request(server).get('/api/fsl/queue'), examiner);
@@ -561,12 +568,16 @@ describe('the laboratory review queue', () => {
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(res.body.labId).toBe(LAB);
     expect(res.body.queue.length).toBe(2);
-
-    // Highest band first, and every row carries its priority and the disclaimer.
-    const ranks = res.body.queue.map((x) => TRIAGE_PRIORITY_ORDER.indexOf(x.triage.priority));
-    expect(ranks).toEqual([...ranks].sort((a, b) => a - b));
-    expect(res.body.uiLabel).toBe('Review Priority');
-    expect(res.body.disclaimer).toMatch(/Not expert opinion/i);
+    expect(res.body.queue.map((x) => x.aiAnalysis.triagePriority)).toEqual(['CRITICAL', 'LOW']);
+    expect(res.body.uiLabel).toBe('Review priority (AI)');
+    expect(res.body.disclaimer).toMatch(/not expert opinion/i);
+    // The provider is persisted for the record, never sent.
+    for (const item of res.body.queue) {
+      expect(item.aiAnalysis).not.toHaveProperty('provider');
+      expect(item.aiAnalysis).not.toHaveProperty('model');
+    }
+    expect(JSON.stringify(res.body)).not.toMatch(/gemini|google/i);
+    expect(TRIAGE_PRIORITY_ORDER).toContain(res.body.queue[0].aiAnalysis.triagePriority);
   });
 
   it('counts the pending work by band, and never counts finished work into it', async () => {
@@ -686,19 +697,30 @@ describe('a direct forensic verdict', () => {
     expect((await Evidence.findById(evidence._id).lean()).forensic.opinion).toBeNull();
   });
 
-  it('does not read or write triage — the two claims stay separate', async () => {
-    const { evidence } = await caseWithExhibit('separate');
+  it('does not read or write the Gemini analysis — the two claims stay separate', async () => {
+    const { evidence } = await caseWithExhibit('STUB:MEDIUM separate');
+    await drainAnalyses();
     const examiner = await activateUser(server, EXAMINER);
-    const before = (await Evidence.findById(evidence._id).lean()).triage;
+    const before = (await Evidence.findById(evidence._id).lean()).aiAnalysis;
 
     await recordVerdict(examiner, evidence, { opinion: FORENSIC_OPINION.INCONCLUSIVE });
 
-    const after = (await Evidence.findById(evidence._id).lean()).triage;
+    const after = (await Evidence.findById(evidence._id).lean()).aiAnalysis;
     expect(after).toEqual(before);
 
     const entry = await Ledger.findOne({ eventType: LEDGER_EVENT.FSL_REPORT_FILED }).lean();
     expect(entry.payload.triagePriority).toBeUndefined();
-    expect(entry.payload.triage).toBeUndefined();
+    expect(entry.payload.aiAnalysis).toBeUndefined();
+  });
+
+  it('refuses a second verdict — the first stays the official finding', async () => {
+    const { evidence } = await caseWithExhibit('twice');
+    const examiner = await activateUser(server, EXAMINER);
+    expect((await recordVerdict(examiner, evidence, { opinion: FORENSIC_OPINION.MANIPULATED })).status).toBe(201);
+    const second = await recordVerdict(examiner, evidence, { opinion: FORENSIC_OPINION.AUTHENTIC });
+    expect(second.status).toBe(409);
+    expect(second.body.error.code).toBe('VERDICT_ALREADY_RECORDED');
+    expect((await Evidence.findById(evidence._id).lean()).forensic.opinion).toBe(FORENSIC_OPINION.MANIPULATED);
   });
 
   it('closes any referral the laboratory still had open on the exhibit', async () => {
@@ -714,5 +736,50 @@ describe('a direct forensic verdict', () => {
     // another.
     const stored = await Referral.findById(referred.body.referral.id).lean();
     expect(stored.status).toBe(REFERRAL_STATUS.REPORTED);
+  });
+});
+
+// ======================================================= grouped by case ====
+
+describe('GET /api/fsl/cases — the laboratory sees the case first, then its evidence', () => {
+  it('groups exhibits under their case, most urgent first, with custody and certificate state', async () => {
+    const { caseId, io } = await caseWithExhibit('STUB:MEDIUM grouped-1');
+    const bytes = pngBytes('STUB:CRITICAL grouped-2');
+    const digest = sha256(bytes);
+    const second = await auth(request(server).post('/api/evidence/upload'), io)
+      .field('caseId', caseId)
+      .field('title', 'Second clip')
+      .field('sha256Client', digest)
+      .field('signature', io.keys.sign(digest))
+      .field('sourceType', 'MOBILE')
+      .attach('file', bytes, { filename: 'second.png', contentType: 'image/png' });
+    expect(second.status).toBe(201);
+    await drainAnalyses();
+
+    const examiner = await activateUser(server, EXAMINER);
+    const res = await auth(request(server).get('/api/fsl/cases'), examiner);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.cases).toHaveLength(1);
+
+    const [group] = res.body.cases;
+    expect(group.case.firNumber).toBe(FIR);
+    expect(group.case.stageLabel).toBe('Under investigation');
+    expect(group.highestPriority).toBe('CRITICAL');
+    expect(group.evidence.map((e) => e.aiAnalysis.triagePriority)).toEqual(['CRITICAL', 'MEDIUM']);
+    expect(group.summary).toMatchObject({ exhibits: 2, awaitingVerdict: 2, verdicts: 0 });
+    for (const e of group.evidence) {
+      expect(e).toHaveProperty('physicalCustody');
+      expect(e).toHaveProperty('certificate');
+      expect(e.forensic.status).toBe(FORENSIC_STATUS.NOT_REFERRED);
+    }
+  });
+
+  it('shows police no laboratory work', async () => {
+    await caseWithExhibit('police');
+    const sho = await activateUser(server, SHO);
+    const res = await auth(request(server).get('/api/fsl/cases'), sho);
+    expect(res.status).toBe(200);
+    expect(res.body.cases).toEqual([]);
+    expect(res.body.labId).toBeNull();
   });
 });

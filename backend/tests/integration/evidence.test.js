@@ -28,6 +28,9 @@ import { resolveObjectPath } from '../../services/storage.js';
 import { verifyChain } from '../../services/ledger.js';
 import { runAnchorCycle } from '../../services/anchor.js';
 import { AnchorBatch } from '../../models/AnchorBatch.js';
+import { drainAnalyses } from '../../services/ai/analysisService.js';
+import { createGeminiStub } from '../fixtures/geminiStub.js';
+import env from '../../config/env.js';
 import {
   FILE_INTEGRITY,
   CHAIN_INTEGRITY,
@@ -38,6 +41,7 @@ import {
 
 let mongo;
 let server;
+let stub;
 let io;
 let caseId;
 
@@ -58,9 +62,13 @@ beforeAll(async () => {
   await mongoose.connect(uri, { dbName: 'lexx_test_evidence', bufferCommands: false });
   for (const m of allModels) await m.createIndexes();
   server = createApp();
+  stub = createGeminiStub();
+  await stub.listen(Number(process.env.GEMINI_STUB_PORT));
 }, 120_000);
 
 afterAll(async () => {
+  await drainAnalyses();
+  await stub.close();
   await mongoose.disconnect();
   await stopDirectories();
   await mongo.stop();
@@ -90,10 +98,12 @@ async function upload(bytes, overrides = {}) {
     .field('caseId', overrides.caseId ?? caseId)
     .field('title', overrides.title ?? 'CCTV still')
     .field('sha256Client', hash)
-    .field('signature', signature)
-    .field('sourceType', overrides.sourceType ?? 'MOBILE')
-    .field('make', 'Samsung')
-    .field('model', 'A54');
+    .field('signature', signature);
+
+  // `minimal` sends exactly what the simplified upload form sends: file + title.
+  if (!overrides.minimal) {
+    req.field('sourceType', overrides.sourceType ?? 'MOBILE').field('make', 'Samsung').field('model', 'A54');
+  }
 
   if (overrides.metadata) req.field('metadata', overrides.metadata);
 
@@ -152,15 +162,78 @@ describe('evidence upload — browser hash + signature verified server-side', ()
     expect((await verifyChain()).intact).toBe(true);
   });
 
-  it('attaches triage as REVIEW PRIORITY with the statutory disclaimer', async () => {
-    const res = await upload(jpegBytes('triage'));
-    expect(['HIGH', 'MEDIUM', 'LOW']).toContain(res.body.evidence.triage.priority);
-    expect(res.body.evidence.triage.disclaimer).toBe(TRIAGE_DISCLAIMER);
+  it('gives every exhibit a permanent QR label, returned on upload, read and list', async () => {
+    const first = await upload(jpegBytes('label one'));
+    expect(first.status, JSON.stringify(first.body)).toBe(201);
+    const { label } = first.body.evidence;
+    expect(label.token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(label.url).toBe(`${env.PUBLIC_WEB_URL}/verify?label=${encodeURIComponent(label.token)}`);
+    expect((await Evidence.findById(first.body.evidence._id).lean()).labelToken).toBe(label.token);
 
-    // Never a verdict, never a score.
-    const t = JSON.stringify(res.body.evidence.triage).toUpperCase();
-    expect(t).not.toMatch(/AUTHENTIC|MANIPULATED|VERIFIED/);
-    expect(t).not.toMatch(/\d+(\.\d+)?%/);
+    const read = await request(server)
+      .get(`/api/evidence/${first.body.evidence._id}`)
+      .set('Authorization', `Bearer ${io.accessToken}`);
+    expect(read.status).toBe(200);
+    expect(read.body.evidence.label).toEqual(label);
+
+    const second = await upload(jpegBytes('label two'));
+    expect(second.body.evidence.label.token).not.toBe(label.token);
+
+    const list = await request(server)
+      .get(`/api/evidence?caseId=${caseId}`)
+      .set('Authorization', `Bearer ${io.accessToken}`);
+    expect(list.status).toBe(200);
+    expect(list.body.evidence.find((e) => String(e._id) === first.body.evidence._id).label).toEqual(label);
+    for (const e of list.body.evidence) expect(e.label.url).toContain('/verify?label=');
+  });
+
+  it('accepts an upload of just a file and a title, and issues its certificate', async () => {
+    const res = await upload(jpegBytes('minimal'), { minimal: true });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.evidence.sourceDevice.sourceType).toBe('OTHER');
+    expect(res.body.evidence.sourceDevice.make).toBeNull();
+    expect(res.body.certificate).toMatchObject({ status: 'ACTIVE', state: 'ISSUED' });
+    expect(res.body.certificate.certificateId).toMatch(/^[0-9a-f]{24}$/);
+    expect(new URL(res.body.certificate.verificationUrl).searchParams.get('token')).toBe(
+      res.body.certificate.verificationToken
+    );
+  });
+
+  it('treats blank optional form fields as absent', async () => {
+    const bytes = jpegBytes('blank-fields');
+    const hash = sha256(bytes);
+    const res = await request(server)
+      .post('/api/evidence/upload')
+      .set('Authorization', `Bearer ${io.accessToken}`)
+      .field('caseId', caseId)
+      .field('title', 'Blank particulars')
+      .field('sha256Client', hash)
+      .field('signature', io.keys.sign(hash))
+      .field('sourceType', '')
+      .field('make', '')
+      .field('capturedAt', '')
+      .attach('file', bytes, { filename: 'still.jpg', contentType: 'image/jpeg' });
+    expect(res.status, JSON.stringify(res.body)).toBe(201);
+    expect(res.body.evidence.sourceDevice.sourceType).toBe('OTHER');
+  });
+
+  it('queues the exhibit for Gemini analysis — nothing is scored at ingest', async () => {
+    const res = await upload(jpegBytes('STUB:HIGH ingest'));
+    // The uploading officer is not the laboratory: no AI output in their response.
+    expect(res.body.evidence.aiAnalysis).toBeUndefined();
+
+    const ai = (await Evidence.findById(res.body.evidence._id).lean()).aiAnalysis;
+    expect(ai.provider).toBe('GEMINI');
+    expect(ai.disclaimer).toBe(TRIAGE_DISCLAIMER);
+
+    // No AI claim is ever written to the ledger.
+    const entry = await Ledger.findOne({ seq: res.body.receipt.ledgerSeq }).lean();
+    expect(entry.payload.triagePriority).toBeUndefined();
+
+    await drainAnalyses();
+    const stored = (await Evidence.findById(res.body.evidence._id).lean()).aiAnalysis;
+    expect(stored.status).toBe('COMPLETED');
+    expect(stored.triagePriority).toBe('HIGH');
   });
 
   it('gives two exhibits distinct codes and distinct storage keys', async () => {
@@ -619,6 +692,60 @@ describe('signing-key rotation does not invalidate history', () => {
   });
 });
 
+// ============================ AI analysis is for the forensic laboratory only ==
+
+describe('AI analysis output reaches the FSL examiner and nobody else', () => {
+  const get = (session, path) => request(server).get(path).set('Authorization', `Bearer ${session.accessToken}`);
+
+  it('is absent from every evidence response to police, and present for the examiner', async () => {
+    const up = await upload(jpegBytes('STUB:HIGH ai-visibility'));
+    await drainAnalyses();
+    const id = up.body.evidence._id;
+    const sho = await activateUser(server, 'UP-GZB-4402');
+    const examiner = await activateUser(server, 'FSL-LKO-0091');
+
+    expect(up.body.evidence).not.toHaveProperty('aiAnalysis');
+
+    for (const session of [io, sho]) {
+      const one = await get(session, `/api/evidence/${id}`);
+      expect(one.status, JSON.stringify(one.body)).toBe(200);
+      expect(one.body.evidence).not.toHaveProperty('aiAnalysis');
+
+      const byCode = await get(session, `/api/evidence/by-code/${up.body.evidence.exhibitCode}`);
+      expect(byCode.body.evidence).not.toHaveProperty('aiAnalysis');
+
+      const list = await get(session, `/api/evidence?caseId=${caseId}`);
+      expect(list.status).toBe(200);
+      expect(list.body.evidence.length).toBeGreaterThan(0);
+      for (const e of list.body.evidence) expect(e).not.toHaveProperty('aiAnalysis');
+    }
+
+    const lab = await get(examiner, `/api/evidence/${id}`);
+    expect(lab.status, JSON.stringify(lab.body)).toBe(200);
+    expect(lab.body.evidence.aiAnalysis.status).toBe('COMPLETED');
+    expect(lab.body.evidence.aiAnalysis.triagePriority).toBe('HIGH');
+  });
+
+  it('lets only the examiner ask for an analysis to be retried', async () => {
+    const up = await upload(jpegBytes('STUB:LOW retry'));
+    await drainAnalyses();
+    const id = up.body.evidence._id;
+    const examiner = await activateUser(server, 'FSL-LKO-0091');
+
+    const byIo = await request(server)
+      .post(`/api/evidence/${id}/ai-analysis/retry`)
+      .set('Authorization', `Bearer ${io.accessToken}`);
+    expect(byIo.status).toBe(403);
+
+    // A completed analysis is not re-run — but the examiner reaches the decision.
+    const byLab = await request(server)
+      .post(`/api/evidence/${id}/ai-analysis/retry`)
+      .set('Authorization', `Bearer ${examiner.accessToken}`);
+    expect(byLab.status, JSON.stringify(byLab.body)).toBe(409);
+    expect(byLab.body.error.code).toBe('AI_ANALYSIS_NOT_RETRYABLE');
+  });
+});
+
 // ========================== jurisdiction scope on the evidence LIST paths ==
 
 /**
@@ -639,19 +766,24 @@ describe('signing-key rotation does not invalidate history', () => {
  * Both are covered here: one asserts what must be present, the other what must not.
  */
 describe('police scope on the evidence list paths resolves through cases', () => {
-  it("lists the station's exhibits in the SHO's triage queue", async () => {
-    const up = await upload(jpegBytes('for-the-queue'));
+  it("keeps the AI triage queue from the SHO, and shows the station's exhibit to the laboratory", async () => {
+    const up = await upload(jpegBytes('STUB:MEDIUM for-the-queue'));
+    await drainAnalyses();
     const sho = await activateUser(server, 'UP-GZB-4402');
+    const examiner = await activateUser(server, 'FSL-LKO-0091');
 
-    const res = await request(server)
+    const shoRes = await request(server)
       .get('/api/evidence/queue/triage')
       .set('Authorization', `Bearer ${sho.accessToken}`);
+    expect(shoRes.status).toBe(200);
+    expect(shoRes.body.queue).toEqual([]);
 
-    expect(res.status).toBe(200);
-    const codes = (res.body.queue ?? []).map((e) => e.exhibitCode);
-    expect(codes, 'the SHO must see exhibits triaged at their station').toContain(
-      up.body.evidence.exhibitCode
-    );
+    const labRes = await request(server)
+      .get('/api/evidence/queue/triage')
+      .set('Authorization', `Bearer ${examiner.accessToken}`);
+    expect(labRes.status).toBe(200);
+    const codes = (labRes.body.queue ?? []).map((e) => e.exhibitCode);
+    expect(codes, 'the laboratory sees exhibits registered in its state').toContain(up.body.evidence.exhibitCode);
   });
 
   it('does NOT list an exhibit from another station to an IO who omits caseId', async () => {
@@ -677,7 +809,7 @@ describe('police scope on the evidence list paths resolves through cases', () =>
       title: 'Not this officer’s exhibit',
       mimeType: 'image/jpeg',
       createdAt: new Date(),
-      triage: { priority: 'HIGH' },
+      aiAnalysis: { status: 'COMPLETED', triagePriority: 'HIGH' },
     });
 
     const res = await request(server)

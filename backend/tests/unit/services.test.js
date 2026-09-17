@@ -1,5 +1,6 @@
 /**
- * Unit tests for the pure/leaf services: jurisdiction, QR, Merkle, envelope, triage.
+ * Unit tests for the pure/leaf services: jurisdiction, QR, Merkle, envelope, the Gemini
+ * analysis validator and the case state machine.
  */
 import { describe, it, expect } from 'vitest';
 import crypto from 'node:crypto';
@@ -7,14 +8,17 @@ import { computeJurisdiction, selectCourt, forensicVisitRequired } from '../../s
 import { buildQrPayload, verifyQrPayload, signItemCode } from '../../services/qr.js';
 import { merkleRoot, merkleProof, verifyProof, leafOf, hashPair } from '../../services/merkle.js';
 import { generateDek, wrapDek, unwrapDek, sealBuffer, openBuffer } from '../../services/envelope.js';
-import { triageEvidence } from '../../services/triage.js';
+import { validateAnalysis, RESPONSE_SCHEMA } from '../../services/ai/analysisSchema.js';
+import { seesAiAnalysis, aiAnalysisView, aiAnalysisFor } from '../../services/ai/visibility.js';
+import { AI_ERROR, neutralText, parseRetryAfterMs } from '../../services/ai/geminiClient.js';
+import { retryDelayMs, MAX_HONOURED_RETRY_AFTER_MS } from '../../services/ai/analysisService.js';
+import { AI_DISCLAIMER, TRIAGE_UI_LABEL } from '../../models/enums.js';
+import { evaluateTransition, workflowFor, requiresCommittal } from '../../services/caseWorkflow.js';
 import { verifyEcdsaP256, publicKeyFingerprint } from '../../config/crypto.js';
 import {
   COURT_TYPE,
   SENSITIVITY_CLASS,
-  TRIAGE_PRIORITY,
   TRIAGE_PRIORITY_ORDER,
-  TRIAGE_DISCLAIMER,
 } from '../../models/enums.js';
 
 // ============================================================ jurisdiction ====
@@ -271,163 +275,229 @@ describe('envelope encryption', () => {
   });
 });
 
-// ================================================================ triage ======
+// ================================================== Gemini analysis validation ====
 
-describe('AI triage (review prioritisation only)', () => {
-  it('returns LOW with no indicators for clean metadata', () => {
-    const r = triageEvidence({
-      mimeType: 'image/jpeg',
-      sizeBytes: 2_400_000,
-      metadata: { dateTimeOriginal: '2026-01-01T00:00:00Z', make: 'Samsung', model: 'A54', hasC2PA: true },
+const validAnalysis = () => ({
+  deepfakeAssessment: 'LIKELY_MANIPULATED',
+  deepfakeScore: 81,
+  analysisDescription:
+    'Lip movement drifts out of sync with the audio from 00:07, and the jawline blurs on each head turn.',
+  detectedIndicators: ['Audio-visual desynchronisation from 00:07', 'Boundary blur along the jawline'],
+  triagePriority: 'HIGH',
+  priorityReason: 'Strong face-swap indicators on an exhibit in a grave case.',
+  fslReviewRecommended: true,
+  fslReviewReason: 'Frame-level examination is needed to confirm the splice.',
+  evidenceSummary: 'A short handheld video of two people talking indoors.',
+});
+
+const codeOf = (fn) => {
+  try {
+    fn();
+    return null;
+  } catch (err) {
+    return err.code ?? 'THREW';
+  }
+};
+
+describe('Gemini analysis validation — the backend accepts or refuses, and never derives', () => {
+  it('accepts a well-formed, coherent analysis unchanged', () => {
+    const a = validAnalysis();
+    expect(validateAnalysis(a)).toEqual(a);
+  });
+
+  it('asks Gemini for exactly the controlled priority vocabulary', () => {
+    expect(RESPONSE_SCHEMA.properties.triagePriority.enum).toEqual([...TRIAGE_PRIORITY_ORDER]);
+  });
+
+  it('refuses anything outside the schema', () => {
+    for (const bad of [
+      { triagePriority: 'URGENT' },
+      { triagePriority: 'high' },
+      { deepfakeScore: 150 },
+      { deepfakeScore: -1 },
+      { deepfakeScore: 55.5 },
+      { deepfakeAssessment: 'FAKE' },
+      { analysisDescription: '' },
+      { analysisDescription: 'too short' },
+      { detectedIndicators: 'one indicator' },
+      { fslReviewRecommended: 'yes' },
+      { priorityReason: undefined },
+    ]) {
+      expect(codeOf(() => validateAnalysis({ ...validAnalysis(), ...bad })), JSON.stringify(bad)).toBe(
+        'AI_RESPONSE_SCHEMA_INVALID'
+      );
+    }
+  });
+
+  it('refuses an analysis that contradicts itself', () => {
+    for (const bad of [
+      { deepfakeAssessment: 'LIKELY_MANIPULATED', deepfakeScore: 20 },
+      { deepfakeAssessment: 'LIKELY_AUTHENTIC', deepfakeScore: 90 },
+      { deepfakeAssessment: 'LIKELY_MANIPULATED', detectedIndicators: [] },
+      { fslReviewRecommended: true, fslReviewReason: '' },
+    ]) {
+      expect(codeOf(() => validateAnalysis({ ...validAnalysis(), ...bad })), JSON.stringify(bad)).toBe(
+        'AI_RESPONSE_INCOHERENT'
+      );
+    }
+  });
+
+  it('never ties the priority to the score — a LOW priority on a high inconclusive score is accepted as given', () => {
+    const a = { ...validAnalysis(), deepfakeAssessment: 'INCONCLUSIVE', deepfakeScore: 88, triagePriority: 'LOW' };
+    expect(validateAnalysis(a).triagePriority).toBe('LOW');
+    const b = { ...validAnalysis(), deepfakeScore: 51, triagePriority: 'CRITICAL' };
+    expect(validateAnalysis(b).triagePriority).toBe('CRITICAL');
+  });
+});
+
+// ============================================ rate limits: Retry-After, backoff ====
+
+describe('a rate-limited analysis waits as asked, and backs off otherwise', () => {
+  it('reads Retry-After as seconds, as an HTTP date, and from a RetryInfo detail', () => {
+    expect(parseRetryAfterMs('7')).toBe(7000);
+    const now = Date.parse('2026-09-13T10:00:00Z');
+    expect(parseRetryAfterMs('Sun, 13 Sep 2026 10:00:30 GMT', null, now)).toBe(30_000);
+    expect(
+      parseRetryAfterMs(null, {
+        error: { details: [{ '@type': 'type.googleapis.com/google.rpc.RetryInfo', retryDelay: '12.5s' }] },
+      })
+    ).toBe(12_500);
+    expect(parseRetryAfterMs(null, { error: {} })).toBeNull();
+    expect(parseRetryAfterMs('soon')).toBeNull();
+  });
+
+  it('honours a Retry-After exactly, with only a little jitter on top', () => {
+    const err = { code: AI_ERROR.RATE_LIMITED, retryAfterMs: 5000 };
+    expect(retryDelayMs(err, 0, { random: () => 0 })).toBe(5000);
+    const most = retryDelayMs(err, 3, { random: () => 0.999 });
+    expect(most).toBeGreaterThanOrEqual(5000);
+    expect(most).toBeLessThanOrEqual(5500);
+  });
+
+  it('does not wait out a Retry-After longer than it honours', () => {
+    expect(retryDelayMs({ code: AI_ERROR.RATE_LIMITED, retryAfterMs: MAX_HONOURED_RETRY_AFTER_MS + 1 }, 0)).toBeNull();
+  });
+
+  it('otherwise backs off exponentially with jitter — from four times the base for a 429', () => {
+    const base = 1000;
+    const limited = { code: AI_ERROR.RATE_LIMITED };
+    for (const n of [0, 1, 2]) {
+      const step = base * 4 * 2 ** n;
+      expect(retryDelayMs(limited, n, { base, random: () => 0 })).toBe(step / 2);
+      const top = retryDelayMs(limited, n, { base, random: () => 0.9999 });
+      expect(top).toBeGreaterThan(step / 2);
+      expect(top).toBeLessThan(step);
+    }
+    expect(retryDelayMs({ code: AI_ERROR.UNAVAILABLE }, 0, { base, random: () => 0 })).toBe(500);
+    expect(retryDelayMs(limited, 12, { base, random: () => 0.9999 })).toBeLessThanOrEqual(60_000);
+  });
+});
+
+// ================================================= AI visibility and naming ====
+
+describe('the AI analysis is the laboratory’s, and names no provider', () => {
+  it('is visible to an FSL session only', () => {
+    expect(seesAiAnalysis({ authority: 'FSL' })).toBe(true);
+    for (const authority of ['POLICE', 'COURT', 'LEGAL']) expect(seesAiAnalysis({ authority })).toBe(false);
+    expect(seesAiAnalysis(null)).toBe(false);
+    expect(aiAnalysisFor({ authority: 'POLICE' }, { status: 'COMPLETED' })).toBeUndefined();
+  });
+
+  it('drops provider and model, and neutralises stored provider names and codes', () => {
+    const view = aiAnalysisView({
+      status: 'FAILED',
+      provider: 'GEMINI',
+      model: 'gemini-2.5-flash',
+      disclaimer: 'Automated preliminary assessment generated by Gemini.',
+      error: { code: 'GEMINI_RATE_LIMITED', message: 'Gemini answered HTTP 429', retryable: true, issues: [] },
+      // A record written while the online-source check existed. It is not carried forward.
+      onlineSource: { status: 'FOUND_ONLINE', summary: 'Found via Google Search.' },
     });
-    expect(r.priority).toBe(TRIAGE_PRIORITY.LOW);
-    expect(r.indicators).toEqual([]);
+    expect(view).not.toHaveProperty('provider');
+    expect(view).not.toHaveProperty('model');
+    expect(view.error.code).toBe('AI_RATE_LIMITED');
+    expect(view).not.toHaveProperty('onlineSource');
+    expect(JSON.stringify(view)).not.toMatch(/gemini|google/i);
+    expect(view.error.message).toBe('the AI service answered HTTP 429');
   });
 
-  it('raises priority as findings accumulate', () => {
-    // No timestamp, no device, no content credentials, and far too small to be a
-    // camera original: four findings on one file.
-    const r = triageEvidence({ mimeType: 'image/jpeg', sizeBytes: 1000, metadata: {} });
-    expect(r.priority).toBe(TRIAGE_PRIORITY.HIGH);
-    expect(r.indicators.length).toBeGreaterThanOrEqual(3);
+  it('labels and disclaims without naming the provider, and uses AI_* codes', () => {
+    expect(TRIAGE_UI_LABEL).toBe('Review priority (AI)');
+    expect(AI_DISCLAIMER).not.toMatch(/gemini|google/i);
+    expect(AI_DISCLAIMER).toMatch(/not expert opinion under BSA s\.39/);
+    for (const code of Object.values(AI_ERROR)) expect(code).toMatch(/^AI_/);
+    expect(neutralText('Gemini returned an analysis')).toBe('the AI service returned an analysis');
+  });
+});
+
+// ======================================================== case state machine ====
+
+const magistrateCase = (stage, extra = {}) => ({
+  stage,
+  bnsSections: ['303(2)'],
+  maxPunishmentYears: 3,
+  sensitivityClass: 'ORDINARY',
+  districtCode: 'UP-GZB',
+  courtId: 'UP-GZB-CJM-01',
+  cnrNumber: 'UPGB010012362026',
+  ...extra,
+});
+const sessionsCase = (stage, extra = {}) =>
+  magistrateCase(stage, { maxPunishmentYears: 20, sensitivityClass: 'POCSO', courtId: 'UP-GZB-SESS-02', ...extra });
+
+describe('case state machine', () => {
+  it('knows which cases need committal from the FIR facts alone', () => {
+    expect(requiresCommittal(magistrateCase('CHARGESHEET_FILED'))).toBe(false);
+    expect(requiresCommittal(sessionsCase('CHARGESHEET_FILED'))).toBe(true);
   });
 
-  it('flags an editing software tag', () => {
-    const r = triageEvidence({
-      mimeType: 'image/jpeg',
-      sizeBytes: 500_000,
-      metadata: { dateTimeOriginal: 'x', make: 'A', model: 'B', hasC2PA: true, software: 'Adobe Photoshop 25.0' },
-    });
-    expect(r.indicators).toContain('Editing software tag present (Adobe Photoshop 25.0)');
-  });
-
-  it('flags a container/stream duration mismatch', () => {
-    const r = triageEvidence({
-      mimeType: 'video/mp4',
-      sizeBytes: 10_000_000,
-      metadata: { dateTimeOriginal: 'x', make: 'A', model: 'B', hasC2PA: true, containerDurationSec: 30, streamDurationSec: 12 },
-    });
-    expect(r.indicators).toContain('Container and stream durations disagree by 18s');
-  });
-
-  /**
-   * The weighting exists so that ONE serious finding outranks a pile of weak ones.
-   * Counting indicators made "no content credentials" worth as much as "the bytes
-   * that arrived are not the bytes the officer hashed", which is how a real signal
-   * ends up below noise in a queue.
-   */
-  it('reaches CRITICAL on an ingest integrity failure alone', () => {
-    const r = triageEvidence({
-      mimeType: 'image/jpeg',
-      sizeBytes: 2_400_000,
-      metadata: { dateTimeOriginal: 'x', make: 'A', model: 'B', hasC2PA: true },
-      hashMatched: false,
-    });
-    expect(r.priority).toBe(TRIAGE_PRIORITY.CRITICAL);
-  });
-
-  it('does not reach CRITICAL on weak provenance gaps alone', () => {
-    const r = triageEvidence({ mimeType: 'image/jpeg', sizeBytes: 2_400_000, metadata: {} });
-    expect(r.priority).not.toBe(TRIAGE_PRIORITY.CRITICAL);
-  });
-
-  /**
-   * Gravity moves an exhibit up the queue. It does not, on its own, make an exhibit
-   * worth looking at.
-   *
-   * This is the rule that keeps the bands meaning something. Being a photograph on a
-   * POCSO case is true of EVERY photograph on that case — if it counted towards the
-   * band directly, every exhibit on a serious case would arrive pre-elevated, LOW
-   * would stop existing, and an examiner would be reading an unordered queue.
-   */
-  it('does NOT lift a file nothing was observed about, however grave the case', () => {
-    const clean = { dateTimeOriginal: 'x', make: 'A', model: 'B', hasC2PA: true };
-    const ordinary = triageEvidence({ mimeType: 'image/jpeg', sizeBytes: 900_000, metadata: clean });
-    const grave = triageEvidence({
-      mimeType: 'image/jpeg',
-      sizeBytes: 900_000,
-      metadata: clean,
-      sensitivityClass: 'POCSO',
-      maxPunishmentYears: 10,
-    });
-
-    expect(ordinary.priority).toBe(TRIAGE_PRIORITY.LOW);
-    expect(grave.priority).toBe(TRIAGE_PRIORITY.LOW);
-    // Nothing was observed about the file, so nothing is claimed about it...
-    expect(grave.indicators).toEqual([]);
-    // ...but the gravity IS on the record, as context rather than as a finding.
-    expect(grave.reasons.some((x) => x.kind === 'context')).toBe(true);
-  });
-
-  it('lifts an exhibit by one band when the case is grave AND something was observed', () => {
-    // One weak provenance gap: MEDIUM on an ordinary case, HIGH on a POCSO one.
-    const gap = { dateTimeOriginal: 'x', make: 'A', model: 'B' }; // no content credentials
-    const ordinary = triageEvidence({ mimeType: 'image/jpeg', sizeBytes: 900_000, metadata: gap });
-    const grave = triageEvidence({
-      mimeType: 'image/jpeg',
-      sizeBytes: 900_000,
-      metadata: gap,
-      sensitivityClass: 'POCSO',
-      maxPunishmentYears: 10,
-    });
-
-    expect(TRIAGE_PRIORITY_ORDER.indexOf(grave.priority)).toBeLessThan(
-      TRIAGE_PRIORITY_ORDER.indexOf(ordinary.priority)
+  it('lets the court take cognizance only of a filed chargesheet that is listed before it', () => {
+    expect(evaluateTransition(magistrateCase('CHARGESHEET_FILED'), 'TAKE_COGNIZANCE').ok).toBe(true);
+    expect(evaluateTransition(magistrateCase('UNDER_INVESTIGATION', { courtId: null, cnrNumber: null }), 'TAKE_COGNIZANCE').code).toBe(
+      'INVALID_TRANSITION'
     );
-    // Exactly one band, and the findings are identical either way.
-    expect(TRIAGE_PRIORITY_ORDER.indexOf(ordinary.priority) - TRIAGE_PRIORITY_ORDER.indexOf(grave.priority)).toBe(1);
-    expect(grave.indicators).toEqual(ordinary.indicators);
+    expect(evaluateTransition(magistrateCase('CHARGESHEET_FILED', { courtId: null }), 'TAKE_COGNIZANCE').code).toBe(
+      'CASE_NOT_LISTED'
+    );
   });
 
-  it('never promotes anything into CRITICAL on context alone', () => {
-    // A pile-up of provenance gaps on the gravest possible case still stops at HIGH.
-    const grave = triageEvidence({
-      mimeType: 'video/mp4',
-      sizeBytes: 900_000,
-      metadata: {},
-      sensitivityClass: 'POCSO',
-      maxPunishmentYears: 20,
-    });
-    expect(grave.priority).not.toBe(TRIAGE_PRIORITY.CRITICAL);
+  it('applies committal only to Sessions-triable cases', () => {
+    expect(evaluateTransition(magistrateCase('COGNIZANCE_TAKEN'), 'COMMIT_FOR_TRIAL').code).toBe('TRANSITION_NOT_APPLICABLE');
+    expect(evaluateTransition(sessionsCase('COGNIZANCE_TAKEN'), 'COMMIT_FOR_TRIAL').ok).toBe(true);
   });
 
-  it('assigns a priority to EVERY exhibit — there is no unprioritised state', () => {
-    for (const mimeType of ['image/jpeg', 'video/mp4', 'audio/mpeg', 'application/pdf', 'text/plain']) {
-      const r = triageEvidence({ mimeType, sizeBytes: 1_000_000 });
-      expect(TRIAGE_PRIORITY_ORDER).toContain(r.priority);
-    }
+  it('begins trial after committal, or straight after cognizance when there is none', () => {
+    expect(evaluateTransition(magistrateCase('COGNIZANCE_TAKEN'), 'BEGIN_TRIAL').ok).toBe(true);
+    expect(evaluateTransition(sessionsCase('COGNIZANCE_TAKEN'), 'BEGIN_TRIAL').code).toBe('INVALID_TRANSITION');
+    expect(evaluateTransition(sessionsCase('COMMITTED'), 'BEGIN_TRIAL').ok).toBe(true);
   });
 
-  it('always carries the statutory disclaimer', () => {
-    const r = triageEvidence({ mimeType: 'image/jpeg', sizeBytes: 1 });
-    expect(r.disclaimer).toBe(TRIAGE_DISCLAIMER);
-    expect(r.disclaimer).toMatch(/Not expert opinion/i);
+  it('refuses to close a case the court has not taken up, or one already closed', () => {
+    expect(evaluateTransition(magistrateCase('CHARGESHEET_FILED'), 'CLOSE_CASE').code).toBe('INVALID_TRANSITION');
+    expect(evaluateTransition(magistrateCase('TRIAL'), 'CLOSE_CASE').ok).toBe(true);
+    expect(evaluateTransition(magistrateCase('CLOSED'), 'CLOSE_CASE').code).toBe('CASE_IS_CLOSED');
   });
 
-  it('NEVER emits a score, percentage, confidence or verdict', () => {
-    // The compliance boundary, asserted mechanically rather than by convention.
-    const r = triageEvidence({ mimeType: 'image/jpeg', sizeBytes: 1000, metadata: {} });
-    const keys = Object.keys(r);
-    expect(keys).not.toContain('score');
-    expect(keys).not.toContain('confidence');
-    expect(keys).not.toContain('percentage');
-    expect(keys).not.toContain('opinion');
-    expect(keys).not.toContain('authentic');
-
-    const serialised = JSON.stringify(r).toUpperCase();
-    expect(serialised).not.toMatch(/AUTHENTIC/);
-    expect(serialised).not.toMatch(/MANIPULATED/);
-    expect(serialised).not.toMatch(/VERIFIED/);
-    // No bare percentage figures anywhere in the output.
-    expect(serialised).not.toMatch(/\d+(\.\d+)?%/);
+  it('requires a recorded reason for further investigation and for closure', () => {
+    expect(evaluateTransition(magistrateCase('COGNIZANCE_TAKEN'), 'DIRECT_FURTHER_INVESTIGATION').requiresNote).toBe(true);
+    expect(evaluateTransition(magistrateCase('TRIAL'), 'CLOSE_CASE').requiresNote).toBe(true);
+    expect(evaluateTransition(magistrateCase('CHARGESHEET_FILED'), 'TAKE_COGNIZANCE').requiresNote).toBe(false);
   });
 
-  it('only ever returns one of the four defined bands', () => {
-    for (const n of [0, 1, 2, 3, 6]) {
-      const meta = n === 0 ? { dateTimeOriginal: 'x', make: 'A', model: 'B', hasC2PA: true } : {};
-      const r = triageEvidence({ mimeType: 'image/jpeg', sizeBytes: 500_000, metadata: meta });
-      expect(Object.values(TRIAGE_PRIORITY)).toContain(r.priority);
-    }
+  it('names the next act and who performs it', () => {
+    const open = workflowFor(magistrateCase('UNDER_INVESTIGATION', { courtId: null, cnrNumber: null }));
+    expect(open.nextPoliceAction.action).toBe('FILE_CHARGESHEET');
+    expect(open.nextCourtAction).toBeNull();
+    expect(open.waitingOn).toBe('POLICE');
+
+    const filed = workflowFor(magistrateCase('CHARGESHEET_FILED'));
+    expect(filed.nextCourtAction.action).toBe('TAKE_COGNIZANCE');
+    expect(filed.waitingOn).toBe('COURT');
+    expect(filed.lifecycle.find((x) => x.stage === 'COMMITTED').state).toBe('not_applicable');
+
+    const closed = workflowFor(magistrateCase('CLOSED'));
+    expect(closed.nextCourtAction).toBeNull();
+    expect(closed.waitingOn).toBeNull();
   });
 });
 

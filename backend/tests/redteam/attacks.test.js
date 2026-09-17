@@ -331,6 +331,109 @@ describe('ATTACK: IDOR across every id-bearing route', () => {
   });
 });
 
+// ================================================ counsel past the record ====
+
+describe('ATTACK: counsel reaching past the case they are on record for', () => {
+  /** An exhibit written straight to the database, in any case. */
+  const exhibitIn = async (caseDoc, exhibitCode) => {
+    const owner = await User.findOne({ authorityId: 'UP-GZB-4402' }).lean();
+    const id = new mongoose.Types.ObjectId();
+    return Evidence.create({
+      _id: id,
+      exhibitCode,
+      caseId: caseDoc._id,
+      title: exhibitCode,
+      kind: 'DIGITAL',
+      sha256Client: 'a'.repeat(64),
+      sha256Server: 'a'.repeat(64),
+      signature: 'b'.repeat(128),
+      signerUserId: owner._id,
+      signerPubKeyFingerprint: 'c'.repeat(64),
+      hashMatchedOnIngest: true,
+      signatureValidOnIngest: true,
+      storageKey: `${'a'.repeat(64)}-${String(id)}`,
+      sizeBytes: 1,
+      mimeType: 'image/jpeg',
+      encryption: { algo: 'AES-256-GCM', iv: 'aXY=', tag: 'dGFn', wrappedDek: 'ZGVr', wrapIv: 'aXY=', wrapTag: 'dGFn', kekId: 'kek-v1' },
+      sourceDevice: { sourceType: 'MOBILE' },
+      uploadedByUserId: owner._id,
+    });
+  };
+
+  /** The attacker is genuinely on record — for the foreign case only. */
+  const putAttackerOnRecord = async () => {
+    const attacker = await User.findOne({ authorityId: 'UP/9876/2019' }).lean();
+    await CaseAccessGrant.create({
+      caseId: foreignCase._id,
+      userId: attacker._id,
+      role: ROLE.DEFENCE_COUNSEL,
+      grantBasis: GRANT_BASIS.VAKALATNAMA,
+      grantRef: 'VAK/REDTEAM/1',
+    });
+    return attacker;
+  };
+
+  it('being on record for one case opens nothing in another, by id, list, token or case file', async () => {
+    await putAttackerOnRecord();
+    const onRecordExhibit = await exhibitIn(foreignCase, 'EX-RT-ONRECORD-001');
+    const target = await exhibitIn(ownCase, 'EX-RT-TARGET-001');
+
+    expect((await asAdvocateOff(request(server).get(`/api/evidence/${onRecordExhibit._id}`))).status).toBe(200);
+
+    const byId = await asAdvocateOff(request(server).get(`/api/evidence/${target._id}`));
+    expect(byId.status).toBe(403);
+    expect(byId.body.error.code).toBe(DENY_REASON.NOT_ON_RECORD_FOR_THIS_CASE);
+
+    expect((await asAdvocateOff(request(server).post(`/api/evidence/${target._id}/stream-token`))).status).toBe(403);
+    expect((await asAdvocateOff(request(server).get(`/api/disclosure/case-file/${ownCase._id}`))).status).toBe(403);
+
+    for (const query of [`?caseId=${ownCase._id}`, '?caseId[$ne]=null', '?limit=99999']) {
+      const res = await asAdvocateOff(request(server).get(`/api/evidence${query}`));
+      if (res.status === 200) {
+        expect((res.body.evidence ?? []).map((e) => e.exhibitCode), query).not.toContain('EX-RT-TARGET-001');
+      } else {
+        expect(res.status, query).toBeGreaterThanOrEqual(400);
+      }
+    }
+  });
+
+  it('cannot turn read access into a write, or into more grants, on its own case', async () => {
+    const attacker = await putAttackerOnRecord();
+
+    const order = await asAdvocateOff(request(server).post(`/api/cases/${foreignCase._id}/record-order`)).send({
+      orderType: 'BAIL',
+      text: 'Granted by counsel.',
+    });
+    expect(order.status).toBe(403);
+
+    const item = await asAdvocateOff(request(server).post('/api/custody/items')).send({
+      caseId: String(foreignCase._id),
+      description: 'Booked by counsel',
+      sealNumber: 'SEAL-RT-COUNSEL',
+    });
+    expect(item.status).toBe(403);
+
+    const sync = await asAdvocateOff(request(server).post(`/api/disclosure/${ownCase._id}/sync-representation`)).send({
+      userId: String(attacker._id),
+      role: ROLE.DEFENCE_COUNSEL,
+    });
+    expect(sync.status).toBe(403);
+    expect(await CaseAccessGrant.countDocuments({ userId: attacker._id })).toBe(1);
+  });
+
+  it('the retired sharing and leak-trace routes do not exist to be abused', async () => {
+    const someId = new mongoose.Types.ObjectId();
+    for (const [method, path] of [
+      ['post', `/api/disclosure/${ownCase._id}/share`],
+      ['post', `/api/disclosure/${someId}/acknowledge`],
+      ['get', `/api/disclosure/trace/${'A'.repeat(43)}`],
+    ]) {
+      const res = await asAdvocateOff(request(server)[method](path)).send({});
+      expect(res.status, `${method.toUpperCase()} ${path}`).toBe(404);
+    }
+  });
+});
+
 // ============================================================ ledger attacks ==
 
 describe('ATTACK: the ledger', () => {

@@ -1,17 +1,21 @@
 /**
- * BSA s.63 certificates (spec §8 F9).
+ * BSA s.63 certificates — issued, signed and verified by the system.
  *
- * Three claims are under test, and they are the three the certificate module exists
- * to make good:
+ * The claims under test:
  *
- *   1. Lexx REFUSES to generate an incomplete certificate, and names what is missing.
- *   2. Part B is never authored by Lexx. With no s.79A report filed it stays blank.
- *   3. The public verifier reports VALIDITY, never CONTENTS. A token holder learns
- *      that the document is genuine and unaltered, and nothing about the case.
- *
- * Run against the REAL directory services, as the rest of the integration suite does.
+ *   1. Uploading evidence is all the police do. The certificate is issued and signed by
+ *      the LEXX Certificate Authority automatically — exactly one per exhibit — even
+ *      when no device particulars were recorded.
+ *   2. There is no way to generate or sign a certificate by hand.
+ *   3. One click verifies everything server-side and answers VERIFIED or FAILED with
+ *      plain-language checks, and the failing check is the right one after tampering.
+ *   4. Verification is independent of any forensic verdict.
+ *   5. The public verifier returns the same result and never discloses contents.
+ *   6. Existing exhibits are brought over by the boot migration, idempotently.
  */
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
+import fs from 'node:fs';
+import crypto from 'node:crypto';
 import mongoose from 'mongoose';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import request from 'supertest';
@@ -25,6 +29,9 @@ import { Ledger } from '../../models/Ledger.js';
 import { AuditEvent } from '../../models/AuditEvent.js';
 import { createApp } from '../../app.js';
 import { readCertificatePdf } from '../../services/certificatePdf.js';
+import { resolveObjectPath } from '../../services/storage.js';
+import { ensureSystemCertificate } from '../../services/certificateIssuer.js';
+import { runMigrations } from '../../services/migrations.js';
 import { sha256Hex as hashOf } from '../../config/crypto.js';
 import { asUser, sha256Hex } from '../helpers/client.js';
 import {
@@ -41,7 +48,7 @@ let mongo;
 let server;
 
 const IO = 'UP-GZB-4471';
-const JUDGE = 'UP-JUD-2291'; // the court the demo case is listed before
+const JUDGE = 'UP-JUD-2291';
 const SHO = 'UP-GZB-4402';
 const EXAMINER = 'FSL-LKO-0091';
 const ADVOCATE_NOT_ON_RECORD = 'UP/9876/2019';
@@ -65,8 +72,8 @@ const PER_TEST_COLLECTIONS = [
 ];
 
 const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const quiet = { info() {}, warn() {}, error() {} };
 
-/** A fully described device: everything Part A of the Schedule asks for. */
 const FULL_DEVICE = Object.freeze({
   sourceType: 'MOBILE',
   make: 'Samsung',
@@ -76,22 +83,26 @@ const FULL_DEVICE = Object.freeze({
   imeiOrUid: '351756051523999',
 });
 
+const CHECK_KEYS = [
+  'documentUnchanged',
+  'systemSignatureValid',
+  'evidenceFileUnchanged',
+  'activeCertificate',
+  'ledgerRecordIntact',
+];
+
 let io;
 let judge;
 let sho;
-
 let examiner;
 let stranger;
 
 beforeAll(async () => {
   mongo = await MongoMemoryServer.create();
   const uri = mongo.getUri();
-
   await startDirectories(uri);
-
   await mongoose.connect(uri, { dbName: 'lexx_test_certificate', bufferCommands: false });
   for (const m of allModels) await m.createIndexes();
-
   server = createApp();
 
   io = await asUser(server, IO);
@@ -109,9 +120,7 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await Promise.all(
-    PER_TEST_COLLECTIONS.map((name) =>
-      mongoose.connection.collection(name).deleteMany({}).catch(() => {})
-    )
+    PER_TEST_COLLECTIONS.map((name) => mongoose.connection.collection(name).deleteMany({}).catch(() => {}))
   );
 });
 
@@ -119,7 +128,6 @@ beforeEach(async () => {
 
 const as = (session, req) => req.set('Authorization', `Bearer ${session.accessToken}`);
 
-/** Supertest does not buffer unknown content types; a PDF has to be read raw. */
 const binaryParser = (res, cb) => {
   const chunks = [];
   res.on('data', (chunk) => chunks.push(Buffer.from(chunk)));
@@ -132,48 +140,46 @@ async function createCase() {
   return res.body.case;
 }
 
-async function uploadExhibit(caseId, title, device) {
-  const bytes = Buffer.concat([PNG, Buffer.from(title.padEnd(96, '.'), 'utf8')]);
+/** Upload as the browser does: only what is given is sent. File + title is enough. */
+async function uploadExhibit(caseId, title, fields = {}) {
+  const bytes = Buffer.concat([PNG, Buffer.from(`${title}:${crypto.randomUUID()}`.padEnd(96, '.'), 'utf8')]);
   const sha = sha256Hex(bytes);
-
   let req = as(io, request(server).post('/api/evidence/upload'))
     .field('caseId', String(caseId))
     .field('title', title)
     .field('sha256Client', sha)
-    .field('signature', io.keys.sign(sha))
-    .field('sourceType', device.sourceType);
-
-  for (const [key, value] of Object.entries(device)) {
-    // An absent particular must arrive absent, not as the string "undefined" —
-    // otherwise the completeness check would be testing the wrong thing entirely.
-    if (key !== 'sourceType' && value !== undefined && value !== null) {
-      req = req.field(key, String(value));
-    }
+    .field('signature', io.keys.sign(sha));
+  for (const [key, value] of Object.entries(fields)) {
+    if (value !== undefined && value !== null) req = req.field(key, String(value));
   }
-
   const res = await req.attach('file', bytes, { filename: 'exhibit.png', contentType: 'image/png' });
   expect(res.status, JSON.stringify(res.body)).toBe(201);
-  return res.body.evidence;
+  return res.body;
 }
 
-/** Case + one fully-described exhibit — the happy path for every later test. */
-async function fixture(device = FULL_DEVICE) {
+async function fixture(fields = {}) {
   const caseDoc = await createCase();
-  const evidence = await uploadExhibit(caseDoc._id, 'Seized phone photo', device);
-  return { caseDoc, evidence };
+  const upload = await uploadExhibit(caseDoc._id, 'Seized phone photo', fields);
+  return { caseDoc, evidence: upload.evidence, upload, certificateId: upload.certificate?.certificateId };
 }
 
-async function generateFor(session, evidenceId) {
-  return as(session, request(server).post('/api/certificates/generate')).send({ evidenceId });
+const verify = (session, certificateId, method = 'post') =>
+  as(session, request(server)[method](`/api/certificates/${certificateId}/verify`));
+
+const checkOf = (body, key) => body.checks.find((c) => c.key === key);
+
+async function tamperVaultObject(evidenceId) {
+  const stored = await Evidence.findById(evidenceId).lean();
+  fs.appendFileSync(resolveObjectPath(stored.storageKey), 'x');
 }
 
-/**
- * Simulate a filed s.79A laboratory report. The FSL module is a separate
- * workstream, so its two side effects are written directly: a referral (which is
- * what scopes the examiner) and the forensic block on the exhibit (which is the
- * ONLY source Part B may draw on).
- */
-async function fileForensicReport(caseDoc, evidence) {
+async function tamperStoredPdf(certificateId) {
+  const stored = await Certificate.findById(certificateId).lean();
+  fs.appendFileSync(resolveObjectPath(stored.pdfKey), 'x');
+}
+
+/** A laboratory verdict recorded against the exhibit, written directly. */
+async function recordForensicVerdict(caseDoc, evidence, opinion) {
   await Referral.create({
     caseId: caseDoc._id,
     evidenceId: evidence._id,
@@ -186,7 +192,6 @@ async function fileForensicReport(caseDoc, evidence) {
     referredByUserId: sho.user.userId,
     status: REFERRAL_STATUS.REPORTED,
   });
-
   await Evidence.updateOne(
     { _id: evidence._id },
     {
@@ -199,9 +204,8 @@ async function fileForensicReport(caseDoc, evidence) {
           examinerUserId: examiner.user.userId,
           examinerName: examiner.user.name,
           reportSha256: hashOf('fsl-report-bytes'),
-          opinion: FORENSIC_OPINION.AUTHENTIC,
-          examinationSummary:
-            'Container and stream metadata are internally consistent; no re-encoding artefacts were found.',
+          opinion,
+          examinationSummary: 'Frame-level examination found a splice at 00:12.',
           reportedAt: new Date(),
         },
       },
@@ -209,769 +213,539 @@ async function fileForensicReport(caseDoc, evidence) {
   );
 }
 
-// ====================================================== 1. THE REFUSAL ========
+// ================================================= 1. AUTOMATIC ISSUE ========
 
-describe('refusing to generate an incomplete certificate', () => {
-  it('refuses, and names EXACTLY which Part A fields are missing', async () => {
-    // The realistic failure: the officer recorded the source type and nothing else.
-    const { evidence } = await fixture({ sourceType: 'MOBILE' });
+describe('the certificate is issued automatically on upload', () => {
+  it('creates exactly one signed certificate even when no device particulars were recorded', async () => {
+    const { evidence, upload } = await fixture(); // file + title only
 
-    const res = await generateFor(io, evidence._id);
+    expect(upload.certificate).toBeTruthy();
+    expect(upload.certificate.status).toBe('ACTIVE');
+    expect(upload.certificate.state).toBe('ISSUED');
+    expect(upload.certificate.issuedAt).toBeTruthy();
+    expect(upload.certificate.verificationToken).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(new URL(upload.certificate.verificationUrl).pathname).toBe('/verify');
 
-    expect(res.status, JSON.stringify(res.body)).toBe(400);
-    expect(res.body.error.code).toBe('CERTIFICATE_PART_A_INCOMPLETE');
-    expect(res.body.error.details.missing.sort()).toEqual(
-      [
-        'partA.colour',
-        'partA.make',
-        'partA.model',
-        'partA.serialNumber OR partA.imeiOrUid',
-      ].sort()
-    );
-    expect(res.body.error.details.exhibitCode).toBe(evidence.exhibitCode);
-    expect(res.body.error.details.remedy).toMatch(/Record the missing particulars/);
+    const all = await Certificate.find({ evidenceId: evidence._id }).lean();
+    expect(all).toHaveLength(1);
+    const [cert] = all;
+    expect(String(cert._id)).toBe(upload.certificate.certificateId);
+    expect(cert.templateVersion).toBe('v3.0');
+    expect(cert.systemSignature.signature).toMatch(/^[0-9a-f]{128}$/);
+    expect(cert.systemSignature.signerLabel).toBe('LEXX Certificate Authority');
+
+    const generated = await Ledger.find({ eventType: LEDGER_EVENT.CERTIFICATE_GENERATED }).lean();
+    expect(generated).toHaveLength(1);
+    expect(generated[0].seq).toBe(cert.issuanceLedgerSeq);
+    expect(generated[0].payload.certificateHash).toBe(cert.certificateHash);
+    expect(generated[0].seq).toBe(upload.receipt.ledgerSeq + 1);
   });
 
-  it('writes NOTHING when it refuses', async () => {
-    const { evidence } = await fixture({ sourceType: 'MOBILE' });
-    await generateFor(io, evidence._id);
+  it('fills Part A from the record and the uploading officer, rendering unrecorded particulars as absent', async () => {
+    const { evidence, certificateId } = await fixture();
+    const cert = await Certificate.findById(certificateId).lean();
 
-    expect(await Certificate.countDocuments()).toBe(0);
-    expect(await Ledger.countDocuments({ eventType: LEDGER_EVENT.CERTIFICATE_GENERATED })).toBe(0);
-  });
-
-  it('audits the refusal, so the gap in the record is itself in the record', async () => {
-    const { evidence } = await fixture({ sourceType: 'MOBILE' });
-    await generateFor(io, evidence._id);
-
-    const row = await AuditEvent.findOne({ reason: 'CERTIFICATE_PART_A_INCOMPLETE' }).lean();
-    expect(row).toBeTruthy();
-    expect(row.decision).toBe(DECISION.DENY);
-    expect(row.authorityId).toBe(IO);
-  });
-
-  it('names only the fields actually missing, one at a time', async () => {
-    const { evidence } = await fixture({ ...FULL_DEVICE, colour: undefined });
-    const res = await generateFor(io, evidence._id);
-    expect(res.status).toBe(400);
-    expect(res.body.error.details.missing).toEqual(['partA.colour']);
-  });
-
-  it('accepts an identifier in EITHER the serial or the IMEI column', async () => {
-    const { evidence } = await fixture({ ...FULL_DEVICE, serialNumber: undefined });
-    const res = await generateFor(io, evidence._id);
-    expect(res.status, JSON.stringify(res.body)).toBe(201);
-  });
-
-  it('does not demand a make, model or colour for a source with no physical article', async () => {
-    // A cloud account has no colour. Requiring one only teaches officers to type junk.
-    const { evidence } = await fixture({ sourceType: 'CLOUD', imeiOrUid: 'acct:8827-hosted-mail' });
-    const res = await generateFor(io, evidence._id);
-    expect(res.status, JSON.stringify(res.body)).toBe(201);
-  });
-});
-
-// ====================================================== 2. PART A AUTO-FILL ===
-
-describe('Part A is auto-filled from the record, not typed', () => {
-  it('generates a complete certificate when the record supports it', async () => {
-    const { evidence } = await fixture();
-    const res = await generateFor(io, evidence._id);
-
-    expect(res.status, JSON.stringify(res.body)).toBe(201);
-    const { partA } = res.body.certificate;
-
-    // deponent ← the signing user's directory-derived identity
-    expect(partA.deponentName).toBe(io.user.name);
-    expect(partA.deponentAuthorityId).toBe(IO);
-    expect(partA.deponentDesignation).toBe('Investigating Officer, UP-GZB-KVN');
-
-    // device ← evidence.sourceDevice
-    expect(partA.sourceType).toBe('MOBILE');
-    expect(partA.make).toBe('Samsung');
-    expect(partA.model).toBe('Galaxy A54');
-    expect(partA.colour).toBe('Black');
-    expect(partA.serialNumber).toBe('R58N90ABCDE');
-    expect(partA.imeiOrUid).toBe('351756051523999');
-
-    // hash ← evidence.sha256Server
-    expect(partA.hashValue).toBe(evidence.sha256Server);
-    expect(partA.hashAlgorithm).toBe('SHA-256');
-
-    expect(res.body.certificate.partAComplete).toBe(true);
-  });
-
-  it('renders the manner of production as prose over the LEDGER', async () => {
-    const { evidence } = await fixture();
-    const res = await generateFor(io, evidence._id);
-    const prose = res.body.certificate.partA.mannerOfProduction;
-
-    expect(prose).toContain(evidence.exhibitCode);
-    expect(prose).toContain(evidence.sha256Server);
-    // The citations are what make the account checkable rather than assertive.
-    expect(prose).toMatch(/ledger at sequence \d+/);
-    expect(prose).toContain(io.user.name);
-    expect(prose).toContain(IO);
-    expect(prose).toMatch(/rendered mechanically from the Lexx append-only ledger/);
-
-    // Every sequence number cited must actually be in the chain.
-    const cited = Number(prose.match(/ledger at sequence (\d+)/)[1]);
-    const entry = await Ledger.findOne({ seq: cited }).lean();
-    expect(entry.eventType).toBe(LEDGER_EVENT.EVIDENCE_UPLOADED);
-  });
-
-  it('states the conditions of operation and cites the digest', async () => {
-    const { evidence } = await fixture();
-    const res = await generateFor(io, evidence._id);
-    const statement = res.body.certificate.partA.conditionsStatement;
-
-    expect(statement).toMatch(/regular use in the ordinary course/);
-    expect(statement).toMatch(/operating properly/);
-    expect(statement).toContain(evidence.sha256Server);
-    expect(statement).toMatch(/No integrity exception has been recorded/);
-  });
-
-  it('writes CERTIFICATE_GENERATED to the ledger', async () => {
-    const { evidence } = await fixture();
-    const res = await generateFor(io, evidence._id);
-
-    const entry = await Ledger.findOne({ eventType: LEDGER_EVENT.CERTIFICATE_GENERATED }).lean();
-    expect(entry).toBeTruthy();
-    expect(entry.payload.certificateId).toBe(res.body.certificate.certificateId);
-    expect(entry.payload.hashValue).toBe(res.body.certificate.partA.hashValue);
-    expect(entry.payload.partBComplete).toBe(false);
-  });
-
-  it('the court may also generate; an SHO may not', async () => {
-    const { caseDoc, evidence } = await fixture();
-
-    const shoAttempt = await generateFor(sho, evidence._id);
-    expect(shoAttempt.status).toBe(403);
-    expect(shoAttempt.body.error.code).toBe(DENY_REASON.READ_ONLY_ROLE);
-
-    // The court's scope over a case begins when it is listed before it.
-    await as(io, request(server).post(`/api/cases/${caseDoc._id}/file-chargesheet`)).send({});
-    const courtAttempt = await generateFor(judge, evidence._id);
-    expect(courtAttempt.status, JSON.stringify(courtAttempt.body)).toBe(201);
-    expect(courtAttempt.body.certificate.partA.deponentDesignation).toBe(
-      'Presiding Judge, UP-GZB-SESS-02'
-    );
-  });
-
-  it('refuses an advocate who is not on record the exhibit, and so the certificate', async () => {
-    const { evidence } = await fixture();
-    const res = await generateFor(stranger, evidence._id);
-    expect(res.status).toBe(403);
-    expect(res.body.error.code).toBe(DENY_REASON.NOT_ON_RECORD_FOR_THIS_CASE);
-  });
-});
-
-// ========================================================== 3. PART B ========
-
-describe('Part B comes only from a filed FSL report', () => {
-  it('stays blank, and says so, when no report has been filed', async () => {
-    const { evidence } = await fixture();
-    const res = await generateFor(io, evidence._id);
-
-    expect(res.body.certificate.partBComplete).toBe(false);
-    const { partB } = res.body.certificate;
-    expect(partB.expertName).toBeNull();
-    expect(partB.labName).toBeNull();
-    expect(partB.expertOpinion).toBeNull();
-    expect(partB.examinationSummary).toBeNull();
-    expect(res.body.partBNote).toMatch(/no section 79A laboratory report has been filed/i);
-  });
-
-  it('says so on the face of the PDF too', async () => {
-    const { evidence } = await fixture();
-    const gen = await generateFor(io, evidence._id);
-
-    const pdf = await as(
-      io,
-      request(server).get(`/api/certificates/${gen.body.certificate.certificateId}/pdf`)
-    )
-      .buffer()
-      .parse(binaryParser);
-
-    // PDFKit compresses page content, so assert on the model rather than the bytes:
-    // the certificate record itself is what the renderer branches on.
-    const stored = await Certificate.findById(gen.body.certificate.certificateId).lean();
-    expect(stored.partBComplete).toBe(false);
-    expect(pdf.status).toBe(200);
-  });
-
-  it('is populated once a s.79A report is on the exhibit', async () => {
-    const { caseDoc, evidence } = await fixture();
-    await fileForensicReport(caseDoc, evidence);
-
-    // A signed certificate is never edited. A new one is issued.
-    const res = await generateFor(io, evidence._id);
-
-    expect(res.status, JSON.stringify(res.body)).toBe(201);
-    expect(res.body.certificate.partBComplete).toBe(true);
-    const { partB } = res.body.certificate;
-    expect(partB.expertName).toBe(examiner.user.name);
-    expect(partB.labName).toBe('State FSL, Lucknow');
-    expect(partB.section79ARef).toBe('MeitY/79A/2019/17');
-    expect(partB.expertOpinion).toBe(FORENSIC_OPINION.AUTHENTIC);
-    expect(partB.examinationSummary).toMatch(/no re-encoding artefacts/);
-    expect(res.body.partBNote).toBeNull();
-  });
-
-  it('cannot be signed while it is blank', async () => {
-    const { evidence } = await fixture();
-    const gen = await generateFor(io, evidence._id);
-
-    const res = await as(
-      examiner,
-      request(server).post(`/api/certificates/${gen.body.certificate.certificateId}/sign-part-b`)
-    ).send({ signature: examiner.keys.sign(gen.body.certificate.bodyHash) });
-
-    // The examiner CAN reach this exhibit — it is registered in the state their
-    // laboratory serves — so the answer is now the accurate one rather than a
-    // scoping refusal that happened to be in the way: Part B is blank because no
-    // report has been filed, and there is nothing to sign.
-    expect(res.status).toBe(409);
-    expect(res.body.error.code).toBe('PART_B_NOT_FILED');
-  });
-});
-
-// ======================================================== 4. SIGNATURES ======
-
-describe('signatures are ECDSA P-256 over the canonical body hash', () => {
-  it('accepts the deponent’s signature and records what it covers', async () => {
-    const { evidence } = await fixture();
-    const gen = await generateFor(io, evidence._id);
-    const { certificateId, bodyHash } = gen.body.certificate;
-
-    const res = await as(io, request(server).post(`/api/certificates/${certificateId}/sign-part-a`)).send(
-      { signature: io.keys.sign(bodyHash) }
-    );
-
-    expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect(res.body.certificate.signatures).toHaveLength(1);
-    expect(res.body.certificate.signatures[0].role).toBe('PARTY');
-    expect(res.body.certificate.signatures[0].signedPayloadHash).toBe(bodyHash);
-
-    const entry = await Ledger.findOne({ eventType: LEDGER_EVENT.CERTIFICATE_SIGNED }).lean();
-    expect(entry.payload.part).toBe('A');
-    expect(entry.payload.signerAuthorityId).toBe(IO);
-    expect(entry.payload.signedPayloadHash).toBe(bodyHash);
-  });
-
-  it('REJECTS a forged signature and records nothing', async () => {
-    const { evidence } = await fixture();
-    const gen = await generateFor(io, evidence._id);
-    const { certificateId, bodyHash } = gen.body.certificate;
-
-    // A well-formed 64-byte P1363 signature — over the wrong message.
-    const forged = io.keys.sign(`${bodyHash}-tampered`);
-
-    const res = await as(io, request(server).post(`/api/certificates/${certificateId}/sign-part-a`)).send(
-      { signature: forged }
-    );
-
-    expect(res.status).toBe(400);
-    expect(res.body.error.code).toBe('SIGNATURE_INVALID');
-
-    const stored = await Certificate.findById(certificateId).lean();
-    expect(stored.signatures).toHaveLength(0);
-    expect(await Ledger.countDocuments({ eventType: LEDGER_EVENT.CERTIFICATE_SIGNED })).toBe(0);
-  });
-
-  it('REJECTS a signature made with somebody else’s key', async () => {
-    const { evidence } = await fixture();
-    const gen = await generateFor(io, evidence._id);
-    const { certificateId, bodyHash } = gen.body.certificate;
-
-    const res = await as(io, request(server).post(`/api/certificates/${certificateId}/sign-part-a`)).send(
-      { signature: sho.keys.sign(bodyHash) }
-    );
-    expect(res.status).toBe(400);
-    expect(res.body.error.code).toBe('SIGNATURE_INVALID');
-  });
-
-  it('refuses a malformed signature before any crypto runs', async () => {
-    const { evidence } = await fixture();
-    const gen = await generateFor(io, evidence._id);
-    const res = await as(
-      io,
-      request(server).post(`/api/certificates/${gen.body.certificate.certificateId}/sign-part-a`)
-    ).send({ signature: 'not-a-signature' });
-    expect(res.status).toBe(400);
-    expect(res.body.error.code).toBe('VALIDATION_FAILED');
-  });
-
-  it('refuses a second Part A signature', async () => {
-    const { evidence } = await fixture();
-    const gen = await generateFor(io, evidence._id);
-    const { certificateId, bodyHash } = gen.body.certificate;
-
-    await as(io, request(server).post(`/api/certificates/${certificateId}/sign-part-a`)).send({
-      signature: io.keys.sign(bodyHash),
+    expect(cert.issuedOnBehalfOf).toMatchObject({
+      name: io.user.name,
+      authorityId: IO,
+      role: 'IO',
+      designation: 'Investigating Officer, UP-GZB-KVN',
     });
-    const again = await as(
-      io,
-      request(server).post(`/api/certificates/${certificateId}/sign-part-a`)
-    ).send({ signature: io.keys.sign(bodyHash) });
+    expect(cert.partA.sourceType).toBe('OTHER');
+    for (const k of ['make', 'model', 'colour', 'serialNumber', 'imeiOrUid']) expect(cert.partA[k]).toBeNull();
+    expect(cert.partA.hashValue).toBe(evidence.sha256Server);
+    expect(cert.partA.mannerOfProduction).toContain(evidence.exhibitCode);
+    expect(cert.partA.mannerOfProduction).toMatch(/ledger at sequence \d+/);
+    expect(cert.partA.conditionsStatement).toMatch(/not recorded at upload/);
 
-    expect(again.status).toBe(409);
-    expect(again.body.error.code).toBe('ALREADY_SIGNED');
-  });
-
-  it('refuses a signature from anyone other than the deponent Part A names', async () => {
-    const { evidence } = await fixture();
-    const gen = await generateFor(io, evidence._id);
-    const { certificateId, bodyHash } = gen.body.certificate;
-
-    // The SHO may write on this case, and holds a valid key. They are still not the
-    // person whose statement this is.
-    const res = await as(sho, request(server).post(`/api/certificates/${certificateId}/sign-part-a`)).send(
-      { signature: sho.keys.sign(bodyHash) }
-    );
-    expect(res.status).toBe(403);
-    expect(res.body.error.code).toBe('NOT_THE_DEPONENT');
-  });
-
-  it('lets the reporting examiner sign Part B', async () => {
-    const { caseDoc, evidence } = await fixture();
-    await fileForensicReport(caseDoc, evidence);
-    const gen = await generateFor(io, evidence._id);
-    const { certificateId, bodyHash } = gen.body.certificate;
-
-    const res = await as(
-      examiner,
-      request(server).post(`/api/certificates/${certificateId}/sign-part-b`)
-    ).send({ signature: examiner.keys.sign(bodyHash) });
-
-    expect(res.status, JSON.stringify(res.body)).toBe(200);
-    const roles = res.body.certificate.signatures.map((s) => s.role);
-    expect(roles).toContain('EXPERT');
-  });
-
-  it('refuses Part B to an examiner who did not file the report', async () => {
-    const { caseDoc, evidence } = await fixture();
-    await fileForensicReport(caseDoc, evidence);
-    // The report now names a different examiner than the one signing.
-    await Evidence.updateOne(
-      { _id: evidence._id },
-      { $set: { 'forensic.examinerUserId': new mongoose.Types.ObjectId() } }
-    );
-
-    const gen = await generateFor(io, evidence._id);
-    const res = await as(
-      examiner,
-      request(server).post(`/api/certificates/${gen.body.certificate.certificateId}/sign-part-b`)
-    ).send({ signature: examiner.keys.sign(gen.body.certificate.bodyHash) });
-
-    expect(res.status).toBe(403);
-    expect(res.body.error.code).toBe('NOT_THE_REPORTING_EXAMINER');
-  });
-
-  it('a signature over Part A survives Part B being signed afterwards', async () => {
-    // Signatures cover the certificate BODY. Adding a second one re-renders the PDF
-    // but must not disturb the first signature or what it attests to.
-    const { caseDoc, evidence } = await fixture();
-    await fileForensicReport(caseDoc, evidence);
-    const gen = await generateFor(io, evidence._id);
-    const { certificateId, bodyHash } = gen.body.certificate;
-
-    await as(io, request(server).post(`/api/certificates/${certificateId}/sign-part-a`)).send({
-      signature: io.keys.sign(bodyHash),
-    });
-    await as(examiner, request(server).post(`/api/certificates/${certificateId}/sign-part-b`)).send({
-      signature: examiner.keys.sign(bodyHash),
-    });
-
-    const stored = await Certificate.findById(certificateId).lean();
-    expect(stored.signatures).toHaveLength(2);
-    for (const s of stored.signatures) expect(s.signedPayloadHash).toBe(bodyHash);
-  });
-});
-
-// ============================================================== 5. PDF ======
-
-describe('the PDF', () => {
-  it('renders, and the stored hash matches the bytes served', async () => {
-    const { evidence } = await fixture();
-    const gen = await generateFor(io, evidence._id);
-    const certificateId = gen.body.certificate.certificateId;
-
-    const res = await as(io, request(server).get(`/api/certificates/${certificateId}/pdf`))
-      .buffer()
-      .parse(binaryParser);
-
-    expect(res.status).toBe(200);
-    expect(res.headers['content-type']).toMatch(/application\/pdf/);
-    expect(res.body.subarray(0, 5).toString('ascii')).toBe('%PDF-');
-    expect(res.body.length).toBeGreaterThan(1000);
-
-    const stored = await Certificate.findById(certificateId).lean();
-    expect(stored.pdfSha256).toBe(hashOf(res.body));
-    expect(res.headers['x-lexx-pdf-sha256']).toBe(stored.pdfSha256);
-  });
-
-  it('is stored ENCRYPTED, and decrypts back to the same bytes', async () => {
-    const { evidence } = await fixture();
-    const gen = await generateFor(io, evidence._id);
-    const stored = await Certificate.findById(gen.body.certificate.certificateId).lean();
-
-    const decrypted = await readCertificatePdf(stored);
-    expect(decrypted).toBeInstanceOf(Buffer);
-    expect(hashOf(decrypted)).toBe(stored.pdfSha256);
+    const decrypted = await readCertificatePdf(cert);
     expect(decrypted.subarray(0, 5).toString('ascii')).toBe('%PDF-');
+    expect(hashOf(decrypted)).toBe(cert.pdfSha256);
   });
 
-  it('audits every download', async () => {
-    const { evidence } = await fixture();
-    const gen = await generateFor(io, evidence._id);
-    await as(io, request(server).get(`/api/certificates/${gen.body.certificate.certificateId}/pdf`))
-      .buffer()
-      .parse(binaryParser);
-
-    const row = await AuditEvent.findOne({ reason: 'CERTIFICATE_PDF_DOWNLOAD' }).lean();
-    expect(row).toBeTruthy();
-    expect(row.decision).toBe(DECISION.ALLOW);
-    expect(row.authorityId).toBe(IO);
+  it('records the device particulars when they were supplied', async () => {
+    const { certificateId } = await fixture(FULL_DEVICE);
+    const cert = await Certificate.findById(certificateId).lean();
+    expect(cert.partA).toMatchObject(FULL_DEVICE);
   });
 
-  it('is refused to a user with no scope over the case', async () => {
-    const { evidence } = await fixture();
-    const gen = await generateFor(io, evidence._id);
-    const res = await as(
-      stranger,
-      request(server).get(`/api/certificates/${gen.body.certificate.certificateId}/pdf`)
-    );
-    expect(res.status).toBe(403);
-    expect(res.body.error.code).toBe(DENY_REASON.NOT_ON_RECORD_FOR_THIS_CASE);
-  });
-});
-
-// ================================================ 5b. A COPY IN SOMEONE'S HAND ===
-
-/**
- * Party A hands Party B a certificate PDF. Party B has no account; they hash the file
- * (in the browser — the document never travels) and ask the public verifier about it.
- */
-describe('checking the copy a party was handed', () => {
-  const pdfOf = async (session, certificateId) =>
-    (
-      await as(session, request(server).get(`/api/certificates/${certificateId}/pdf`))
-        .buffer()
-        .parse(binaryParser)
-    ).body;
-
-  it('carries its own verification token in the PDF metadata, readable from the bytes', async () => {
-    const { evidence } = await fixture();
-    const gen = await generateFor(io, evidence._id);
-    const { certificateId, verificationToken } = gen.body.certificate;
-
-    const text = (await pdfOf(io, certificateId)).toString('latin1');
-    expect(text.match(/lexx-verify:([A-Za-z0-9_-]{43})/)?.[1]).toBe(verificationToken);
+  it('puts the ingest hashes in Part B, attested by the system, with no forensic verdict', async () => {
+    const { evidence, certificateId } = await fixture();
+    const { partB } = await Certificate.findById(certificateId).lean();
+    expect(partB.attestedBy).toBe('LEXX Certificate Authority');
+    expect(partB.hashAlgorithm).toBe('SHA-256');
+    expect(partB.sha256Client).toBe(evidence.sha256Client);
+    expect(partB.sha256Server).toBe(evidence.sha256Server);
+    expect(partB.hashesMatch).toBe(true);
+    expect(partB.hashComputedAt).toBeTruthy();
+    expect(partB.expertOpinion).toBeNull();
+    expect(partB.expertName).toBeNull();
   });
 
-  it('calls the current document CURRENT', async () => {
-    const { evidence } = await fixture();
-    const gen = await generateFor(io, evidence._id);
-    const { certificateId, verificationToken } = gen.body.certificate;
-    const digest = hashOf(await pdfOf(io, certificateId));
+  it('still accepts the upload when issuing fails, and issues the certificate on the next read', async () => {
+    const caseDoc = await createCase();
+    const spy = vi.spyOn(Certificate, 'create').mockRejectedValueOnce(new Error('simulated outage'));
+    let upload;
+    try {
+      upload = await uploadExhibit(caseDoc._id, 'Uploaded during an outage');
+    } finally {
+      spy.mockRestore();
+    }
+    expect(upload.certificate).toBeNull();
+    expect(await Certificate.countDocuments({ evidenceId: upload.evidence._id })).toBe(0);
 
-    const res = await request(server).get(`/public/verify/${verificationToken}?copy=${digest}`);
-    expect(res.status).toBe(200);
-    expect(res.body.copy).toEqual({ sha256: digest, match: 'CURRENT', supersededAt: null });
-  });
-
-  it('calls a copy taken before a later signature an EARLIER_VERSION, not a forgery', async () => {
-    const { evidence } = await fixture();
-    const gen = await generateFor(io, evidence._id);
-    const { certificateId, verificationToken, bodyHash } = gen.body.certificate;
-
-    const before = hashOf(await pdfOf(io, certificateId));
-    await as(io, request(server).post(`/api/certificates/${certificateId}/sign-part-a`)).send({
-      signature: io.keys.sign(bodyHash),
-    });
-    const after = hashOf(await pdfOf(io, certificateId));
-    expect(after).not.toBe(before);
-
-    const old = await request(server).get(`/public/verify/${verificationToken}?copy=${before}`);
-    expect(old.body.copy.match).toBe('EARLIER_VERSION');
-    expect(old.body.copy.supersededAt).toBeTruthy();
-
-    const current = await request(server).get(`/public/verify/${verificationToken}?copy=${after}`);
-    expect(current.body.copy.match).toBe('CURRENT');
-  });
-
-  it('calls any other file NO_MATCH — a genuine token on a document that is not ours', async () => {
-    const { evidence } = await fixture();
-    const gen = await generateFor(io, evidence._id);
-    const altered = Buffer.concat([await pdfOf(io, gen.body.certificate.certificateId), Buffer.from('\n')]);
-
-    const res = await request(server).get(
-      `/public/verify/${gen.body.certificate.verificationToken}?copy=${hashOf(altered)}`
-    );
-    expect(res.body.valid).toBe(true);
-    expect(res.body.copy.match).toBe('NO_MATCH');
-  });
-
-  it('ignores a malformed digest rather than guessing', async () => {
-    const { evidence } = await fixture();
-    const gen = await generateFor(io, evidence._id);
-    const res = await request(server).get(`/public/verify/${gen.body.certificate.verificationToken}?copy=nothex`);
-    expect(res.status).toBe(200);
-    expect(res.body.copy).toBeNull();
+    const list = await as(io, request(server).get('/api/certificates').query({ evidenceId: upload.evidence._id }));
+    expect(list.status, JSON.stringify(list.body)).toBe(200);
+    expect(list.body.total).toBe(1);
+    expect(list.body.active.signedBy).toBe('LEXX Certificate Authority');
   });
 });
 
-// ================================================== 6. THE PUBLIC VERIFIER ===
+// ================================================ 2. NO MANUAL FLOW ==========
 
-describe('the public verifier: validity, never contents', () => {
-  it('needs no authentication and confirms a real certificate', async () => {
-    const { caseDoc, evidence } = await fixture();
-    const gen = await generateFor(io, evidence._id);
-    const { certificateId, verificationToken } = gen.body.certificate;
+describe('a second certificate cannot be made', () => {
+  it('has no route to generate or sign a certificate', async () => {
+    const { evidence, certificateId } = await fixture();
+    const generate = await as(io, request(server).post('/api/certificates/generate')).send({ evidenceId: evidence._id });
+    expect(generate.status).toBe(404);
+    for (const part of ['sign-part-a', 'sign-part-b']) {
+      const res = await as(io, request(server).post(`/api/certificates/${certificateId}/${part}`)).send({
+        signature: 'a'.repeat(128),
+      });
+      expect(res.status).toBe(404);
+    }
+    expect(await Certificate.countDocuments()).toBe(1);
+  });
 
-    // No Authorization header anywhere in this request. That is the point.
-    const res = await request(server).get(`/public/verify/${verificationToken}`);
+  it('is idempotent: issuing again, even concurrently, returns the same certificate', async () => {
+    const { evidence, certificateId } = await fixture();
+    const results = await Promise.all([1, 2, 3].map(() => ensureSystemCertificate(evidence._id)));
+    for (const r of results) {
+      expect(r.created).toBe(false);
+      expect(String(r.certificate._id)).toBe(certificateId);
+    }
+    expect(await Certificate.countDocuments({ evidenceId: evidence._id })).toBe(1);
+    expect(await Ledger.countDocuments({ eventType: LEDGER_EVENT.CERTIFICATE_GENERATED })).toBe(1);
+  });
+
+  it('is enforced by the database, not only by the issuer', async () => {
+    const { evidence, caseDoc } = await fixture();
+    await expect(
+      Certificate.create({
+        evidenceId: evidence._id,
+        caseId: caseDoc._id,
+        partA: { deponentName: 'Written around the issuer' },
+        verificationToken: 'z'.repeat(43),
+      })
+    ).rejects.toMatchObject({ code: 11000 });
+  });
+});
+
+// ============================================== 3. ONE-CLICK VERIFY ==========
+
+describe('one-click verification', () => {
+  it('returns VERIFIED with every check passing for a clean exhibit, and records it', async () => {
+    const { certificateId } = await fixture();
+    const res = await verify(io, certificateId);
 
     expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect(res.body.valid).toBe(true);
-    expect(res.body.certificate.certificateId).toBe(certificateId);
-    expect(res.body.certificate.statute).toMatch(/section 63/);
-
-    // the PDF hash matches
-    const stored = await Certificate.findById(certificateId).lean();
-    expect(res.body.certificate.pdfSha256).toBe(stored.pdfSha256);
-    expect(res.body.certificate.pdfIntegrity).toBe('PDF_INTACT');
-
-    // the evidence hash and the case / exhibit reference
-    expect(res.body.certificate.evidenceHash).toBe(evidence.sha256Server);
-    expect(res.body.certificate.hashAlgorithm).toBe('SHA-256');
-    expect(res.body.certificate.exhibitCode).toBe(evidence.exhibitCode);
-    expect(res.body.certificate.firNumber).toBe(caseDoc.firNumber);
-  });
-
-  it('reports which signatures are present, without naming who made them', async () => {
-    const { caseDoc, evidence } = await fixture();
-    await fileForensicReport(caseDoc, evidence);
-    const gen = await generateFor(io, evidence._id);
-    const { certificateId, verificationToken, bodyHash } = gen.body.certificate;
-
-    const before = await request(server).get(`/public/verify/${verificationToken}`);
-    expect(before.body.certificate.signatures).toEqual([
-      { part: 'A', role: 'PARTY', present: false, signedAt: null },
-      { part: 'B', role: 'EXPERT', present: false, signedAt: null },
-    ]);
-
-    await as(io, request(server).post(`/api/certificates/${certificateId}/sign-part-a`)).send({
-      signature: io.keys.sign(bodyHash),
-    });
-
-    const after = await request(server).get(`/public/verify/${verificationToken}`);
-    const partA = after.body.certificate.signatures.find((s) => s.part === 'A');
-    expect(partA.present).toBe(true);
-    expect(partA.signedAt).toBeTruthy();
-    expect(after.body.certificate.signatures.find((s) => s.part === 'B').present).toBe(false);
-    // No signer name and no key fingerprint reach a public caller.
-    expect(Object.keys(partA).sort()).toEqual(['part', 'present', 'role', 'signedAt']);
-  });
-
-  it('LEAKS NO PII, no party detail and no evidence content', async () => {
-    const { caseDoc, evidence } = await fixture();
-    await fileForensicReport(caseDoc, evidence);
-    const gen = await generateFor(io, evidence._id);
-    const { certificateId, verificationToken, bodyHash } = gen.body.certificate;
-    await as(io, request(server).post(`/api/certificates/${certificateId}/sign-part-a`)).send({
-      signature: io.keys.sign(bodyHash),
-    });
-
-    const res = await request(server).get(`/public/verify/${verificationToken}`);
-    const body = JSON.stringify(res.body);
-
-    const mustNotAppear = [
-      io.user.name, // the deponent
-      examiner.user.name, // the expert
-      'State FSL, Lucknow', // the laboratory
-      'Investigating Officer', // any designation
-      IO, // any authority identifier
-      EXAMINER,
-      'Samsung', // the device
-      'Galaxy A54',
-      'Black',
-      'R58N90ABCDE',
-      '351756051523999',
-      'Seized phone photo', // the exhibit title
-      'AUTHENTIC', // the expert opinion
-      're-encoding artefacts', // the examination summary
-      'regular use in the ordinary course', // the conditions statement
-      'append-only ledger', // the manner-of-production narrative
-      'Kavi Nagar', // the station
-      'UP-GZB-KVN',
-    ];
-
-    for (const secret of mustNotAppear) {
-      expect(body, `public verifier leaked: ${secret}`).not.toContain(secret);
+    expect(res.body.result).toBe('VERIFIED');
+    expect(res.body.verifiedAt).toBeTruthy();
+    expect(res.body.checks.map((c) => c.key)).toEqual(CHECK_KEYS);
+    for (const c of res.body.checks) {
+      expect(c.ok, `${c.key}: ${c.detail}`).toBe(true);
+      expect(typeof c.label).toBe('string');
+      expect(typeof c.detail).toBe('string');
     }
 
-    // And nothing has quietly appeared beyond the agreed fields.
+    const entry = await Ledger.findOne({ eventType: LEDGER_EVENT.CERTIFICATE_VERIFIED }).lean();
+    expect(entry.payload.result).toBe('VERIFIED');
+    expect(entry.payload.certificateId).toBe(certificateId);
+    expect(entry.actorRole).toBe('IO');
+
+    const view = await as(io, request(server).get(`/api/certificates/${certificateId}`));
+    expect(view.body.certificate.lastVerification).toMatchObject({ result: 'VERIFIED', byRole: 'IO' });
+
+    const audit = await AuditEvent.findOne({ reason: 'CERTIFICATE_VERIFIED' }).lean();
+    expect(audit.decision).toBe(DECISION.ALLOW);
+  });
+
+  it('keeps GET working too', async () => {
+    const { certificateId } = await fixture();
+    const res = await verify(io, certificateId, 'get');
+    expect(res.status).toBe(200);
+    expect(res.body.result).toBe('VERIFIED');
+  });
+
+  it('FAILS on the evidence check when the vault object is tampered with', async () => {
+    const { evidence, certificateId } = await fixture();
+    await tamperVaultObject(evidence._id);
+
+    const res = await verify(io, certificateId);
+    expect(res.body.result).toBe('FAILED');
+    expect(checkOf(res.body, 'evidenceFileUnchanged').ok).toBe(false);
+    for (const key of CHECK_KEYS.filter((k) => k !== 'evidenceFileUnchanged')) {
+      expect(checkOf(res.body, key).ok, key).toBe(true);
+    }
+    const entry = await Ledger.findOne({ eventType: LEDGER_EVENT.CERTIFICATE_VERIFIED }).lean();
+    expect(entry.payload.result).toBe('FAILED');
+    expect(entry.payload.failedChecks).toEqual(['evidenceFileUnchanged']);
+  });
+
+  it('FAILS on the document check when the stored PDF is tampered with', async () => {
+    const { certificateId } = await fixture();
+    await tamperStoredPdf(certificateId);
+
+    const res = await verify(io, certificateId);
+    expect(res.body.result).toBe('FAILED');
+    expect(checkOf(res.body, 'documentUnchanged').ok).toBe(false);
+    expect(checkOf(res.body, 'evidenceFileUnchanged').ok).toBe(true);
+    expect(checkOf(res.body, 'systemSignatureValid').ok).toBe(true);
+
+    const pdf = await as(io, request(server).get(`/api/certificates/${certificateId}/pdf`));
+    expect(pdf.status).toBe(409);
+    expect(pdf.body.error.code).toBe('CERTIFICATE_DOCUMENT_UNAVAILABLE');
+  });
+
+  it('FAILS on the signature check when the certificate record is edited in the database', async () => {
+    const { certificateId } = await fixture();
+    await mongoose.connection
+      .collection('certificates')
+      .updateOne({ _id: new mongoose.Types.ObjectId(certificateId) }, { $set: { 'partA.make': 'Nokia' } });
+
+    const res = await verify(io, certificateId);
+    expect(res.body.result).toBe('FAILED');
+    expect(checkOf(res.body, 'systemSignatureValid').ok).toBe(false);
+    expect(checkOf(res.body, 'documentUnchanged').ok).toBe(true);
+  });
+
+  it('FAILS on the ledger check when the record of issue is edited', async () => {
+    const { certificateId } = await fixture();
+    const cert = await Certificate.findById(certificateId).lean();
+    await mongoose.connection
+      .collection('ledger')
+      .updateOne({ seq: cert.issuanceLedgerSeq }, { $set: { 'payload.pdfSha256': 'f'.repeat(64) } });
+
+    const res = await verify(io, certificateId);
+    expect(res.body.result).toBe('FAILED');
+    expect(checkOf(res.body, 'ledgerRecordIntact').ok).toBe(false);
+  });
+
+  it('is independent of the forensic verdict — a MANIPULATED finding does not affect it', async () => {
+    const { caseDoc, evidence, certificateId } = await fixture();
+    await recordForensicVerdict(caseDoc, evidence, FORENSIC_OPINION.MANIPULATED);
+
+    // The examiner clicks Verify Certificate. Nothing to upload, no verdict mismatch.
+    const res = await verify(examiner, certificateId);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.result).toBe('VERIFIED');
+    expect(JSON.stringify(res.body)).not.toMatch(/verdict|MANIPULATED|opinion/i);
+
+    // And the certificate itself was not touched by the verdict.
+    const cert = await Certificate.findById(certificateId).lean();
+    expect(cert.partB.expertOpinion).toBeNull();
+    expect(await Ledger.countDocuments({ eventType: LEDGER_EVENT.CERTIFICATE_PART_B_ATTACHED })).toBe(0);
+  });
+
+  it('is available to the court once the case is before it', async () => {
+    const { caseDoc, certificateId } = await fixture();
+    const filed = await as(io, request(server).post(`/api/cases/${caseDoc._id}/file-chargesheet`)).send({});
+    expect(filed.status, JSON.stringify(filed.body)).toBe(200);
+    const res = await verify(judge, certificateId);
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.result).toBe('VERIFIED');
+  });
+
+  it('is refused to a user who may not read the exhibit', async () => {
+    const { certificateId } = await fixture();
+    const res = await verify(stranger, certificateId);
+    expect(res.status).toBe(403);
+    expect(res.body.error.code).toBe(DENY_REASON.NOT_ON_RECORD_FOR_THIS_CASE);
+    expect(await Ledger.countDocuments({ eventType: LEDGER_EVENT.CERTIFICATE_VERIFIED })).toBe(0);
+  });
+});
+
+// ============================================ 4. THE PUBLIC VERIFIER ========
+
+describe('the public verifier: one call, validity never contents', () => {
+  it('needs no authentication and returns the same result and checks', async () => {
+    const { caseDoc, evidence, upload, certificateId } = await fixture(FULL_DEVICE);
+    const res = await request(server).get(`/public/verify/${upload.certificate.verificationToken}`);
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.result).toBe('VERIFIED');
+    expect(res.body.checks.map((c) => c.key)).toEqual(CHECK_KEYS);
+    expect(res.body.valid).toBe(true);
+    expect(res.body.certificate.certificateId).toBe(certificateId);
+    expect(res.body.certificate.evidenceHash).toBe(evidence.sha256Server);
+    expect(res.body.certificate.exhibitCode).toBe(evidence.exhibitCode);
+    expect(res.body.certificate.firNumber).toBe(caseDoc.firNumber);
+    expect(res.body.certificate.pdfIntegrity).toBe('PDF_INTACT');
+    expect(res.body.certificate.signedBy).toBe('LEXX Certificate Authority');
+    // Public verification leaves no ledger entry to spam.
+    expect(await Ledger.countDocuments({ eventType: LEDGER_EVENT.CERTIFICATE_VERIFIED })).toBe(0);
+  });
+
+  it('names the registering official and the case stage, but leaks no party detail, particulars or content', async () => {
+    const { upload } = await fixture(FULL_DEVICE);
+    const res = await request(server).get(`/public/verify/${upload.certificate.verificationToken}`);
+    const body = JSON.stringify(res.body);
+    for (const secret of [
+      'R58N90ABCDE',
+      '351756051523999',
+      // FIR 0123/2026 is a POCSO case: the exhibit title is withheld.
+      'Seized phone photo',
+      'Ramesh Singh',
+      'Kamla Devi',
+      'regular use in the ordinary course',
+      'append-only ledger at sequence',
+      'wrappedDek',
+      'storageKey',
+      'aiAnalysis',
+    ]) {
+      expect(body, `public verifier leaked: ${secret}`).not.toContain(secret);
+    }
+    // Who uploaded it, as the user asked the verifier to show.
+    expect(res.body.uploadedBy).toMatchObject({
+      name: io.user.name,
+      role: 'IO',
+      roleLabel: 'Investigating Officer',
+      authorityId: IO,
+      unit: 'Kavi Nagar Police Station',
+    });
+    expect(res.body.evidence).toMatchObject({ title: null, titleWithheld: true, labelUrl: upload.evidence.label.url });
+    expect(res.body.evidence.source).toEqual({ sourceType: 'MOBILE', make: 'Samsung', model: 'Galaxy A54' });
+    expect(res.body.case).toMatchObject({ firNumber: FIR, stationCode: 'UP-GZB-KVN', stage: 'UNDER_INVESTIGATION' });
+    expect(res.body.forensic).toEqual({ status: 'NOT_EXAMINED', examinedAt: null, labName: null });
+    expect(res.body.lifecycle.map((m) => m.key)).toEqual([
+      'UPLOADED',
+      'CERTIFICATE_ISSUED',
+      'FORENSIC_EXAMINATION',
+      'CHARGESHEET_FILED',
+      'COGNIZANCE_TAKEN',
+      'COMMITTED',
+      'TRIAL',
+      'CLOSED',
+    ]);
     expect(Object.keys(res.body.certificate).sort()).toEqual(
       [
+        'authorityKeyFingerprint',
         'certificateId',
         'cnrNumber',
         'evidenceHash',
         'exhibitCode',
         'firNumber',
-        'generatedAt',
         'hashAlgorithm',
-        'partAComplete',
-        'partBComplete',
+        'issuedAt',
+        'lastVerification',
         'pdfIntegrity',
         'pdfSha256',
-        'signatures',
+        'signedBy',
+        'status',
         'statute',
         'templateVersion',
+        'verificationUrl',
       ].sort()
     );
     expect(res.body.disclosure).toMatch(/discloses no case narrative/);
   });
 
-  it('returns not-found for a forged token', async () => {
-    const { evidence } = await fixture();
-    await generateFor(io, evidence._id);
-
-    // A well-formed token that was never issued.
-    const forged = 'A'.repeat(43);
-    const res = await request(server).get(`/public/verify/${forged}`);
-
-    expect(res.status).toBe(404);
-    expect(res.body.valid).toBe(false);
-    expect(res.body.reason).toBe('CERTIFICATE_NOT_FOUND');
+  it('returns FAILED with the failing check after the evidence is tampered with', async () => {
+    const { evidence, upload } = await fixture();
+    await tamperVaultObject(evidence._id);
+    const res = await request(server).get(`/public/verify/${upload.certificate.verificationToken}`);
+    expect(res.body.result).toBe('FAILED');
+    expect(checkOf(res.body, 'evidenceFileUnchanged').ok).toBe(false);
   });
 
-  it('answers a malformed token exactly as it answers an unknown one', async () => {
-    // Otherwise the shape of the token space is mappable from outside.
+  it('answers a forged or malformed token as not found, identically', async () => {
+    await fixture();
+    const forged = await request(server).get(`/public/verify/${'A'.repeat(43)}`);
     const malformed = await request(server).get('/public/verify/short');
-    const unknown = await request(server).get(`/public/verify/${'B'.repeat(43)}`);
-
-    expect(malformed.status).toBe(404);
-    expect(malformed.body).toEqual(unknown.body);
+    expect(forged.status).toBe(404);
+    expect(forged.body).toEqual({ valid: false, reason: 'CERTIFICATE_NOT_FOUND' });
+    expect(malformed.body).toEqual(forged.body);
   });
 
-  it('reports PDF_MODIFIED when the stored document no longer matches', async () => {
-    const { evidence } = await fixture();
-    const gen = await generateFor(io, evidence._id);
-    const { certificateId, verificationToken } = gen.body.certificate;
+  it('checks a copy in hand by its digest', async () => {
+    const { upload, certificateId } = await fixture();
+    const pdf = await as(io, request(server).get(`/api/certificates/${certificateId}/pdf`)).buffer().parse(binaryParser);
+    const token = upload.certificate.verificationToken;
 
-    // Somebody swapped the register's copy of the PDF.
-    await Certificate.updateOne({ _id: certificateId }, { $set: { pdfSha256: hashOf('other') } });
-
-    const res = await request(server).get(`/public/verify/${verificationToken}`);
-    expect(res.body.valid).toBe(true); // the certificate still exists…
-    expect(res.body.certificate.pdfIntegrity).toBe('PDF_MODIFIED'); // …but its document does not match
-  });
-
-  it('issues a high-entropy token — it is the only credential on a public endpoint', async () => {
-    const { evidence } = await fixture();
-    const a = await generateFor(io, evidence._id);
-    const b = await generateFor(io, evidence._id);
-
-    for (const token of [a.body.certificate.verificationToken, b.body.certificate.verificationToken]) {
-      expect(token).toMatch(/^[A-Za-z0-9_-]{43}$/); // 32 bytes, base64url
-    }
-    expect(a.body.certificate.verificationToken).not.toBe(b.body.certificate.verificationToken);
-  });
-
-  /**
-   * REGRESSION — the QR led to raw JSON.
-   *
-   * This URL is printed as a QR code on the face of the certificate, to be scanned by
-   * whoever is holding the paper: a judge, defence counsel, anyone. It pointed at
-   * `${PUBLIC_BASE_URL}/public/verify/:token` — the JSON API endpoint — so a scan
-   * answered with a wall of JSON rather than the verifier page that exists for
-   * precisely this purpose. It also pointed at the API's origin, which in a deployment
-   * where the web client is served separately is not where a person can read anything.
-   */
-  it('puts a HUMAN-READABLE verification URL on the certificate', async () => {
-    const { evidence } = await fixture();
-    const gen = await generateFor(io, evidence._id);
-    const url = gen.body.certificate.verificationUrl;
-
-    // The verifier PAGE, which reads ?token= on load — not the JSON endpoint. The
-    // single-page client routes `/verify`; the old `/verify.html` no longer exists.
-    expect(new URL(url).pathname).toBe('/verify');
-    expect(url).toContain(`token=${gen.body.certificate.verificationToken}`);
-
-    // Still outside /api, and still not the raw JSON route.
-    expect(url).not.toContain('/api/');
-    expect(url).not.toMatch(/\/public\/verify\//);
-
-    // It must be an absolute URL: a relative one is not scannable from a phone.
-    expect(() => new URL(url)).not.toThrow();
+    const current = await request(server).get(`/public/verify/${token}?copy=${hashOf(pdf.body)}`);
+    expect(current.body.copy.match).toBe('CURRENT');
+    const altered = await request(server).get(`/public/verify/${token}?copy=${hashOf(Buffer.concat([pdf.body, Buffer.from('\n')]))}`);
+    expect(altered.body.copy.match).toBe('NO_MATCH');
   });
 });
 
-// ================================================== listing, per exhibit =====
+// ============================================== 5. THE AUTHORITY KEY ========
 
-describe('GET /api/certificates?evidenceId= — never more visible than the exhibit', () => {
-  it('lists every certificate for the exhibit, with the token the verifier takes', async () => {
-    const { evidence } = await fixture();
-    const first = await generateFor(io, evidence._id);
-    expect(first.status).toBe(201);
+describe('the authority public key makes the signature independently checkable', () => {
+  it('is public, carries no private material, and verifies the stored signature', async () => {
+    const { certificateId } = await fixture();
 
+    const res = await request(server).get('/api/certificates/authority-key');
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(res.body.issuer).toBe('LEXX Certificate Authority');
+    expect(res.body.publicKeyJwk).toMatchObject({ kty: 'EC', crv: 'P-256' });
+    expect(res.body.publicKeyJwk.d).toBeUndefined();
+    expect(res.body.fingerprint).toMatch(/^[0-9a-f]{64}$/);
+
+    const alt = await request(server).get('/public/certificate-authority-key');
+    expect(alt.body.fingerprint).toBe(res.body.fingerprint);
+
+    const cert = await Certificate.findById(certificateId).lean();
+    expect(cert.systemSignature.keyFingerprint).toBe(res.body.fingerprint);
+    const key = crypto.createPublicKey({ key: res.body.publicKeyJwk, format: 'jwk' });
+    const ok = crypto.verify(
+      'sha256',
+      Buffer.from(cert.certificateHash, 'utf8'),
+      { key, dsaEncoding: 'ieee-p1363' },
+      Buffer.from(cert.systemSignature.signature, 'hex')
+    );
+    expect(ok).toBe(true);
+  });
+});
+
+// ============================================ 6. VIEWS, LIST, PDF ============
+
+describe('certificate views', () => {
+  const VIEW_KEYS = [
+    'certificateId',
+    'evidenceId',
+    'exhibitCode',
+    'issuedAt',
+    'issuedOnBehalfOf',
+    'lastVerification',
+    'pdfUrl',
+    'signedBy',
+    'status',
+    'templateVersion',
+    'verificationToken',
+    'verificationUrl',
+  ].sort();
+
+  it('lists the one certificate in the small view, with no signing payloads', async () => {
+    const { evidence, certificateId } = await fixture();
     const res = await as(io, request(server).get('/api/certificates').query({ evidenceId: evidence._id }));
     expect(res.status, JSON.stringify(res.body)).toBe(200);
     expect(res.body.total).toBe(1);
-    expect(res.body.certificates[0].verificationToken).toBe(first.body.certificate.verificationToken);
-    expect(new URL(res.body.certificates[0].verificationUrl).pathname).toBe('/verify');
+    expect(res.body.active.certificateId).toBe(certificateId);
+    const [view] = res.body.certificates;
+    expect(Object.keys(view).sort()).toEqual(VIEW_KEYS);
+    expect(view).toMatchObject({
+      exhibitCode: evidence.exhibitCode,
+      status: 'ACTIVE',
+      templateVersion: 'v3.0',
+      signedBy: 'LEXX Certificate Authority',
+      issuedOnBehalfOf: { name: io.user.name, authorityId: IO, role: 'IO' },
+      pdfUrl: `/api/certificates/${certificateId}/pdf`,
+      lastVerification: null,
+    });
+    expect(JSON.stringify(res.body)).not.toMatch(/signingPayloads|partB|signatures/);
   });
 
-  it('refuses an advocate who may not read the exhibit', async () => {
+  it('repairs a missing certificate lazily when the exhibit is read', async () => {
     const { evidence } = await fixture();
-    await generateFor(io, evidence._id);
-    const res = await as(stranger, request(server).get('/api/certificates').query({ evidenceId: evidence._id }));
-    expect(res.status).toBe(403);
+    await Certificate.deleteMany({ evidenceId: evidence._id });
+    const res = await as(io, request(server).get(`/api/evidence/${evidence._id}`));
+    expect(res.status).toBe(200);
+    expect(await Certificate.countDocuments({ evidenceId: evidence._id, status: 'ACTIVE' })).toBe(1);
+    expect(res.body.evidence.certificate?.state).toBe('ISSUED');
   });
 
-  it('rejects a malformed exhibit id as a validation failure, not a cast error', async () => {
-    const res = await as(io, request(server).get('/api/certificates').query({ evidenceId: 'nope' }));
-    expect(res.status).toBe(400);
+  it('refuses the list to an advocate who may not read the exhibit, and validates the id', async () => {
+    const { evidence } = await fixture();
+    const denied = await as(stranger, request(server).get('/api/certificates').query({ evidenceId: evidence._id }));
+    expect(denied.status).toBe(403);
+    const malformed = await as(io, request(server).get('/api/certificates').query({ evidenceId: 'nope' }));
+    expect(malformed.status).toBe(400);
   });
 
-  it('reaches the examiner after reporting, both directly and through their referral', async () => {
-    const { caseDoc, evidence } = await fixture();
-    await fileForensicReport(caseDoc, evidence);
-    await generateFor(io, evidence._id);
-
-    // Part B is the examiner's own statement, and they can reach it two ways — by
-    // the exhibit, which is registered in the state their laboratory serves, and by
-    // the referral their laboratory holds. Both are the same certificate.
-    const direct = await as(
-      examiner,
-      request(server).get('/api/certificates').query({ evidenceId: evidence._id })
-    );
-    expect(direct.status, JSON.stringify(direct.body)).toBe(200);
-    expect(direct.body.certificates[0].partBComplete).toBe(true);
-
+  it('reaches the examiner through their referral', async () => {
+    const { caseDoc, evidence, certificateId } = await fixture();
+    await recordForensicVerdict(caseDoc, evidence, FORENSIC_OPINION.AUTHENTIC);
     const referral = await Referral.findOne({ evidenceId: evidence._id }).lean();
     const res = await as(examiner, request(server).get(`/api/fsl/referrals/${referral._id}/certificates`));
     expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect(res.body.certificates[0].partBComplete).toBe(true);
+    expect(res.body.certificates[0].certificateId).toBe(certificateId);
+  });
+
+  it('serves the stored PDF whose hash is the recorded one, audited, and refuses a stranger', async () => {
+    const { certificateId } = await fixture();
+    const res = await as(io, request(server).get(`/api/certificates/${certificateId}/pdf`)).buffer().parse(binaryParser);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/application\/pdf/);
+    expect(res.body.subarray(0, 5).toString('ascii')).toBe('%PDF-');
+    const stored = await Certificate.findById(certificateId).lean();
+    expect(hashOf(res.body)).toBe(stored.pdfSha256);
+    expect(res.headers['x-lexx-pdf-sha256']).toBe(stored.pdfSha256);
+    expect(res.body.toString('latin1').match(/lexx-verify:([A-Za-z0-9_-]{43})/)?.[1]).toBe(stored.verificationToken);
+
+    const row = await AuditEvent.findOne({ reason: 'CERTIFICATE_PDF_DOWNLOAD' }).lean();
+    expect(row.authorityId).toBe(IO);
+
+    const denied = await as(stranger, request(server).get(`/api/certificates/${certificateId}/pdf`));
+    expect(denied.status).toBe(403);
   });
 });
 
-describe('attesting is not amending — a signature survives the chargesheet', () => {
-  it('lets the deponent sign Part A after the case is closed to investigative writes', async () => {
-    const { caseDoc, evidence } = await fixture();
-    const gen = await generateFor(io, evidence._id);
-    expect(gen.status).toBe(201);
+// ============================================= 7. EXISTING DATA ==============
 
-    const filed = await as(io, request(server).post(`/api/cases/${caseDoc._id}/file-chargesheet`)).send({});
-    expect(filed.status, JSON.stringify(filed.body)).toBe(200);
-
-    const { certificateId, bodyHash } = gen.body.certificate;
-    const res = await as(io, request(server).post(`/api/certificates/${certificateId}/sign-part-a`)).send({
-      signature: io.keys.sign(bodyHash),
+describe('boot migration: existing exhibits get a system certificate', () => {
+  it('supersedes a legacy ACTIVE certificate, issues the system one, and is idempotent', async () => {
+    const { caseDoc, evidence, upload } = await fixture();
+    const labelBefore = (await Evidence.findById(evidence._id).lean()).labelToken;
+    // Put the exhibit back in its pre-v3 state: a legacy, still-ACTIVE, unsigned certificate.
+    await Certificate.deleteMany({ evidenceId: evidence._id });
+    const legacyId = new mongoose.Types.ObjectId();
+    const legacyToken = 'L'.repeat(43);
+    await mongoose.connection.collection('certificates').insertOne({
+      _id: legacyId,
+      evidenceId: new mongoose.Types.ObjectId(evidence._id),
+      caseId: new mongoose.Types.ObjectId(caseDoc._id),
+      templateVersion: 'v2.0',
+      status: 'ACTIVE',
+      partA: { deponentName: io.user.name, hashValue: evidence.sha256Server },
+      partB: {},
+      signatures: [],
+      pdfHistory: [],
+      generatedAt: new Date(),
+      verificationToken: legacyToken,
+      partAComplete: true,
+      partBComplete: false,
     });
-    expect(res.status, JSON.stringify(res.body)).toBe(200);
-    expect(res.body.certificate.signatures.map((s) => s.role)).toContain('PARTY');
+
+    const report = await runMigrations(quiet);
+    expect(report.legacyCertificatesSuperseded).toBe(1);
+    expect(report.systemCertificatesIssued).toBe(1);
+    expect(report.systemCertificateFailures).toBe(0);
+
+    const legacy = await Certificate.findById(legacyId).lean();
+    expect(legacy.status).toBe('SUPERSEDED');
+    expect(legacy.supersededReason).toBe('REPLACED_BY_SYSTEM_CERTIFICATE');
+    const active = await Certificate.findOne({ evidenceId: evidence._id, status: 'ACTIVE' }).lean();
+    expect(String(legacy.supersededById)).toBe(String(active._id));
+    expect(active.templateVersion).toBe('v3.0');
+    expect(await Ledger.countDocuments({ eventType: LEDGER_EVENT.CERTIFICATE_SUPERSEDED, subjectId: legacyId })).toBe(1);
+
+    expect((await verify(io, String(active._id))).body.result).toBe('VERIFIED');
+    const old = await request(server).get(`/public/verify/${legacyToken}`);
+    expect(old.body.result).toBe('FAILED');
+    expect(checkOf(old.body, 'activeCertificate').ok).toBe(false);
+
+    // The certificate token changed; the printed QR label did not, and still resolves.
+    expect((await Evidence.findById(evidence._id).lean()).labelToken).toBe(labelBefore);
+    expect(old.body.evidence.labelUrl).toBe(upload.evidence.label.url);
+    const scanned = await request(server).get(`/public/evidence/${labelBefore}`);
+    expect(scanned.status, JSON.stringify(scanned.body)).toBe(200);
+    expect(scanned.body.result).toBe('VERIFIED');
+    expect(scanned.body.certificate.certificateId).toBe(String(active._id));
+
+    const again = await runMigrations(quiet);
+    expect(again.legacyCertificatesSuperseded).toBe(0);
+    expect(again.systemCertificatesIssued).toBe(0);
+    expect(await Certificate.countDocuments({ evidenceId: evidence._id })).toBe(2);
   });
 });

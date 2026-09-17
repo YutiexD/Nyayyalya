@@ -1,16 +1,22 @@
 /**
  * BSA s.63 certificate.
  *
- * Part A is the deponent's statement about the device and the manner of production.
- * Part B is the expert's statement, and it can only come from a filed FSL report —
- * Lexx never authors an expert opinion.
+ * Since template v3.0 the certificate is issued AUTOMATICALLY when an electronic record
+ * is uploaded, and signed by the LEXX Certificate Authority (a server-held ECDSA P-256
+ * key — services/systemSigner.js). Nobody generates, signs or manages it by hand.
  *
- * The generator REFUSES to produce a certificate with missing Part A fields and
- * returns the missing list. Declining to generate an incomplete legal document is
- * the feature, not a limitation.
+ *   Part A — particulars of the record, filled from the evidence record and the
+ *            uploading officer, on whose behalf the certificate is issued. Particulars
+ *            not recorded at upload are rendered "Not recorded" and never block issue.
+ *   Part B — the hash values computed at ingest, attested by the system. It carries no
+ *            forensic verdict; a laboratory opinion is a separate record.
+ *
+ * Earlier templates (v1.0, v2.0 — deponent and examiner signatures collected in the
+ * browser) are kept for history. The boot migration supersedes any that were still
+ * ACTIVE and issues a v3.0 certificate in their place.
  */
 import mongoose from 'mongoose';
-import { SOURCE_TYPE, FORENSIC_OPINION, values } from './enums.js';
+import { SOURCE_TYPE, FORENSIC_OPINION, CERTIFICATE_STATUS, values } from './enums.js';
 
 const { Schema } = mongoose;
 
@@ -36,6 +42,16 @@ const PartASchema = new Schema(
 
 const PartBSchema = new Schema(
   {
+    // ---- v3.0: hash attestation by the system ----
+    attestedBy: { type: String, default: null },
+    hashAlgorithm: { type: String, default: null },
+    sha256Client: { type: String, default: null },
+    sha256Server: { type: String, default: null },
+    hashesMatch: { type: Boolean, default: null },
+    hashComputedAt: { type: Date, default: null },
+    statement: { type: String, default: null },
+
+    // ---- v1.0 / v2.0 only: an expert's statement reproduced from a filed report ----
     expertName: { type: String, default: null },
     labName: { type: String, default: null },
     section79ARef: { type: String, default: null },
@@ -47,16 +63,53 @@ const PartBSchema = new Schema(
   { _id: false }
 );
 
+const JwkSchema = new Schema({ kty: String, crv: String, x: String, y: String }, { _id: false });
+
+/** Legacy (v1.0 / v2.0) user signatures. Never written by v3.0. */
 const SignatureSchema = new Schema(
   {
     role: { type: String, enum: ['PARTY', 'EXPERT'], required: true },
     userId: { type: Schema.Types.ObjectId, ref: 'User', required: true },
     signerName: { type: String, required: true },
     pubKeyFingerprint: { type: String, required: true },
-    /** ECDSA P-256 over the canonical certificate body hash. */
     signature: { type: String, required: true },
     signedPayloadHash: { type: String, required: true },
     signedAt: { type: Date, required: true },
+    publicKeyJwk: { type: JwkSchema, default: null },
+  },
+  { _id: false }
+);
+
+/** The LEXX Certificate Authority's signature over `certificateHash`. */
+const SystemSignatureSchema = new Schema(
+  {
+    signerLabel: { type: String, required: true },
+    algorithm: { type: String, required: true },
+    keyFingerprint: { type: String, required: true },
+    publicKeyJwk: { type: JwkSchema, required: true },
+    signedPayloadHash: { type: String, required: true },
+    signature: { type: String, required: true },
+    signedAt: { type: Date, required: true },
+  },
+  { _id: false }
+);
+
+const IssuedOnBehalfOfSchema = new Schema(
+  {
+    userId: { type: Schema.Types.ObjectId, ref: 'User', default: null },
+    name: { type: String, default: null },
+    authorityId: { type: String, default: null },
+    role: { type: String, default: null },
+    designation: { type: String, default: null },
+  },
+  { _id: false }
+);
+
+const LastVerificationSchema = new Schema(
+  {
+    result: { type: String, enum: ['VERIFIED', 'FAILED'], required: true },
+    at: { type: Date, required: true },
+    byRole: { type: String, default: null },
   },
   { _id: false }
 );
@@ -65,23 +118,47 @@ const CertificateSchema = new Schema(
   {
     evidenceId: { type: Schema.Types.ObjectId, ref: 'Evidence', required: true, immutable: true, index: true },
     caseId: { type: Schema.Types.ObjectId, ref: 'Case', required: true, immutable: true, index: true },
+    exhibitCode: { type: String, default: null },
 
     partA: { type: PartASchema, required: true },
     partB: { type: PartBSchema, default: () => ({}) },
 
-    templateVersion: { type: String, default: 'v1.0' },
+    /**
+     * v1.0 / v2.0 — signed in the browser by the deponent (Part A) and examiner (Part B).
+     * v3.0        — issued on upload and signed by the LEXX Certificate Authority.
+     */
+    templateVersion: { type: String, default: 'v3.0' },
+
+    /** One ACTIVE certificate per exhibit — see the partial unique index below. */
+    status: {
+      type: String,
+      enum: values(CERTIFICATE_STATUS),
+      default: CERTIFICATE_STATUS.ACTIVE,
+      index: true,
+    },
+    supersededById: { type: Schema.Types.ObjectId, ref: 'Certificate', default: null },
+    supersededAt: { type: Date, default: null },
+    supersededReason: { type: String, default: null },
 
     generatedAt: { type: Date, default: Date.now },
-    generatedByUserId: { type: Schema.Types.ObjectId, ref: 'User', required: true, immutable: true },
+    generatedByUserId: { type: Schema.Types.ObjectId, ref: 'User', default: null, immutable: true },
+
+    /** v3.0: the uploading officer, on whose behalf the system issued the certificate. */
+    issuedOnBehalfOf: { type: IssuedOnBehalfOfSchema, default: null },
+    /** v3.0: when the system signature and the ledger record of issue were both written. */
+    issuedAt: { type: Date, default: null },
+    /** v3.0: canonical hash of (body hash, PDF SHA-256, authority key) — what is signed. */
+    certificateHash: { type: String, default: null },
+    systemSignature: { type: SystemSignatureSchema, default: null },
+    /** v3.0: ledger sequence of the CERTIFICATE_GENERATED entry. */
+    issuanceLedgerSeq: { type: Number, default: null },
+    /** v3.0: short lease so two processes never finish issuing the same certificate twice. */
+    issuanceLockedUntil: { type: Date, default: null },
+    lastVerification: { type: LastVerificationSchema, default: null },
 
     pdfKey: { type: String, default: null },
     pdfSha256: { type: String, default: null },
-    /**
-     * Digests of earlier renders of this same certificate. The PDF is re-rendered when
-     * a signature is added, so a copy handed over before Part B was signed no longer
-     * matches `pdfSha256` — and a holder must be told "earlier version of a genuine
-     * certificate", not "not our document". Digests only; the old bytes are not kept.
-     */
+    /** Legacy: digests of earlier renders of a v1.0/v2.0 certificate. */
     pdfHistory: {
       type: [
         new Schema(
@@ -107,6 +184,19 @@ const CertificateSchema = new Schema(
 );
 
 CertificateSchema.index({ evidenceId: 1, createdAt: -1 });
+/**
+ * THE rule: one active s.63 certificate per exhibit. Enforced by the database, so two
+ * simultaneous issuance attempts cannot both succeed — the losing insert fails with a
+ * duplicate-key error and the issuer returns the certificate that already exists.
+ */
+CertificateSchema.index(
+  { evidenceId: 1 },
+  {
+    unique: true,
+    partialFilterExpression: { status: CERTIFICATE_STATUS.ACTIVE },
+    name: 'one_active_certificate_per_evidence',
+  }
+);
 
 CertificateSchema.methods.hasSignature = function hasSignature(role) {
   return this.signatures.some((s) => s.role === role);

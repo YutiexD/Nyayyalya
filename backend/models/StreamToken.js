@@ -16,7 +16,6 @@ export const STREAM_PURPOSE = Object.freeze({
   EVIDENCE: 'EVIDENCE',
   FSL_REPORT: 'FSL_REPORT',
   CERTIFICATE_PDF: 'CERTIFICATE_PDF',
-  DISCLOSURE: 'DISCLOSURE',
 });
 
 const StreamTokenSchema = new Schema(
@@ -30,8 +29,6 @@ const StreamTokenSchema = new Schema(
 
     /** Carried through to the audit row written when the token is redeemed. */
     caseId: { type: Schema.Types.ObjectId, ref: 'Case', default: null },
-    /** Watermark identity for disclosure downloads, so a leak stays attributable. */
-    watermarkLabel: { type: String, default: null },
 
     consumedAt: { type: Date, default: null },
     expiresAt: { type: Date, required: true },

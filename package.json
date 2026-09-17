@@ -15,6 +15,7 @@
     "dev:api": "node backend/server.js",
     "start": "npm run dev",
     "seed": "node seed/seed-all.js",
+    "migrate": "node scripts/migrate.js",
     "reset": "node seed/reset.js",
     "test": "vitest run",
     "test:watch": "vitest",
