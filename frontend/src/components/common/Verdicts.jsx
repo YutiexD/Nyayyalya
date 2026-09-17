@@ -369,7 +369,7 @@ export function Note({ children, tone = 'info', className }) {
   };
 
   return (
-    <div className={cn('flex gap-2.5 rounded-lg border p-3 text-[13px]', tones[tone], className)}>
+    <div className={cn('flex gap-2.5 rounded-xl border p-3 text-[13px]', tones[tone], className)}>
       <Icon aria-hidden className="mt-0.5 size-4 shrink-0" />
       <div className="leading-relaxed">{children}</div>
     </div>

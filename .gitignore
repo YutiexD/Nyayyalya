@@ -4,6 +4,18 @@
 !.env.example
 *.pem
 *.key
+*.p12
+*.pfx
+*.cert
+*.crt
+*.jks
+*.keystore
+
+# Wallet / private-key files (Hardhat, Foundry, etc.)
+.secret
+*.secret
+hardhat.config.local.js
+foundry.toml.local
 
 # Written by `npm run seed`. Contains ECDSA PRIVATE KEYS for the demo accounts so a
 # demo operator can sign from any machine. Never commit it.
@@ -48,5 +60,19 @@ Thumbs.db
 
 # Reference copy of the pre-React client, kept during the rewrite
 frontend-legacy/
-PRESENTATION.md 
-WORKFLOW.md 
+
+# Local design / planning docs — not part of the deployable product
+PRESENTATION.md
+WORKFLOW.md
+DESIGN.md
+
+# Legacy TypeScript component reference (lexx V2 src/ folder)
+src/
+
+# Local MongoDB data directory if using mongo-dev-server.js
+.mongo/
+mongodata/
+
+# Temporary script output and local health-check artefacts
+*.health.json
+*.dump.json

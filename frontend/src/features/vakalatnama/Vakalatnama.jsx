@@ -1,21 +1,25 @@
 /**
- * Vakalatnama: how an advocate comes on record.
+ * Vakalatnama: the only way an advocate comes on record.
  *
- *   FileVakalatnama   counsel: the signed PDF is hashed and signed in this browser, then
- *                     filed against a CNR.
- *   MyFilings         counsel: what they have filed and how the court ruled.
- *   FilingRuling      court: accept or reject one pending filing. Accepting gives the
- *                     advocate the case and every exhibit automatically.
- *   FilingStatusBadge Pending / Accepted / Rejected.
+ *   FileVakalatnama — the advocate's side. The signed PDF is hashed and signed in this
+ *                     browser, then filed against a CNR. Filing grants nothing.
+ *   MyFilings       — what the advocate has filed, and how the court ruled.
+ *
+ * The court's side used to live here too. It is now part of the court's own case
+ * panel (`features/court/CourtPage.jsx`), because ruling on a filing is one of the
+ * three things a court does to a case and it belongs beside the other two rather than
+ * on a tab of its own. The authority moved as well: the registrar is gone, and the
+ * presiding judge — the identity the court directory's roster already vouches for —
+ * takes counsel on record.
  */
 import { useId, useState } from 'react';
 import { toast } from 'sonner';
 import { Check, FileDown, FileSignature, Loader2 } from 'lucide-react';
 
-import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
+import { Badge } from '@/components/ui/badge';
 import { Textarea } from '@/components/ui/textarea';
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
@@ -24,17 +28,20 @@ import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger,
 } from '@/components/ui/dialog';
 
-import { CopyableValue } from '@/components/common/CopyButton';
 import { Empty, MetaLine, Row, Rows, RowsSkeleton } from '@/components/common/Shell';
 import { Denial } from '@/components/common/Verdicts';
+import { CopyableValue } from '@/components/common/CopyButton';
 import { useFileVakalatnama, useMyFilings, useRuleOnFiling } from '@/hooks/queries';
 import { api } from '@/lib/api';
 import { getOrCreateKeyPair, hashFile, signHashHex } from '@/lib/crypto';
 import { saveBlob } from '@/lib/download';
 import { cn, fmtBytes, fmtDate, humanise } from '@/lib/utils';
 
-/** The one line the court sees when ruling on a filing. */
-export const ACCEPT_ACCESS_COPY = 'Accepting gives this advocate access to the case and its evidence automatically.';
+const STATUS_STYLE = {
+  PENDING: 'border-warn/35 bg-warn-muted text-warn',
+  ACCEPTED: 'border-ok/35 bg-ok-muted text-ok',
+  REJECTED: 'border-bad/35 bg-bad-muted text-bad',
+};
 
 const FILING_STATUS = {
   PENDING: { label: 'Pending', variant: 'warning' },
@@ -43,14 +50,7 @@ const FILING_STATUS = {
   WITHDRAWN: { label: 'Withdrawn', variant: 'muted' },
 };
 
-export function FilingStatusBadge({ status, size = 'sm', className }) {
-  const s = FILING_STATUS[status] ?? { label: humanise(status) || '—', variant: 'neutral' };
-  return (
-    <Badge variant={s.variant} size={size} dot className={className}>
-      {s.label}
-    </Badge>
-  );
-}
+export const ACCEPT_ACCESS_COPY = 'Accepting gives this advocate access to the case and its evidence automatically.';
 
 async function downloadFiling(filing) {
   try {
@@ -62,6 +62,11 @@ async function downloadFiling(filing) {
 
 // ============================================================== the filing ====
 
+/**
+ * File a vakalatnama. A dialog, because it is something an advocate does a handful of
+ * times and then never again for that case — not something they arrive at the screen
+ * to look at.
+ */
 export function FileVakalatnama() {
   const fileIt = useFileVakalatnama();
   const [open, setOpen] = useState(false);
@@ -85,7 +90,9 @@ export function FileVakalatnama() {
       const keyPair = await getOrCreateKeyPair();
       signature = await signHashHex(sha256, keyPair.privateKey);
     } catch (err) {
-      toast.error('The document could not be signed on this device', { description: err.message });
+      toast.error('The document could not be hashed and signed on this device', {
+        description: err.message,
+      });
       return;
     } finally {
       setSigning(false);
@@ -101,7 +108,9 @@ export function FileVakalatnama() {
 
     fileIt.mutate(form, {
       onSuccess: () => {
-        toast.success('Vakalatnama filed', { description: 'Awaiting the court.' });
+        toast.success('Vakalatnama filed', {
+          description: 'It is before the court. It grants you nothing until the court rules.',
+        });
         setCnr('');
         setPartyName('');
         setFile(null);
@@ -114,15 +123,20 @@ export function FileVakalatnama() {
     <Dialog open={open} onOpenChange={setOpen}>
       <DialogTrigger asChild>
         <Button size="sm">
-          <FileSignature />
-          File vakalatnama
+          <FileSignature className="size-4" />
+          File a vakalatnama
         </Button>
       </DialogTrigger>
 
       <DialogContent className="max-w-lg">
         <DialogHeader>
-          <DialogTitle>File vakalatnama</DialogTitle>
-          <DialogDescription>Once the court accepts it, the case and its evidence open to you.</DialogDescription>
+          <DialogTitle>File a vakalatnama</DialogTitle>
+          <DialogDescription>
+            How you come on record. The signed PDF is hashed and signed in this browser with
+            your registered key before it is sent. Filing grants you nothing — the court the
+            case is listed before rules on it, and the court register records the appearance
+            before Nyayyalya opens the case to you.
+          </DialogDescription>
         </DialogHeader>
 
         <form onSubmit={onSubmit} className="space-y-4">
@@ -137,27 +151,29 @@ export function FileVakalatnama() {
                 className="font-mono uppercase"
                 required
               />
+              <p className="text-[12px] text-muted-foreground">
+                From the court&rsquo;s cause list or case status page.
+              </p>
             </div>
             <div className="space-y-1.5">
               <Label htmlFor="vak-side">Appearing for</Label>
               <Select value={appearingFor} onValueChange={setAppearingFor}>
-                <SelectTrigger id="vak-side">
-                  <SelectValue />
-                </SelectTrigger>
+                <SelectTrigger id="vak-side"><SelectValue /></SelectTrigger>
                 <SelectContent>
-                  <SelectItem value="ACCUSED">Accused</SelectItem>
-                  <SelectItem value="VICTIM">Victim</SelectItem>
+                  <SelectItem value="ACCUSED">The accused (defence counsel)</SelectItem>
+                  <SelectItem value="VICTIM">The victim (victim&rsquo;s counsel)</SelectItem>
                 </SelectContent>
               </Select>
             </div>
           </div>
 
           <div className="space-y-1.5">
-            <Label htmlFor="vak-party">Party name</Label>
+            <Label htmlFor="vak-party">Party executing the vakalatnama</Label>
             <Input
               id="vak-party"
               value={partyName}
               onChange={(e) => setPartyName(e.target.value)}
+              placeholder="Name as it appears on the document"
               required
             />
           </div>
@@ -173,7 +189,7 @@ export function FileVakalatnama() {
               disabled={busy}
             />
             {file && (
-              <p className="text-label text-muted-foreground">
+              <p className="text-[12px] text-muted-foreground">
                 {file.name} · {fmtBytes(file.size)}
               </p>
             )}
@@ -186,8 +202,8 @@ export function FileVakalatnama() {
             className="w-full"
             disabled={busy || !file || !cnr.trim() || partyName.trim().length < 2}
           >
-            {busy ? <Loader2 className="animate-spin" /> : <FileSignature />}
-            {signing ? 'Signing…' : fileIt.isPending ? 'Filing…' : 'Sign and file'}
+            {busy ? <Loader2 className="size-4 animate-spin" /> : <FileSignature className="size-4" />}
+            {signing ? 'Hashing and signing…' : fileIt.isPending ? 'Filing…' : 'Sign and file'}
           </Button>
         </form>
       </DialogContent>
@@ -197,58 +213,74 @@ export function FileVakalatnama() {
 
 // ============================================================= the filings ====
 
-/** The advocate's filings as rows. Put it in a Panel with `bodyClassName="p-0"`. */
-export function MyFilings({ className }) {
+export function MyFilings() {
   const query = useMyFilings();
   const filings = query.data?.filings ?? [];
 
   if (query.isPending) return <RowsSkeleton rows={2} />;
   if (query.isError) return <Denial error={query.error} heading="Filings not readable" />;
   if (!filings.length) {
-    return <Empty compact title="No filings yet" icon={FileSignature} />;
+    return (
+      <Empty title="You have filed nothing yet" icon={FileSignature}>
+        File a vakalatnama to be taken on record in a case. Until the court accepts it, it
+        grants you nothing — not even the knowledge that the case exists.
+      </Empty>
+    );
   }
 
   return (
-    <Rows className={className}>
+    <ul className="divide-y rounded-lg border">
       {filings.map((f) => (
-        <Row
-          key={f.id}
-          title={<CopyableValue value={f.cnrNumber} label="Copy CNR" />}
-          meta={
-            <MetaLine
-              items={[
-                `For the ${humanise(f.appearingFor).toLowerCase()}${f.partyName ? ` (${f.partyName})` : ''}`,
-                `Filed ${fmtDate(f.filedAt)}`,
-                f.status === 'ACCEPTED' && 'Access granted',
-                f.status === 'REJECTED' && f.decidedAt && `Rejected ${fmtDate(f.decidedAt)}`,
-              ]}
-            />
-          }
-          badge={<FilingStatusBadge status={f.status} />}
-          actions={
-            <Button variant="ghost" size="icon-sm" onClick={() => downloadFiling(f)} aria-label="Download filed document">
-              <FileDown />
-            </Button>
-          }
-        >
-          {f.decisionNote && (
-            <span className="block truncate text-label italic text-muted-foreground">&ldquo;{f.decisionNote}&rdquo;</span>
-          )}
-        </Row>
+        <li key={f.id} className="flex items-start justify-between gap-3 px-3.5 py-3">
+          <div className="min-w-0 space-y-0.5">
+            <p className="flex flex-wrap items-center gap-2 text-[13px] font-medium">
+              <code className="font-mono">{f.cnrNumber}</code>
+              <Badge
+                variant="outline"
+                className={cn('rounded-full px-2 py-0 text-[11px]', STATUS_STYLE[f.status])}
+              >
+                {humanise(f.status)}
+              </Badge>
+            </p>
+            <p className="text-[12px] text-muted-foreground">
+              For the {humanise(f.appearingFor).toLowerCase()} ({f.partyName}) · filed{' '}
+              {fmtDate(f.filedAt)}
+            </p>
+            <p className="text-[12px] text-muted-foreground">
+              {f.status === 'PENDING'
+                ? 'Before the court, awaiting a ruling.'
+                : `${humanise(f.status)} ${fmtDate(f.decidedAt)} by ${f.decidedByAuthorityId ?? '—'}`}
+            </p>
+            {f.decisionNote && (
+              <p className="text-[12px] italic">&ldquo;{f.decisionNote}&rdquo;</p>
+            )}
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="shrink-0"
+            onClick={() => downloadFiling(f)}
+            aria-label="Download the filed document"
+          >
+            <FileDown className="size-3.5" />
+          </Button>
+        </li>
       ))}
-    </Rows>
+    </ul>
   );
 }
 
-// ============================================================== the court ====
+// ======================================================== court-side tools ====
 
-/**
- * The court's ruling on one pending filing: Accept, or Reject with a reason.
- *
- * @param {object} props
- * @param {object} props.filing                 a filing view with `id`
- * @param {(decision: 'ACCEPT'|'REJECT') => void} [props.onDone]
- */
+export function FilingStatusBadge({ status, size = 'sm', className }) {
+  const s = FILING_STATUS[status] ?? { label: humanise(status) || '—', variant: 'neutral' };
+  return (
+    <Badge variant={s.variant} size={size} dot className={className}>
+      {s.label}
+    </Badge>
+  );
+}
+
 export function FilingRuling({ filing, onDone, className }) {
   const rule = useRuleOnFiling();
   const noteId = useId();

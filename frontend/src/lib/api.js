@@ -20,9 +20,9 @@
  * understand is a bug, not a security feature.
  */
 
-const ACCESS_KEY = 'lexx.access';
-const REFRESH_KEY = 'lexx.refresh';
-const SESSION_KEY = 'lexx.session';
+const ACCESS_KEY = 'nyayyalya.access';
+const REFRESH_KEY = 'nyayyalya.refresh';
+const SESSION_KEY = 'nyayyalya.session';
 
 let accessToken = null;
 let refreshInFlight = null;
@@ -135,21 +135,21 @@ export const REASON_TEXT = Object.freeze({
   GRANT_NOT_YET_VALID: 'Your access to this case has not started yet.',
   GRANT_EXPIRED: 'Your access to this case has expired.',
   RESOURCE_NOT_FOUND: 'No such record, or none you are entitled to see.',
-  NO_MATCHING_POLICY: 'Your role has no access to this record.',
-  USER_NOT_ACTIVE: 'This account is not active.',
+  NO_MATCHING_POLICY: 'No access policy covers this combination of role and record.',
+  USER_NOT_ACTIVE: 'This account is not active in Nyayyalya.',
   AUDIT_NOT_PERMITTED: 'Your role cannot read the audit feed.',
   AUDIT_UNAVAILABLE: 'The audit trail cannot be written right now, so this action is refused. Try again shortly.',
   SEARCH_UNAVAILABLE: 'Search is unavailable. Nothing was searched, so this is not a "no results" answer.',
 
   // --- identity and session ---
   IDENTITY_NOT_VERIFIED:
-    'This identity is not present, or not active, in its authority directory. Lexx cannot create an account that the directory does not vouch for.',
+    'This identity is not present, or not active, in its authority directory. Nyayyalya cannot create an account that the directory does not vouch for.',
   IDENTITY_NOT_IN_DIRECTORY: 'No such identifier exists in the authority directory.',
   IDENTITY_NOT_ACTIVE: 'The directory holds this identity but does not show it as active.',
   DIRECTORY_REVERIFICATION_FAILED:
     'Your authority record no longer permits access. A transfer, suspension or roster change removes access at the next sign-in.',
   DIRECTORY_UNAVAILABLE:
-    'The authority directory is unreachable, so access cannot be verified. Lexx fails closed rather than guessing.',
+    'The authority directory is unreachable, so access cannot be verified. Nyayyalya fails closed rather than guessing.',
   SELF_REGISTRATION_DISABLED: 'Accounts are provisioned by your authority directory.',
   ACCOUNT_EXISTS: 'This account is already activated. Sign in instead.',
   ACCOUNT_NOT_ACTIVATED: 'This account has not been activated yet.',
@@ -175,15 +175,19 @@ export const REASON_TEXT = Object.freeze({
   ROUTE_NOT_FOUND: 'That endpoint is not available on this server.',
 
   // --- representation (vakalatnama) ---
-  CNR_NOT_FOUND: 'No case before a court carries that CNR number.',
-  VAKALATNAMA_ALREADY_FILED: 'A filing for this appearance is already before the court.',
+  CNR_NOT_FOUND:
+    'No case before a court carries that CNR number in Nyayyalya. A vakalatnama can only be filed in a case that has been committed to a court.',
+  VAKALATNAMA_ALREADY_FILED:
+    'A filing for this appearance is already before the court. Wait for it to be ruled on.',
   VAKALATNAMA_ALREADY_ON_RECORD: 'You are already on record for this party in this case.',
   VAKALATNAMA_WITHDRAWN: 'This filing has been withdrawn.',
   LEGAL_AID_ASSIGNMENT_CLOSED: 'This legal aid assignment is closed.',
   ALREADY_ON_RECORD: 'You are already on record for this party in this case.',
-  DOCUMENT_MUST_BE_PDF: 'The vakalatnama must be a PDF.',
-  DOCUMENT_HASH_MISMATCH: 'The document that arrived does not match the fingerprint taken in your browser.',
-  COURT_REGISTER_REFUSED: 'The court register did not record this appearance. The filing is still pending.',
+  DOCUMENT_MUST_BE_PDF: 'The vakalatnama must be filed as a PDF.',
+  DOCUMENT_HASH_MISMATCH:
+    'The document that arrived does not hash to what your browser computed, so the filing was refused.',
+  COURT_REGISTER_REFUSED:
+    'The court register did not record this appearance, so nothing changed in Nyayyalya. The filing is still pending.',
   VAKALATNAMA_NOT_PENDING: 'This filing has already been ruled on.',
   ADVOCATE_NOT_ACTIVE: 'The filing advocate no longer holds an active account.',
 
@@ -227,6 +231,16 @@ export const REASON_TEXT = Object.freeze({
   AI_RESPONSE_SCHEMA_INVALID: 'The AI analysis returned an unusable result. Retry.',
   AI_RESPONSE_INCOHERENT: 'The AI analysis returned an inconsistent result. Retry.',
   AI_INVALID_REQUEST: 'The analysis request was rejected. Retry.',
+
+  // --- custody ---
+  INVALID_OR_FORGED_TAG: 'That label does not carry a valid Nyayyalya signature. It is not a label this system printed.',
+  TRANSFER_TOKEN_INVALID: 'That handover code is not valid for this item.',
+  TRANSFER_TOKEN_EXPIRED: 'That handover code has expired. The holder must start the handover again.',
+  TRANSFER_WRONG_RECIPIENT: 'This handover was addressed to someone else.',
+  TRANSFER_ALREADY_PENDING: 'A handover of this item is already waiting to be accepted.',
+  ILLEGAL_CUSTODY_TRANSITION:
+    'That is not a lawful next step for this article. Every movement routes through the station store.',
+  RECIPIENT_NOT_AVAILABLE: 'That person cannot take custody.',
 
   // --- judicial workflow ---
   INVALID_TRANSITION: 'That judicial step is not available at the stage this case is in.',

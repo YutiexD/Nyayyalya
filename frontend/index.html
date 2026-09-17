@@ -3,10 +3,10 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>LEXX 2.0 — Digital evidence register</title>
+    <title>Nyayyalya — Digital evidence register</title>
     <meta
       name="description"
-      content="LEXX 2.0 — an evidence register for the Indian criminal justice chain. Hashed and signed in the browser, append-only ledger, Merkle-anchored."
+      content="Nyayyalya — an evidence register for the Indian criminal justice chain. Hashed and signed in the browser, append-only ledger, Merkle-anchored."
     />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -19,8 +19,7 @@
       // and then flips, which on a projector reads as a glitch.
       (function () {
         try {
-          var t = localStorage.getItem('lexx.theme');
-          if (!t) t = matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+          var t = localStorage.getItem('lexx.theme') || 'light';
           if (t === 'dark') document.documentElement.classList.add('dark');
           document.documentElement.style.colorScheme = t;
         } catch (e) {

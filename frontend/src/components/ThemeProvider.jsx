@@ -27,7 +27,7 @@ export function ThemeProvider({ children }) {
     // Once they choose, their choice wins until they change it.
     let hasExplicitChoice = false;
     try {
-      hasExplicitChoice = Boolean(localStorage.getItem('lexx.theme'));
+      hasExplicitChoice = Boolean(localStorage.getItem('nyayyalya.theme'));
     } catch {
       /* private mode: treat as no explicit choice */
     }

@@ -1,170 +1,174 @@
+@import 'lenis/dist/lenis.css';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 /**
- * Design tokens.
+ * Design tokens — Starbucks-inspired green palette.
  *
  * ## What this palette is for
  *
- * People use this product for a whole shift, and it is shown to judges on a projector.
- * So the base is deliberately QUIET: cool slate neutrals, hairline borders, one deep
- * blue accent for anything interactive, and semantic colour reserved for meaning:
- * a review priority, a forensic opinion, an integrity result, a refusal.
+ * A four-tier green system: Starbucks Green (#006241) anchors dark bands and headings,
+ * Green Accent (#00754A) drives CTAs and interactive elements, House Green (#1E3932)
+ * backs the dark theme, and a warm cream (#f2f0eb) provides the light canvas. Semantic
+ * colour is reserved for the four things that carry meaning — a review priority, a
+ * forensic opinion, an integrity result, a refusal.
  *
- * ## Roles
- *
- *   background / foreground      the page
- *   card                         a surface on the page (panels, dialogs, popovers)
- *   muted / muted-foreground     quiet fills and secondary text (meta, labels)
- *   primary                      the single accent: primary buttons, selection, links
- *   border / input / ring        hairlines, form borders, focus
- *   ok   (alias success)         a check passed, AUTHENTIC
- *   warn (alias warning)         needs a person
- *   bad  (alias danger)          a failure, MANIPULATED, a refusal
- *   info                         a neutral fact worth noticing
- *   each semantic colour has     -muted (tinted fill) and -foreground (text on solid)
- *
- * ## Rules a component can rely on
+ * ## The rules a component can rely on
  *
  *   - Colour is never the only carrier of meaning. Every tone has a label beside it.
- *   - Borders are 1px hairlines. Depth is at most a very soft shadow.
- *   - No gradients, glows, beams or animated decoration on working screens.
- *   - Semantic text on its own -muted tint meets WCAG AA in both themes.
- *   - Every colour is an HSL triple here; the theme swap is one class on the root.
+ *   - Borders are hairlines. Depth comes from a very low-alpha shadow, not a box.
+ *   - Nothing on a working screen animates unless it is reporting progress.
+ *   - Every colour is an HSL triple here; no component hard-codes one, so the theme
+ *     swap is one class on <html>.
  */
 @layer base {
   :root {
-    --background: 210 20% 98%;
-    --foreground: 222 40% 12%;
+    /* Warm cream canvas — Starbucks neutral-warm (#f2f0eb). White cards float on it,
+       and the green accent reads as deliberate against this warmth. */
+    --background: 40 24% 93%;
+    --foreground: 225 25% 14%;
 
     --card: 0 0% 100%;
-    --card-foreground: 222 40% 12%;
+    --card-foreground: 225 25% 14%;
 
     --popover: 0 0% 100%;
-    --popover-foreground: 222 40% 12%;
+    --popover-foreground: 225 25% 14%;
 
-    /* Deep institutional blue. */
-    --primary: 222 62% 36%;
-    --primary-foreground: 210 40% 98%;
+    --primary: 155 100% 23%;
+    --primary-foreground: 0 0% 100%;
 
-    --secondary: 214 22% 94%;
-    --secondary-foreground: 222 35% 18%;
+    --secondary: 40 14% 93%;
+    --secondary-foreground: 225 22% 22%;
 
-    --muted: 214 24% 95.5%;
-    --muted-foreground: 217 13% 40%;
+    --muted: 40 14% 94%;
+    --muted-foreground: 0 0% 42%;
 
-    --accent: 214 24% 94%;
-    --accent-foreground: 222 35% 18%;
+    --accent: 40 14% 93%;
+    --accent-foreground: 225 22% 22%;
 
-    --destructive: 356 66% 44%;
+    --destructive: 6 82% 43%;
     --destructive-foreground: 0 0% 100%;
 
-    --border: 216 20% 89%;
-    --input: 216 17% 83%;
-    --ring: 222 70% 48%;
+    --border: 38 12% 88%;
+    --input: 38 12% 86%;
+    --ring: 155 100% 23%;
 
-    /* Legacy accent ends. Both are the accent now, so nothing renders as a gradient. */
-    --accent-from: 222 62% 42%;
-    --accent-to: 222 50% 50%;
+    /* The green gradient. Starbucks Green to Green Accent. */
+    --accent-from: 161 100% 19%;
+    --accent-to: 155 100% 23%;
 
-    --ok: 155 62% 25%;
-    --ok-foreground: 0 0% 100%;
-    --ok-muted: 150 45% 94%;
+    /* ---- meaning, not decoration ------------------------------------------
+       ok    a check that passed, an opinion of AUTHENTIC
+       warn  something that needs a person
+       bad   a failure, an opinion of MANIPULATED, a refusal
+       info  a neutral fact worth noticing                                    */
+    --ok: 158 52% 28%;
+    --ok-foreground: 150 60% 97%;
+    --ok-muted: 158 38% 94%;
 
-    --warn: 30 82% 31%;
-    --warn-foreground: 0 0% 100%;
-    --warn-muted: 40 85% 93%;
+    --warn: 32 78% 38%;
+    --warn-foreground: 40 90% 98%;
+    --warn-muted: 36 72% 94%;
 
-    --bad: 356 66% 42%;
-    --bad-foreground: 0 0% 100%;
-    --bad-muted: 356 75% 96%;
+    --bad: 358 62% 45%;
+    --bad-foreground: 0 80% 98%;
+    --bad-muted: 358 62% 96%;
 
-    --info: 216 64% 38%;
-    --info-foreground: 0 0% 100%;
-    --info-muted: 214 70% 95.5%;
+    --info: 220 50% 42%;
+    --info-foreground: 220 60% 98%;
+    --info-muted: 220 50% 95%;
 
-    /* Review priority. One ramp, four stops, in order of urgency. */
-    --p-critical: 356 66% 42%;
-    --p-critical-muted: 356 75% 96%;
-    --p-high: 24 80% 36%;
-    --p-high-muted: 30 85% 94%;
-    --p-medium: 216 60% 40%;
-    --p-medium-muted: 214 70% 95.5%;
-    --p-low: 217 10% 42%;
-    --p-low-muted: 214 20% 94%;
+    /* Review priority. Four bands, and they must be distinguishable at a glance AND
+       in order — so they run one way round the wheel (red → amber → blue → grey)
+       rather than being four unrelated colours. CRITICAL borrows `bad` on purpose:
+       it is the only band that means "before anything else". */
+    --p-critical: 358 62% 45%;
+    --p-critical-muted: 358 62% 96%;
+    --p-high: 24 76% 42%;
+    --p-high-muted: 28 74% 95%;
+    --p-medium: 220 45% 44%;
+    --p-medium-muted: 220 45% 95%;
+    --p-low: 225 6% 48%;
+    --p-low-muted: 40 12% 94%;
 
-    /* rounded-lg = 10px, rounded-md = 8px (controls), rounded-sm = 6px.
-       Surfaces use rounded-xl (12px); pills use rounded-full. */
-    --radius: 0.625rem;
+    --radius: 0.75rem;
 
-    --shadow-1: 0 1px 2px hsl(222 40% 12% / 0.04);
-    --shadow-2: 0 1px 2px hsl(222 40% 12% / 0.04), 0 4px 12px -4px hsl(222 40% 12% / 0.08);
-    --shadow-3: 0 2px 4px hsl(222 40% 12% / 0.04), 0 16px 40px -12px hsl(222 40% 12% / 0.18);
-    --glow: 0 0 0 1px hsl(var(--ring) / 0.35);
+    /* Starbucks card shadows — material-inspired, low-drama. */
+    --shadow-1: 0 0 0.5px rgba(0,0,0,0.14), 0 1px 1px rgba(0,0,0,0.24);
+    --shadow-2: 0 1px 3px rgba(0,0,0,0.1), 0 2px 2px rgba(0,0,0,0.06), 0 0 2px rgba(0,0,0,0.07);
+    --shadow-3: 0 2px 4px rgba(0,0,0,0.08), 0 8px 12px rgba(0,0,0,0.14);
+    --glow: 0 0 0 1px hsl(var(--ring) / 0.22), 0 6px 20px -8px hsl(var(--ring) / 0.25);
   }
 
   .dark {
-    --background: 222 22% 8%;
-    --foreground: 214 25% 92%;
+    /* Deeper House Green — almost charcoal with a green soul. The extra depth gives
+       cards real lift and makes the green accent feel deliberate, not overwhelming. */
+    --background: 170 18% 10%;
+    --foreground: 40 10% 94%;
 
-    --card: 222 20% 11%;
-    --card-foreground: 214 25% 92%;
+    /* Cards are warmer and clearly separated from the deep background. */
+    --card: 168 10% 16%;
+    --card-foreground: 40 8% 92%;
 
-    --popover: 222 20% 12%;
-    --popover-foreground: 214 25% 92%;
+    --popover: 168 12% 17%;
+    --popover-foreground: 40 8% 92%;
 
-    --primary: 217 88% 70%;
-    --primary-foreground: 222 45% 10%;
+    /* The green accent pops against the darker, less-saturated surfaces. */
+    --primary: 155 72% 48%;
+    --primary-foreground: 170 28% 8%;
 
-    --secondary: 220 16% 17%;
-    --secondary-foreground: 214 25% 92%;
+    /* Utility surfaces are desaturated — breaks the green monotony. */
+    --secondary: 174 6% 19%;
+    --secondary-foreground: 40 6% 90%;
 
-    --muted: 220 16% 15%;
-    --muted-foreground: 216 12% 66%;
+    --muted: 174 5% 13%;
+    --muted-foreground: 38 6% 58%;
 
-    --accent: 220 16% 17%;
-    --accent-foreground: 214 25% 92%;
+    --accent: 174 6% 19%;
+    --accent-foreground: 40 6% 90%;
 
-    --destructive: 356 70% 60%;
-    --destructive-foreground: 0 0% 100%;
+    --destructive: 6 70% 55%;
+    --destructive-foreground: 0 80% 98%;
 
-    --border: 220 14% 19%;
-    --input: 220 13% 25%;
-    --ring: 217 88% 65%;
+    --border: 170 6% 20%;
+    --input: 170 6% 22%;
+    --ring: 155 68% 42%;
 
-    --accent-from: 217 88% 70%;
-    --accent-to: 217 70% 64%;
+    --accent-from: 161 85% 28%;
+    --accent-to: 155 85% 33%;
 
-    --ok: 152 50% 58%;
-    --ok-foreground: 155 60% 8%;
-    --ok-muted: 155 35% 13%;
+    --ok: 158 48% 52%;
+    --ok-foreground: 158 60% 8%;
+    --ok-muted: 160 26% 14%;
 
-    --warn: 38 88% 62%;
+    --warn: 34 80% 58%;
     --warn-foreground: 32 90% 8%;
-    --warn-muted: 34 45% 13%;
+    --warn-muted: 34 30% 14%;
 
-    --bad: 356 85% 70%;
-    --bad-foreground: 356 60% 8%;
-    --bad-muted: 356 40% 15%;
+    --bad: 358 70% 63%;
+    --bad-foreground: 0 80% 8%;
+    --bad-muted: 358 30% 15%;
 
-    --info: 214 90% 72%;
-    --info-foreground: 222 60% 8%;
-    --info-muted: 218 40% 16%;
+    --info: 220 70% 68%;
+    --info-foreground: 220 60% 8%;
+    --info-muted: 220 30% 16%;
 
-    --p-critical: 356 85% 70%;
-    --p-critical-muted: 356 40% 15%;
-    --p-high: 30 88% 62%;
-    --p-high-muted: 30 45% 13%;
-    --p-medium: 214 90% 72%;
-    --p-medium-muted: 218 40% 16%;
-    --p-low: 216 12% 64%;
-    --p-low-muted: 220 14% 17%;
+    --p-critical: 358 70% 63%;
+    --p-critical-muted: 358 30% 15%;
+    --p-high: 30 82% 60%;
+    --p-high-muted: 30 30% 14%;
+    --p-medium: 218 72% 68%;
+    --p-medium-muted: 218 28% 16%;
+    --p-low: 220 10% 60%;
+    --p-low-muted: 220 10% 16%;
 
-    --shadow-1: 0 1px 2px hsl(0 0% 0% / 0.3);
-    --shadow-2: 0 1px 2px hsl(0 0% 0% / 0.3), 0 6px 16px -8px hsl(0 0% 0% / 0.5);
-    --shadow-3: 0 2px 4px hsl(0 0% 0% / 0.3), 0 16px 40px -12px hsl(0 0% 0% / 0.6);
-    --glow: 0 0 0 1px hsl(var(--ring) / 0.45);
+    /* Top-edge highlights are slightly more visible on the deeper background. */
+    --shadow-1: inset 0 1px 0 hsl(40 20% 100% / 0.04), 0 1px 3px hsl(0 0% 0% / 0.4);
+    --shadow-2: inset 0 1px 0 hsl(40 20% 100% / 0.06), 0 6px 16px -8px hsl(0 0% 0% / 0.55);
+    --shadow-3: inset 0 1px 0 hsl(40 20% 100% / 0.07), 0 16px 32px -16px hsl(0 0% 0% / 0.65);
+    --glow: 0 0 0 1px hsl(var(--ring) / 0.25), 0 6px 24px -8px hsl(var(--ring) / 0.25);
   }
 }
 
@@ -184,25 +188,17 @@
 
   body {
     @apply bg-background text-foreground;
-    font-size: 0.9375rem; /* 15px reading size */
-    line-height: 1.55;
-    /* Tabular numerals: dates, counts and codes line up in columns. */
-    font-feature-settings: 'cv11', 'tnum';
+    /* Tabular numerals everywhere: figures in a column have to line up, and a count
+       that reflows as it changes is a count nobody trusts. */
+    font-feature-settings: 'cv11', 'ss01', 'tnum';
     font-variation-settings: 'opsz' 32;
+    letter-spacing: -0.01em;
   }
 
   h1,
   h2,
-  h3,
-  h4 {
-    letter-spacing: -0.012em;
-  }
-
-  code,
-  kbd,
-  samp,
-  .font-mono {
-    font-variant-numeric: tabular-nums slashed-zero;
+  h3 {
+    letter-spacing: -0.01em;
   }
 
   ::selection {
@@ -214,7 +210,7 @@
     @apply font-mono text-hash break-all select-all text-muted-foreground;
   }
 
-  /* A focus ring visible on every surface, and only for keyboard users. */
+  /* A focus ring that is visible on every surface, and only for keyboard users. */
   :focus-visible {
     outline: 2px solid hsl(var(--ring));
     outline-offset: 2px;
@@ -233,63 +229,65 @@
 }
 
 @layer components {
-  /** The one content width, shared by the app header and every page (max 1280px). */
-  .page-container {
-    @apply mx-auto w-full max-w-[1280px] px-4 sm:px-6 lg:px-8;
-  }
-
-  /** A surface. Hairline border, a shadow you feel rather than see. No hover lift. */
+  /**
+   * A panel. Hairline border, a shadow you feel rather than see.
+   *
+   * There is no hover lift any more. A card that moves when the pointer crosses it is
+   * telling the reader it is clickable, and most of these are not — on a dense screen
+   * that reads as the whole page twitching.
+   */
   .surface {
     @apply rounded-xl border bg-card text-card-foreground;
     box-shadow: var(--shadow-1);
   }
 
-  /* Retained so older markup keeps compiling; there is no lift any more. */
-  .surface-lift {
-    transform: none;
-  }
-
-  /** A surface that IS clickable. */
+  /** A surface that IS clickable. Reserved for rows and cards that open something. */
   .surface-interactive {
     @apply cursor-pointer transition-colors duration-150;
   }
   .surface-interactive:hover {
-    background-color: hsl(var(--muted) / 0.6);
+    background-color: hsl(var(--muted) / 0.55);
   }
 
-  /* Chrome that sits over content. Near-opaque; the blur is barely perceptible. */
+  /* Frosted. For chrome that floats over content: the header, a sticky toolbar. */
   .surface-glass {
-    background: hsl(var(--card) / 0.92);
-    backdrop-filter: saturate(140%) blur(8px);
-    -webkit-backdrop-filter: saturate(140%) blur(8px);
+    background: hsl(var(--background) / 0.82);
+    backdrop-filter: saturate(140%) blur(12px);
+    -webkit-backdrop-filter: saturate(140%) blur(12px);
   }
 
-  /* Formerly gradient text. Now simply the accent colour. */
+  /* The accent gradient, as text. The hero headline, and nothing else. */
   .text-gradient {
-    color: hsl(var(--primary));
+    background: linear-gradient(100deg, hsl(var(--accent-from)), hsl(var(--accent-to)));
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
   }
 
-  /* Formerly a gradient hairline. Now a plain surface border. */
+  /* The accent gradient, as a 1px hairline (border-box trick keeps it crisp). */
   .border-gradient {
     position: relative;
-    background-color: hsl(var(--card));
-    border: 1px solid hsl(var(--border));
+    background:
+      linear-gradient(hsl(var(--card)), hsl(var(--card))) padding-box,
+      linear-gradient(120deg, hsl(var(--accent-from) / 0.6), hsl(var(--accent-to) / 0.6)) border-box;
+    border: 1px solid transparent;
   }
 
-  /* Emphasis for the one thing on screen that matters right now: a quiet ring. */
+  /* Emphasis ring for the one thing on screen that matters most right now. */
   .glow {
     box-shadow: var(--glow);
   }
 
-  /** A selected row: faint accent tint and a 2px leading bar. Does not move the row. */
+  /**
+   * The marker on a selected row. A 3px bar on the leading edge — it survives both
+   * themes, needs no colour to be understood, and does not move the row.
+   */
   .row-selected {
-    box-shadow: inset 2px 0 0 0 hsl(var(--primary));
-    background-color: hsl(var(--primary) / 0.06);
-  }
-  .dark .row-selected {
-    background-color: hsl(var(--primary) / 0.1);
+    box-shadow: inset 3px 0 0 0 hsl(var(--ring));
+    background-color: hsl(var(--muted) / 0.6);
   }
 
+  /* Fades a pattern out towards the edges so it never competes with content. */
   .mask-radial {
     -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 30%, black 20%, transparent 75%);
     mask-image: radial-gradient(ellipse 70% 60% at 50% 30%, black 20%, transparent 75%);
@@ -298,12 +296,21 @@
     -webkit-mask-image: linear-gradient(to bottom, black 55%, transparent 100%);
     mask-image: linear-gradient(to bottom, black 55%, transparent 100%);
   }
+
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation: none;
+    mix-blend-mode: normal;
+  }
 }
 
 @layer utilities {
-  /* Elements a reveal animation will bring in start invisible. The reveal removes it. */
+  /* Elements a reveal animation will bring in start invisible, so there is no flash
+     of finished layout before the timeline runs. The reveal removes the class. */
   .will-reveal {
     opacity: 0;
+    transform: translateY(40px) scale(0.97);
+    will-change: opacity, transform;
   }
 
   .text-balance {
@@ -318,8 +325,9 @@
     font-variant-numeric: tabular-nums;
   }
 
-  /* A small label above a value or a group. Quiet, uppercase, 12px. */
+  /* A label above a value: small, uppercase, quiet. Used on every detail panel, so it
+     is one utility rather than five slightly different class lists. */
   .label-xs {
-    @apply text-xs font-medium uppercase tracking-[0.05em] text-muted-foreground;
+    @apply text-[11px] font-medium uppercase tracking-wider text-muted-foreground;
   }
 }

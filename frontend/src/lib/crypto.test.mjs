@@ -38,7 +38,7 @@ const check = async (name, fn) => {
   }
 };
 
-console.log('LEXX browser crypto <-> server verifier round trip\n');
+console.log('Nyayyalya browser crypto <-> server verifier round trip\n');
 
 // ---- the exact browser code path -------------------------------------------
 const keyPair = await generateKeyPair();
