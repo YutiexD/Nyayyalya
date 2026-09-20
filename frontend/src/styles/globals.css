@@ -331,3 +331,53 @@
     @apply text-[11px] font-medium uppercase tracking-wider text-muted-foreground;
   }
 }
+
+/* ── Responsive layout helpers ─────────────────────────────────────────────── */
+@layer base {
+  /* Fluid hero text: shrinks gracefully on narrow viewports */
+  .text-display-responsive {
+    font-size: clamp(2rem, 6vw, 4.75rem);
+    line-height: 1.02;
+    letter-spacing: -0.035em;
+    font-weight: 600;
+  }
+
+  /* Fluid section headings */
+  .text-heading-responsive {
+    font-size: clamp(1.5rem, 3vw, 2.25rem);
+    line-height: 1.2;
+    letter-spacing: -0.02em;
+    font-weight: 600;
+  }
+
+  /* Touch-friendly tap targets: minimum 44×44px */
+  button, a, [role="button"] {
+    min-height: 0; /* don't force height; let padding do the work */
+  }
+
+  /* Safe-area insets for notched/punched phones */
+  .safe-bottom {
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+}
+
+/* ── Viewport-aware container overrides ──────────────────────────────────── */
+@media (max-width: 640px) {
+  .container {
+    padding-left: 1rem;
+    padding-right: 1rem;
+  }
+
+  /* Landing hero: tighten vertical rhythm on small screens */
+  .hero-section {
+    padding-top: 5rem;
+    padding-bottom: 3rem;
+  }
+}
+
+@media (min-width: 641px) and (max-width: 1024px) {
+  .container {
+    padding-left: 1.5rem;
+    padding-right: 1.5rem;
+  }
+}

@@ -85,7 +85,7 @@ export default function LandingPage() {
       {/* --------------------------------------------------------------- hero */}
       <section className="-mt-20 relative overflow-hidden">
         <Backdrop />
-        <div className="container relative flex flex-col items-center pb-28 pt-32 text-center sm:pb-36 sm:pt-36">
+        <div className="container relative flex flex-col items-center pb-20 pt-16 text-center sm:pb-28 sm:pt-20">
           <Eyebrow>Digital evidence register · Indian criminal justice chain</Eyebrow>
 
           <h1 className="mt-6 max-w-4xl text-balance text-display-sm sm:text-display lg:text-display-lg">

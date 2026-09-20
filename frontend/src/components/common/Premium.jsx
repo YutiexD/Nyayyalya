@@ -55,6 +55,8 @@ export function Backdrop({ className, dots = true, pools = true }) {
           <div className="absolute -bottom-40 right-[-10%] h-[22rem] w-[32rem] rounded-full bg-accent-to/10 blur-3xl dark:bg-accent-to/10" />
         </>
       )}
+      {/* Fade the top so the navbar-to-hero transition is seamless on all pages */}
+      <div className="absolute inset-x-0 top-0 z-10 h-14 bg-gradient-to-b from-background to-transparent" />
     </div>
   );
 }

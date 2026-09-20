@@ -904,7 +904,7 @@ export default function VerifyPage() {
           the page is for before a single form appears. */}
       <section className="relative overflow-hidden">
         <Backdrop />
-        <div className="container relative flex flex-col items-center py-16 text-center sm:py-20">
+        <div className="container relative flex flex-col items-center pt-4 pb-14 text-center sm:pt-6 sm:pb-16">
           <div className="will-reveal">
             <Eyebrow>Public · no account, no session, no request for your identity</Eyebrow>
           </div>

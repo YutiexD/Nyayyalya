@@ -232,7 +232,8 @@ export function AppLayout() {
           <NavBody>
             {/* 1 — Brand mark + Nyayyalya */}
             <Link
-              to={home ?? '/'}
+              to="/"
+              onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
               className="relative z-20 flex items-center gap-2 rounded-full py-1 pl-1.5 pr-3 transition-colors hover:bg-secondary/60"
             >
               <BrandMark size="sm" />
@@ -302,7 +303,11 @@ export function AppLayout() {
           {/* Mobile */}
           <MobileNav>
             <MobileNavHeader>
-              <Link to="/" className="flex items-center gap-2">
+              <Link
+                to="/"
+                onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+                className="flex items-center gap-2"
+              >
                 <BrandMark size="sm" />
                 <span className="text-sm font-semibold tracking-[-0.01em]">Nyayyalya</span>
               </Link>
